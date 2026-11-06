@@ -139,3 +139,11 @@ node scripts/render-preview.mjs preview.html
 - 不写本机运行版本、后台任务、与当前条目无关的修复或发布计划。
 - 客户不是 owner：不把 owner 本机状态写成客户状态，不替客户做决定，不承诺未发布版本。
 - 编辑评论不撤回已发邮件；旧内容可能已被看到。发之前自检：「这条只属于当前 issue/PR 吗？」
+
+发之前必须跑本地门禁，PASS 才允许发：
+
+```sh
+npm run lint:reply -- --body-file draft.md --current <issue/PR 编号>
+```
+
+FAIL 先改正文，不要用「发完再编辑」绕过。
