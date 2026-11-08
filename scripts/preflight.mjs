@@ -160,8 +160,19 @@ if (!FAST) {
   } else {
     const res = tryRun('node', ['scripts/sync-profile.mjs', '--check'])
     const out = String(res.stdout || '')
-    const line = (out.match(/缺失 \d+ \/ 断链 \d+ \/ 陈旧 \d+/) || ['(无输出)'])[0]
-    record('profile 一致性 --check', res.status === 0, line)
+    // 第四段「门禁子包漂移」必须解析：只认前三段时（S1 之前），子包内容不一致会被静默丢掉 ——
+    // 「缺失 0 / 断链 0 / 陈旧 0」看着全绿，实际 profile 里跑的是旧门禁。这正是 0.10.8 假绿的形状。
+    // 没有漂移时不加这一段：正常状态只该看到三个数（别给全绿加噪音）。
+    const four = out.match(/缺失 (\d+) \/ 断链 (\d+) \/ 陈旧 (\d+) \/ 门禁子包漂移 (\d+)/)
+    const gateDrift = four ? Number(four[4]) : 0
+    const drifted = four ? Number(four[1]) + Number(four[2]) + Number(four[3]) + gateDrift : 0
+    const changed = gateDrift > 0 ? (out.match(/内容与 packages\/dsh-gate 不一致：([^；\n]+)/) || [])[1] : null
+    const detail = four
+      ? `缺失 ${four[1]} / 断链 ${four[2]} / 陈旧 ${four[3]}`
+        + (gateDrift > 0 ? ` / 门禁子包漂移 ${four[4]}` + (changed ? `（${changed}）` : '') : '')
+        + (drifted > 0 ? '，跑 node scripts/sync-profile.mjs --repair' : '')
+      : (out.match(/缺失 \d+ \/ 断链 \d+ \/ 陈旧 \d+/) || ['(无输出)'])[0]
+    record('profile 一致性 --check', res.status === 0, detail)
   }
 }
 

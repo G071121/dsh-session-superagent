@@ -62,6 +62,25 @@ if (!result.ok) return
 `extends` 循环、目标不存在、嵌套超过 8 层：**记录到 `errors`，按本层规则继续**（fail-open）。
 一个坏配置文件不应该让整个门禁不可用。
 
+**写盘侧是 fail closed 的**：`writeGateConfig()`（以及面板的 `POST /gates`）是**整层重写**，
+只写 `version` / `name` / `extends` / `rules` / `semantic`（`extends` 只保留 `false` / `"none"`），
+不会解析也不会重放基文件。所以：
+
+| 写盘时的 `extends` | 行为 |
+|---|---|
+| 不写，文件里也没有 | 正常整层重写 |
+| `false` / `"none"`（入参或文件里已有） | 允许，原样写回 —— 写回后仍是「替换」语义 |
+| 入参是 `true` / `"default"` / 路径 / 内联对象 | 报错，错误里点名**配置路径**与解决方式 |
+| 文件里已有上面这些共享形式 | 同样报错：整层重写会把共享基和它带来的规则一起冲掉 |
+
+错误码 `extends_not_preservable`，`error.path` 是那份配置的绝对路径。想改写这种层，
+要么直接手工编辑文件，要么先把基规则合并进本层规则、删掉 `extends` 后再从面板保存。
+坏 JSON 的层例外：原文会先写进 `.bak`，再写入新配置（可恢复，不算静默丢失）。
+`validateConfig()` 会原样保留 `extends`（只做形状校验），写不写由 `writeGateConfig()` 按路径判定 ——
+否则「面板 → POST /gates → 写盘」这条链上就没人知道调用方传过 `extends` 了。
+
+`--config` 传入的配置**不做 `extends` 解析**（调试 / CI 用，只按该文件本层规则跑）。
+
 ### 语义复审只能由用户层打开
 
 项目层 / 本地层**只能关闭**语义复审：
@@ -136,9 +155,9 @@ if (!result.ok) return
 | `mergeConfig(base, override)` | `config` | 同 id 覆盖、不同 id 追加 |
 | `normalizeConfig(input)` | `config` | 非法规则静默丢弃（写盘前请用 `validateConfig`）；保留规则的 `enabled` |
 | `lintText(text, config, options?)` | `{ ok, hits }` | `options.trigger` / `options.current`；跳过 `enabled: false` 的规则 |
-| `validateConfig(input)` | `{ ok: true, config }` 或 `{ ok: false, error }` | 写盘 / 面板保存前校验；`enabled` 必须是布尔、复启必须写完整规则 |
+| `validateConfig(input)` | `{ ok: true, config }` 或 `{ ok: false, error }` | 写盘 / 面板保存前校验；`enabled` 必须是布尔、复启必须写完整规则；`extends` 只校验形状并原样带回 |
 | `readGateScope(scope, options?)` | `{ path, config, error? }` | `scope` = `default` / `user` / `project` / `local` |
-| `writeGateConfig(scope, config, options?)` | `{ path, config }` | 只允许 `user` / `project` / `local`；先 `.bak` 再原子替换 |
+| `writeGateConfig(scope, config, options?)` | `{ path, config }` | 只允许 `user` / `project` / `local`；先 `.bak` 再原子替换；共享 `extends` 抛错（`code: 'extends_not_preservable'`） |
 | `userGatePath` / `projectGatePath` / `localGatePath` | `string` | 路径派生 |
 | `DEFAULT_GATE_PATH` / `TRIGGERS` / `RULE_TYPES` | 常量 | 默认规则路径与枚举 |
 
@@ -246,6 +265,8 @@ printf '正文' | node bin/gate.mjs --trigger pr.reply --body-file - --current 1
 - **先脱敏再出网**：`redact()` 覆盖 GitHub / GitLab / Slack / Stripe / npm / AWS / Google /
   JWT / PEM / URL 密码 / 查询参数 / Gitee 令牌等形状。
 - **写盘可回滚**：`writeGateConfig` 先写 `.bak`，临时文件 `0o600`，`rename` 原子替换。
+- **写盘不丢 `extends`**：整层重写只写 `version/name/rules/semantic`；`false` / `"none"` 原样保留，
+  共享形式（`true` / `"default"` / 路径 / 对象）显式报错并点名配置路径 —— 宁可保存失败，也不悄悄冲掉共享规则。
 - **坏配置 fail-open（仅语义复审）**：语义层不可用时放行并给 warning；确定性规则仍逐条执行。
 
 ## 测试
@@ -255,7 +276,8 @@ cd packages/dsh-gate
 node --test
 ```
 
-覆盖：四层合并与同 id 覆盖、`extends`（替换 / 相对路径 / 循环）、脱敏 / 路径 / 无关引用、
+覆盖：四层合并与同 id 覆盖、`extends`（替换 / 相对路径 / 循环 / 写盘 fail closed：共享基拒绝、
+`false` / `"none"` 原样保留、读回仍是替换、坏 JSON 先进 `.bak`）、脱敏 / 路径 / 无关引用、
 规则类型与触发器过滤、规则启停（`enabled` 缺省 / 停用 / 后层复启 / 写盘往返 / 非法形状）、
 语义复审只 merge/release 与 fail-open、硬门禁失败不请求模型、CLI 的 PASS/FAIL 退出码、
 默认 JSON 可解析且 10 条规则都真的能命中。
@@ -267,6 +289,8 @@ node --test
 - 面板 UI（G3）与主插件路由（G2）不在本包范围。
 - 超大配置文件（数千条规则）的性能未压测。
 - `extends` 跨盘符 / UNC 路径未单独验证。
+- 两个进程同时写同一层配置（读 extends → `.bak` → rename 之间的 TOCTOU）未压测：本包没有文件锁，
+  只靠 `.bak` + 原子 `rename` 兜底。
 
 ## License
 

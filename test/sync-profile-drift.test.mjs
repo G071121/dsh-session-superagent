@@ -10,7 +10,7 @@ import assert from 'node:assert/strict'
 import test, { after } from 'node:test'
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { cpSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { cpSync, existsSync, linkSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -65,8 +65,8 @@ test('门禁子包 lib 变了、package.json 没变：--check 必须红（旧脚
   assert.notEqual(sha256(join(GATE_SRC, 'lib', 'index.js')), sha256(join(DEST, GATE_REL, 'lib', 'index.js')))
   const res = runSync('--check', '--dir', DEST)
   assert.equal(res.code, 1, '有漂移必须 exit 1：' + res.out)
-  // 陈旧 1 = 门禁子包漂移并入陈旧（preflight 只解析三段，见脚本注释）
-  assert.match(res.out, /缺失 0 \/ 断链 0 \/ 陈旧 1 \/ 门禁子包漂移 1/)
+  // 陈旧仍为 0：漂移只记在第四段（S1 撤掉了「并入陈旧」的垫片 —— preflight 已解析第四段）
+  assert.match(res.out, /缺失 0 \/ 断链 0 \/ 陈旧 0 \/ 门禁子包漂移 1/)
   assert.match(res.out, /内容与 packages\/dsh-gate 不一致：lib\/index\.js/)
 })
 
@@ -107,4 +107,62 @@ test('只改 gates/default.json 也必须报漂移（Q1R-M1：默认规则是运
   const repaired = runSync('--repair', '--dir', DEST)
   assert.equal(repaired.code, 0)
   assert.equal(sha256(join(GATE_SRC, 'gates', 'default.json')), sha256(defaultRule), '--repair 后默认规则要逐字节一致')
+})
+
+// ── TARGETS 防漏（S1）───────────────────────────────────────────────────────
+// 事故 1 的复发形态（2026-11-01）：新增 lib/body.js 没进 TARGETS → profile 缺文件 → 插件整体不挂载。
+// 更隐蔽的同款：装完自检 `bin/check.mjs`（T35）和宿主直接读的 `assets/icon-*.png` 一直没进 TARGETS，
+// 而 `--check` 照样打印「缺失 0 / 断链 0 / 陈旧 0」—— 改了不同步、不同步也不报，等于没有门禁。
+// 所以清单不能只靠人眼维护：下面从**发布契约**派生「必须在 TARGETS 里」的运行时文件，
+// 多一个漏加就红；同时反向守住「不把 test/ docs/ 塞进安装副本」。
+const walkFiles = (root, rel, out) => {
+  for (const name of readdirSync(join(root, rel))) {
+    const childRel = rel + '/' + name
+    if (statSync(join(root, childRel)).isDirectory()) { walkFiles(root, childRel, out); continue }
+    out.push(childRel)
+  }
+}
+
+/** 从 package.json 派生运行时文件：lib 递归 + 随包发布的非文档件 + exports / bin / cordis patch。 */
+function derivedRuntimeFiles() {
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  const out = new Set(['package.json'])
+  const addTree = (rel) => {
+    if (!existsSync(join(ROOT, rel))) return
+    if (!statSync(join(ROOT, rel)).isDirectory()) { out.add(rel); return }
+    const found = []
+    walkFiles(ROOT, rel, found)
+    for (const file of found) out.add(file)
+  }
+  // lib/ 递归：新增一个 .js 就算运行时文件，哪怕还没进 package.json.files（那是另一条门禁在管）
+  addTree('lib')
+  // 随包发布且不是文档的：新增的根级运行时文件（client.js / ui-*.js / bin / assets 之类）都会在这里出现。
+  // 故意**不**收 docs/ 和 *.md —— 文档不该同步进安装副本（任务书：不扩大打包范围）。
+  for (const entry of pkg.files || []) {
+    if (entry.startsWith('docs/') || entry.endsWith('.md')) continue
+    addTree(entry.replace(/\/$/, ''))
+  }
+  const bare = (target) => String(target).replace(/^\.\//, '')
+  for (const target of Object.values(pkg.exports || {})) if (typeof target === 'string') out.add(bare(target))
+  for (const target of Object.values(pkg.bin || {})) out.add(bare(target))
+  if (pkg.dsh && pkg.dsh.bundle && pkg.dsh.bundle.patch) out.add(bare(pkg.dsh.bundle.patch))
+  return [...out].sort()
+}
+
+test('TARGETS 必须覆盖全部运行时文件，且不把 test/ docs/ 塞进安装副本', () => {
+  const listed = new Set(scriptTargets())
+  const missing = derivedRuntimeFiles().filter((rel) => !listed.has(rel))
+  assert.deepEqual(missing, [],
+    '这些运行时文件没进 TARGETS：改了会同步不到 profile，而 --check 仍全零（新增运行时文件必须加清单）：' + missing.join(', '))
+
+  // 反向：清单里不许出现开发件 —— 否则 profile 会多出测试和文档（也不该靠递归目录把它带进来）
+  const dev = scriptTargets().filter((rel) => /^(test|docs|scripts|packages)\//.test(rel))
+  assert.deepEqual(dev, [], 'TARGETS 不该包含开发件（test/ docs/ scripts/ packages/）：' + dev.join(', '))
+
+  // 只有随包发布的文件才可能出现在 profile 里：清单里写了没发布的东西，npm 安装出来的副本照样缺
+  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+  const published = pkg.files || []
+  const notPublished = scriptTargets().filter((rel) => rel !== 'package.json'
+    && !published.some((entry) => entry.endsWith('/') ? rel.startsWith(entry) : entry === rel))
+  assert.deepEqual(notPublished, [], '这些文件没随包发布，npm 装出来的 profile 会没有它们：' + notPublished.join(', '))
 })

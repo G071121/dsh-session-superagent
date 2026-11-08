@@ -2,6 +2,32 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.10.9] - 2026-11-08 —— 门禁 v3（配置边界收尾 + 发布口径）
+
+- 门禁子包 `@mycf711/dsh-gate` `0.1.1` → `0.1.2`：`writeGateConfig` 整层重写对 `extends` **fail closed** ——
+  入参为 `true` / `'default'` / 路径 / 内联对象 / 非法形状时显式报错（`code=extends_not_preservable`，
+  错误点名配置绝对路径与解决方式），盘上已有共享 `extends` 时同样拒绝且文件字节不变、不产生 `.bak`/`.tmp`；
+  `extends:false` / `'none'` 原样写回（读回仍是「替换」语义），入参没写时保留盘上值。
+  `validateConfig` 只做形状校验并把 `extends` 原样带回 `config`，保证 `POST /gates` 链上
+  `writeGateConfig` 看得见调用方传过的值（此前面板保存会静默丢 `extends` 与它共享的规则）。
+- 设置页门禁面板：用户层 `semantic:false` 时开关 / 底部「当前关闭」/ 预览 `semantic:false` 三处一致，
+  打开开关会清掉 `off`、保存能真的写掉字面量 `false`；`extends:false` / `'none'` 可保存并原样写回，
+  共享形式（字符串 / 对象 / `true`）拒绝保存并点名形态 + 配置路径 + 下一步；有未保存草稿时切作用域 /
+  切仓库改为确认条 ——「取消」保留草稿、「放弃草稿并切换」才清草稿并切换，写盘 / 预览 / optimize
+  改用 `GET /gates` 回显的 `repo`（避免把旧配置写到刚切的仓库），草稿变干净后补一次重读。
+  `GateSettings` 12 个 `useState`（末尾追加 `pendingSwitch`），主面板仍 23 槽。
+- 发布口径：`preflight` 的 profile 行解析第四段「门禁子包漂移」，没有漂移时不加这一段；
+  `sync-profile` 撤掉「漂移并入陈旧」的垫片（不再假报「陈旧 1」）；`TARGETS` 补
+  `bin/check.mjs`、`assets/icon-180.png`、`assets/icon-app.png`（真实漏同步，且原先 `--check`
+  全零假绿），新增派生守卫用例：从发布契约派生运行时清单，漏加即红并点名，反向禁
+  `test/` `docs/` `scripts/` `packages/`，且不扩大打包范围。
+- 验证：根 `npm test` **890/890**、gate 包 **143/143**、`test/client.test.mjs` **148/148**、
+  `test/update-ui.test.mjs` **53/53**、`PANEL_STRICT=1` 门禁用例 **26/26**、UI 审计 **11/11（100 分）**、
+  `preflight` 全量 42 项（40 PASS / 2 SKIP）、真实 Chromium **47 PASS / 0 FAIL**（截图通道不可用 14 SKIP）。
+- 边界：并发写同一层仍无文件锁（TOCTOU 已确定性复现，low）；Windows 上目标文件被其它进程持有
+  打开句柄时 `rename` 会 `EPERM`（既有行为，失败显式、原文件不坏）；`sync-profile --repair` 只保证
+  profile **磁盘副本**与仓库一致，宿主运行时是否生效要在重载后另验。
+
 ## [0.10.8] - 2026-11-08 —— 门禁 v2（规则真实启停 + 发送前 CLI + 面板 + 发布基线）
 
 - 门禁子包 `@mycf711/dsh-gate` `0.1.0` → `0.1.1`：规则级真实启停（缺省 `enabled:true`、`false` 真停用、

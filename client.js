@@ -422,7 +422,7 @@ window.__ModuleLoader__.load({
     }
 
     // 客户端版本探针：每次模块加载写一次，用来确认浏览器里跑的是哪一版
-    const CLIENT_VERSION = '0.10.8'
+    const CLIENT_VERSION = '0.10.9'
     // SEMVER_COMPARATOR_SOURCE_START
     // This block is duplicated verbatim in client.js because the browser UMD cannot import ESM.
     // test/update-semver.test.mjs audits both copies and exercises their behavior.
@@ -2260,17 +2260,22 @@ window.__ModuleLoader__.load({
       return rules.some((rule) => rule && rule.id === ruleId)
     })
 
-    /** 某一层的语义复审配置：本层写过就用本层的，没写就继承生效值。 */
+    /**
+     * 某一层的语义复审配置：本层写过就用本层的，没写就继承生效值。
+     * 本层写 `semantic:false`（或 `{enabled:false}`）就是「这一层关了」：`enabled` 必须跟着是 false。
+     * 开关、底部状态、预览三处都读 `enabled`，拿继承来的 true 会渲染出「开关亮着 + 底部说关闭」。
+     */
     const gateSemanticOf = (data, scope) => {
       const inherited = (data && data.config && data.config.semantic) || {}
       const layer = data && data.scopes && data.scopes[scope] ? data.scopes[scope].config : null
       const own = layer ? layer.semantic : undefined
       const fields = own && typeof own === 'object' ? own : {}
+      const off = own === false || Boolean(own && typeof own === 'object' && own.enabled === false)
       return {
-        enabled: typeof fields.enabled === 'boolean' ? fields.enabled : inherited.enabled === true,
+        enabled: off ? false : (typeof fields.enabled === 'boolean' ? fields.enabled : inherited.enabled === true),
         model: typeof fields.model === 'string' && fields.model ? fields.model : (inherited.model || ''),
         prompt: typeof fields.prompt === 'string' && fields.prompt ? fields.prompt : (inherited.prompt || ''),
-        off: own === false || Boolean(own && typeof own === 'object' && own.enabled === false),
+        off,
       }
     }
 
@@ -2310,7 +2315,9 @@ window.__ModuleLoader__.load({
      * - 只有和「四层合并结果」不同的规则才新建；
      * - 关掉写 `enabled:false`（完整规则），打开写 `enabled:true`（完整规则）；
      * - 本层原有的 `semantic`（对象或 `false`）没改就原样写回 —— 否则一次只改规则的保存
-     *   会顺手把「语义复审开/关」删掉，改变模型调用边界（Q1-F2）。
+     *   会顺手把「语义复审开/关」删掉，改变模型调用边界（Q1-F2）；
+     * - 本层原有的 `extends:false / 'none'` 也原样写回 —— 这两个是「不再继承上层」的合法写法，
+     *   整层重写时丢掉它，replace 就会变回 merge（上层规则重新混进来）。
      */
     const gateConfigOf = (scope, draft, data) => {
       const derived = gateDraftOf(data, scope)
@@ -2332,6 +2339,8 @@ window.__ModuleLoader__.load({
         name: scope === 'user' ? 'user' : 'project',
         rules: [...rules.values()],
       }
+      const rawExtends = layer && Object.prototype.hasOwnProperty.call(layer, 'extends') ? layer.extends : undefined
+      if (rawExtends === false || rawExtends === 'none') config.extends = rawExtends
       const base = gateSemanticOf(data, scope)
       const semantic = draft.semantic
       const rawSemantic = layer && Object.prototype.hasOwnProperty.call(layer, 'semantic') ? layer.semantic : undefined
@@ -2368,8 +2377,19 @@ window.__ModuleLoader__.load({
       return list
     }
 
+    /** `extends` 的可读形态：只用于「为什么不能从面板保存」的说明（false / 'none' 不算共享）。 */
+    const gateExtendsText = (value) => {
+      if (typeof value === 'string') return 'extends:' + value
+      if (value === true) return 'extends:true'
+      if (value && typeof value === 'object') return 'extends 内联对象'
+      return 'extends:' + String(value)
+    }
+
+    /** `extends:false / 'none'` 的面板文案：这两个值是「不再继承上层」，不是共享规则。 */
+    const gateExtendsDetachedText = (value) => (value === false ? 'extends:false' : "extends:'none'")
+
     function GateSettings({ repo, notify }) {
-      // 11 个 useState 全在这里，顺序被 test/client.test.mjs 的 gateQueue 按位置锁定。
+      // 12 个 useState 全在这里，顺序被 test/client.test.mjs 的 gateQueue 按位置锁定。
       const [data, setData] = useState(null)
       const [loadError, setLoadError] = useState('')
       const [scope, setScope] = useState('user')
@@ -2381,6 +2401,10 @@ window.__ModuleLoader__.load({
       const [models, setModels] = useState({ list: [], loading: false, error: '' })
       const [busy, setBusy] = useState('')
       const [status, setStatus] = useState(null)
+      // 切作用域 / 切仓库时如果还有草稿：先问一句 —— 取消保留草稿，确认才放弃。
+      // 形状：{ type: 'scope', next }（作用域确认，可带 repoHeld）或 { repoHeld: true }（换仓库已选择保留草稿）。
+      // 只能在末尾追加（位置化队列），同步 test/client.test.mjs 的 gateQueue。
+      const [pendingSwitch, setPendingSwitch] = useState(null)
       const scopeQuery = repo ? '?repo=' + encodeURIComponent(String(repo)) : ''
 
       async function load() {
@@ -2408,10 +2432,6 @@ window.__ModuleLoader__.load({
         }
       }
 
-      // 依赖 repo：面板先挂载、/state 后到的顺序下，仓库路径变了要重读一次（否则项目层会写到服务端 cwd）。
-      useEffect(() => { load() }, [repo])
-      useEffect(() => { loadModels() }, [repo])
-
       const derived = gateDraftOf(data, scope)
       const current = draft || derived
       const readOnly = scope === 'default'
@@ -2419,27 +2439,53 @@ window.__ModuleLoader__.load({
       const semanticLocked = readOnly || scope === 'project'
       const dirty = !readOnly && JSON.stringify(gateConfigOf(scope, current, data)) !== JSON.stringify(gateConfigOf(scope, derived, data))
       const scopePath = data && data.scopes && data.scopes[scope] ? data.scopes[scope].path : ''
-      // 本层写了 extends 时不能从面板保存：服务端写盘是整层重写，会把 extends 和它共享的
-      // 规则一起冲掉（Q1-F3）。这里明确拒绝并让人去改文件，而不是「保存成功」后规则悄悄消失。
+      // 本层的 `extends` 分两种（v3 冻结行为）：
+      // - 共享规则（字符串 / 对象 / true）：面板整层重写会把共享规则冲掉 → 明确拒绝保存，让人去改文件；
+      // - 断开继承（false / 'none'）：不是共享，能保存；写回时原样带上这一项（见 gateConfigOf）。
       const rawLayer = gateRawLayer(data, scope)
-      const layerExtends = Boolean(rawLayer && Object.prototype.hasOwnProperty.call(rawLayer, 'extends'))
+      const rawExtends = rawLayer && Object.prototype.hasOwnProperty.call(rawLayer, 'extends') ? rawLayer.extends : undefined
+      const extendsDetached = rawExtends === false || rawExtends === 'none'
+      const layerExtends = rawExtends !== undefined && !extendsDetached
+      // 面板里这份配置属于哪个仓库（GET /gates 会回显 repo）：写盘与预览都认它，
+      // 否则「/state 换了 workdir 但用户还没确认」时会把旧配置写到新仓库去。
+      const dataRepo = (data && typeof data.repo === 'string' && data.repo) || ''
+      const targetRepo = dataRepo || repo
+      const repoMismatch = Boolean(dataRepo && repo && dataRepo !== repo)
+      // 切仓库遇到草稿：确认（取消 → 保留草稿并显示提示；确认 → 放弃后才去读新仓库）。
+      const repoHeld = Boolean(pendingSwitch && pendingSwitch.repoHeld === true && repoMismatch && dirty)
+      const repoConfirm = repoMismatch && dirty && !repoHeld
+      const scopeConfirm = Boolean(pendingSwitch && pendingSwitch.type === 'scope' && pendingSwitch.next)
+
+      // 依赖 repo：面板先挂载、/state 后到的顺序下，仓库路径变了要重读一次（否则项目层会写到服务端 cwd）。
+      // 有草稿时**一律不重读**：load() 会 setGateDraft(null)，草稿就被静默丢掉了 ——
+      // 换仓库这件事交给页面上的确认条（确认 / 保存 / 放弃 都会各自 load）。
+      useEffect(() => {
+        if (dirty) return
+        load()
+      }, [repo])
+      // 草稿变干净之后（保存 / 放弃 / 手工改回）如果仓库已经换过，补一次重读，别一直停在旧仓库上。
+      useEffect(() => {
+        if (!dirty && repoMismatch) load()
+      }, [dirty])
+      useEffect(() => { loadModels() }, [repo])
 
       async function save() {
         if (!data || readOnly || busy) return
         if (layerExtends) {
           setStatus({
             tone: 'error',
-            text: '保存失败：本层写了 extends（共享规则），面板整层重写会把共享规则冲掉；请直接改配置文件' + (scopePath ? '：' + scopePath : ''),
+            text: '保存失败：本层写了 ' + gateExtendsText(rawExtends) + '（共享规则），面板整层重写会把共享规则冲掉；请直接改配置文件' + (scopePath ? '：' + scopePath : ''),
           })
           return
         }
         setBusy('save')
         setStatus(null)
         try {
-          const value = await call('/gates', { method: 'POST', body: JSON.stringify({ scope, config: gateConfigOf(scope, current, data), repo }) })
+          const value = await call('/gates', { method: 'POST', body: JSON.stringify({ scope, config: gateConfigOf(scope, current, data), repo: targetRepo }) })
           if (!value || value.ok === false) throw new Error((value && value.error) || '服务端没有返回保存结果')
           const where = value.path ? '：' + value.path : ''
           setGateDraft(null)
+          setPendingSwitch(null)
           setStatus({ tone: 'ok', text: '已保存到「' + GATE_LAYER_LABELS[scope] + '」' + where })
           if (notify) notify('门禁配置已保存', 'info')
           await load()
@@ -2460,7 +2506,7 @@ window.__ModuleLoader__.load({
           const value = await call('/gates/preview', {
             method: 'POST',
             body: JSON.stringify({
-              repo,
+              repo: targetRepo,
               trigger,
               body: sample,
               semantic: semanticOn && GATE_SEMANTIC_TRIGGERS.includes(trigger),
@@ -2482,7 +2528,7 @@ window.__ModuleLoader__.load({
         try {
           const value = await call('/gates/optimize', {
             method: 'POST',
-            body: JSON.stringify({ repo, prompt: current.semantic.prompt, model: current.semantic.model }),
+            body: JSON.stringify({ repo: targetRepo, prompt: current.semantic.prompt, model: current.semantic.model }),
           })
           if (!value || value.ok === false) throw new Error((value && value.error) || '服务端没有返回提示词')
           const text = String(value.text || '').trim()
@@ -2501,6 +2547,39 @@ window.__ModuleLoader__.load({
         ...current,
         rules: current.rules.map((rule) => (rule.id === id ? { ...rule, enabled: next } : rule)),
       })
+      // 切作用域：没有草稿就直接切（保持原行为）；有草稿先挂确认，取消保留草稿，确认才放弃。
+      const applyScope = (next) => {
+        setScope(next)
+        setGateDraft(null)
+        setStatus(null)
+        setPreview(null)
+      }
+      const requestScope = (next) => {
+        if (!next || next === scope) return
+        if (dirty) {
+          // 带上 repoHeld：取消这次作用域切换后，之前「保留草稿」的换仓库决定不能被抹掉。
+          setPendingSwitch({ ...(pendingSwitch || {}), type: 'scope', next })
+          setStatus(null)
+          return
+        }
+        setPendingSwitch(null)
+        applyScope(next)
+      }
+      const cancelSwitch = () => setPendingSwitch(pendingSwitch && pendingSwitch.repoHeld === true ? { repoHeld: true } : null)
+      const confirmScopeSwitch = () => {
+        const next = scopeConfirm ? pendingSwitch.next : ''
+        setPendingSwitch(null)
+        if (next) applyScope(next)
+      }
+      // 切仓库由父面板的 workdir 驱动，没法拦在「点击」上：草稿还在时不去读新仓库，
+      // 只有这里（明确放弃）才 reset + load，且 load 用的是新的 repo prop。
+      const confirmRepoSwitch = () => {
+        setGateDraft(null)
+        setStatus(null)
+        setPreview(null)
+        setPendingSwitch(null)
+        load()
+      }
       // 本层显式关闭（off）优先于继承来的 enabled：项目层写 semantic:false 时，
       // 合并后的 enabled 可能还是上层继承值，不能同屏出现「已关闭 + 当前开启」。
       const semanticOn = current.semantic.off !== true && current.semantic.enabled === true
@@ -2520,15 +2599,34 @@ window.__ModuleLoader__.load({
             options: GATE_SCOPES,
             value: scope,
             label: '门禁作用域',
-            onChange: (next) => {
-              setScope(next)
-              setGateDraft(null)
-              setStatus(null)
-              setPreview(null)
-            },
+            onChange: requestScope,
           }),
           h('small', null, GATE_SCOPE_HINTS[scope] || '')),
+        scopeConfirm
+          ? h('div', { className: 'dt-banner', role: 'group', 'aria-label': '切换作用域确认' },
+            h('p', null, '还有未保存的改动：切到「' + (GATE_LAYER_LABELS[pendingSwitch.next] || pendingSwitch.next) + '」会丢掉这份草稿。'),
+            h('div', { className: 'dt-actions dt-banner-actions' },
+              h(Btn, { size: 'sm', variant: 'ghost', onClick: cancelSwitch }, '取消'),
+              h(Btn, { size: 'sm', variant: 'primary', onClick: confirmScopeSwitch }, '放弃草稿并切换')))
+          : null,
+        repoConfirm
+          ? h('div', { className: 'dt-banner', role: 'group', 'aria-label': '切换仓库确认' },
+            h('p', null, '仓库已切换到 ' + repo + '：当前面板还是 ' + dataRepo + ' 的配置，这份草稿还没保存。'),
+            h('div', { className: 'dt-actions dt-banner-actions' },
+              h(Btn, { size: 'sm', variant: 'ghost', onClick: () => setPendingSwitch({ repoHeld: true }) }, '取消'),
+              h(Btn, { size: 'sm', variant: 'primary', onClick: confirmRepoSwitch }, '放弃草稿并切换')))
+          : null,
+        repoHeld
+          ? h('div', { className: 'dt-banner' },
+            h('p', null, '已保留草稿：面板仍是 ' + dataRepo + '，保存或放弃这份草稿后才会切到 ' + repo + '。'),
+            h('div', { className: 'dt-actions dt-banner-actions' },
+              h(Btn, { size: 'sm', variant: 'primary', onClick: confirmRepoSwitch }, '放弃草稿并切换')))
+          : null,
         h('p', { className: 'dt-hint' }, '配置文件：', h('span', { className: 'dt-mono' }, scopePath || '（服务端没有返回路径）')),
+        !readOnly && data && extendsDetached
+          ? h('p', { className: 'dt-hint' },
+            '本层用 ' + gateExtendsDetachedText(rawExtends) + ' 断开了上层规则：保存会把这一项原样写回，上层规则不会重新合进来。')
+          : null,
         !data && !loadError ? h('p', { className: 'dt-hint' }, '正在读取门禁配置…') : null,
         loadError
           ? h('div', { className: 'dt-banner dt-danger' },
@@ -2599,14 +2697,25 @@ window.__ModuleLoader__.load({
         !readOnly && data && layerExtends
           ? h('div', { className: 'dt-banner dt-danger' },
             h('p', { className: 'dt-error', role: 'alert' },
-              '这一层用了 extends（共享规则）：面板保存会整层重写并把共享规则冲掉，所以这里不写入。请直接改配置文件：'
+              '这一层用了 ' + gateExtendsText(rawExtends) + '（共享规则）：面板保存会整层重写并把共享规则冲掉，所以这里不写入。请直接改配置文件：'
               + (scopePath || '（服务端没有返回路径）')))
           : null,
         !readOnly && data
           ? h('div', { className: 'dt-savebar' },
             h('p', { className: 'dt-hint', 'aria-live': 'polite' },
               busy === 'save' ? '保存中…' : layerExtends ? '本层有 extends：保存已禁用' : dirty ? '未保存' : '与已保存的一致'),
-            h(Btn, { size: 'sm', variant: 'ghost', disabled: !dirty || Boolean(busy), onClick: () => { setGateDraft(null); setStatus(null) } }, '放弃'),
+            h(Btn, {
+              size: 'sm',
+              variant: 'ghost',
+              disabled: !dirty || Boolean(busy),
+              // 放弃草稿后，如果父面板已经换了仓库，这一步才真的切过去（否则草稿一清就静默换仓库）。
+              onClick: () => {
+                setGateDraft(null)
+                setStatus(null)
+                setPendingSwitch(null)
+                if (repoMismatch) load()
+              },
+            }, '放弃'),
             h(Btn, { size: 'sm', variant: 'primary', disabled: !dirty || Boolean(busy) || layerExtends, onClick: save }, busy === 'save' ? '保存中…' : '保存'))
           : null,
         status
@@ -2674,10 +2783,12 @@ window.__ModuleLoader__.load({
                 h('div', { className: 'dt-field-head' }, h('span', null, '开启语义复审')),
                 h(Toggle, {
                   id: 'gate-semantic-enabled',
+                  // 本层写了 semantic:false 时 gateSemanticOf 已经把 enabled 算成 false，三处一致。
                   checked: current.semantic.enabled,
                   disabled: readOnly,
                   label: '开启语义复审',
-                  onChange: (next) => setSemantic({ enabled: next }),
+                  // 打开时清掉 off：本层的 semantic:false 不擦掉就永远显示关闭（开关成了装饰）。
+                  onChange: (next) => setSemantic({ enabled: next, off: next ? false : current.semantic.off }),
                 })),
             h('div', { className: 'dt-field' },
               h('span', { className: 'dt-field-head' }, h('span', null, '模型')),

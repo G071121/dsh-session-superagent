@@ -46,7 +46,7 @@ export {
 
 export const PACKAGE_NAME = '@mycf711/dsh-gate'
 /** 与 package.json 的 version 同步（测试守着）。 */
-export const PACKAGE_VERSION = '0.1.1'
+export const PACKAGE_VERSION = '0.1.2'
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -95,6 +95,76 @@ function configPathFor(scope, { repo = process.cwd(), home = homedir(), env = pr
   if (scope === 'project') return projectGatePath(repo)
   if (scope === 'local') return localGatePath(repo)
   throw new Error('scope 只能是 default / user / project / local，收到：' + String(scope))
+}
+
+// ── extends 的写盘安全 ───────────────────────────────────────────────────────
+// 只有 `false` / `'none'` 能原样写回：它们不引用任何外部内容，写回后语义不变（本层替换）。
+// `true` / `'default'` / 路径字符串 / 内联对象都表示「本层以别处为基」，而写盘是整层重写
+// （只写 version/name/extends/rules/semantic，其中 extends 只保留 false/'none'），
+// 写下去就把基规则连同 `extends` 一起冲掉 —— 必须报错。
+const EXTENDS_ABSENT = 'absent'
+const EXTENDS_KEEP = 'keep'
+const EXTENDS_SHARED = 'shared'
+const EXTENDS_INVALID = 'invalid'
+
+function hasOwn(object, key) {
+  return Boolean(object) && typeof object === 'object'
+    && Object.prototype.hasOwnProperty.call(object, key)
+}
+
+/**
+ * 判断一个 `extends` 值能不能在整层重写里安全保留。
+ * 读侧分类见 `readLayerConfig`：false/'none' = 替换，true/'default'/路径/对象 = 共享基。
+ */
+function classifyExtends(value) {
+  if (value === undefined) return EXTENDS_ABSENT
+  if (value === false || value === 'none') return EXTENDS_KEEP
+  if (typeof value === 'string') return EXTENDS_SHARED // 含 'default'
+  if (value === true) return EXTENDS_SHARED
+  if (value && typeof value === 'object' && !Array.isArray(value)) return EXTENDS_SHARED
+  return EXTENDS_INVALID
+}
+
+function describeExtends(value) {
+  let text
+  try {
+    text = JSON.stringify(value)
+  } catch {
+    text = ''
+  }
+  if (text === undefined || text === '') text = String(value)
+  return text.length > 80 ? text.slice(0, 79) + '…' : text
+}
+
+/** 写盘侧的 extends 拒绝错误：必须点名配置路径 + 解决方式（面板和 CLI 都直接展示它）。 */
+function extendsWriteError(source, path, value) {
+  const detail = source === 'existing'
+    ? '该文件现有的 extends（' + describeExtends(value) + '）会在整层重写时丢失，它共享的基规则也跟着失效。'
+    : '本条配置里的 extends（' + describeExtends(value) + '）无法在整层重写时保留。'
+  const fix = source === 'existing'
+    ? '解决方式：直接手工编辑该文件；或先把基规则合并进本层规则、删掉 extends 后再从面板保存。'
+    : '解决方式：先手工编辑该文件把基规则合并进本层规则，或把 extends 改成 false / "none" 后再保存。'
+  const error = new Error('无法安全写入 extends：' + path + '。' + detail + fix)
+  error.code = 'extends_not_preservable'
+  error.path = path
+  return error
+}
+
+/**
+ * 读磁盘上现有文件的 `extends`。坏 JSON / 非对象：返回 absent ——
+ * 那种文件每次读取都会报错，写盘时原文会先进 `.bak`，不会被静默抹掉。
+ */
+function existingExtends(path) {
+  const absent = { kind: EXTENDS_ABSENT, value: undefined }
+  if (!existsSync(path)) return absent
+  let raw
+  try {
+    raw = JSON.parse(readFileSync(path, 'utf8'))
+  } catch {
+    return absent
+  }
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw) || !hasOwn(raw, 'extends')) return absent
+  return { kind: classifyExtends(raw.extends), value: raw.extends }
 }
 
 function normalizeRule(rule) {
@@ -347,10 +417,19 @@ export function lintText(text, config, { trigger = 'issue.reply', current } = {}
 /**
  * 严格校验一份配置（写盘 / 面板保存前用）。
  * 与 `normalizeConfig` 不同：这里不静默丢弃，返回第一条具体错误。
+ *
+ * `extends` 在这里只做**形状**校验，并且会原样带在返回的 `config` 上：
+ * 面板保存走的是 `validateConfig` → `writeGateConfig`，如果在这一步把 `extends` 抹掉，
+ * 写盘端就再也没机会知道调用方传过它（Q1-F3 的静默丢失）。能不能安全写下去由
+ * `writeGateConfig` 按目标路径判定（它才拿得到配置路径，报错时能点名）。
  */
 export function validateConfig(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return { ok: false, error: '配置必须是对象' }
+  }
+  const hasExtends = Object.prototype.hasOwnProperty.call(input, 'extends') && input.extends !== undefined
+  if (hasExtends && classifyExtends(input.extends) === EXTENDS_INVALID) {
+    return { ok: false, error: 'extends 只能是 true、false、字符串或对象' }
   }
   if (!Array.isArray(input.rules)) return { ok: false, error: 'rules 必须是数组' }
   if (input.name !== undefined && typeof input.name !== 'string') return { ok: false, error: 'name 必须是字符串' }
@@ -431,7 +510,9 @@ export function validateConfig(input) {
       return { ok: false, error: 'semantic.maxInputChars 必须是正数' }
     }
   }
-  return { ok: true, config: normalizeConfig(input) }
+  const normalized = normalizeConfig(input)
+  if (hasExtends) normalized.extends = input.extends
+  return { ok: true, config: normalized }
 }
 
 /** 读某一层的原始配置（给面板展示「这一层现在写的是什么」）。 */
@@ -448,19 +529,52 @@ export function readGateScope(scope, { repo = process.cwd(), home = homedir(), e
 /**
  * 写某一层配置：先备份 `.bak`，再原子替换（临时文件 + rename）。
  * 只允许 user / project / local —— 默认规则随包发布，不能从面板改。
+ *
+ * 写盘是**整层重写**（只写 version/name/extends/rules/semantic，其中 extends 只保留 false/'none'），
+ * 所以 `extends` 走 fail closed：
+ * - 入参 `extends: false | 'none'`：允许，原样写回（写回后仍是「替换」语义）；
+ * - 入参 `extends: true | 'default' | '<路径>' | {…}`：抛错（含配置路径与解决方式）；
+ * - 文件里已有这类共享 `extends`：不管入参写什么（包括 `false`）都抛错，绝不静默冲掉基规则；
+ * - 文件里已有 `false | 'none'` 而入参没写：原样保留，避免「替换」悄悄退化成「合并」。
  */
 export function writeGateConfig(scope, config, { repo = process.cwd(), home = homedir(), env = process.env } = {}) {
   if (scope !== 'user' && scope !== 'project' && scope !== 'local') {
     throw new Error('scope 只能是 user / project / local')
   }
+  const path = configPathFor(scope, { repo, home, env })
+  const input = config && typeof config === 'object' && !Array.isArray(config) ? config : {}
+  // 1) 调用方传入的 extends：能原样保留的写回，其余显式报错。
+  const incoming = hasOwn(input, 'extends') ? classifyExtends(input.extends) : EXTENDS_ABSENT
+  if (incoming === EXTENDS_SHARED || incoming === EXTENDS_INVALID) {
+    throw extendsWriteError('incoming', path, input.extends)
+  }
+  // 2) 磁盘上已有的 extends：整层重写会把它冲掉，同样不能无提示改写。
+  const existing = existingExtends(path)
+  if (existing.kind === EXTENDS_SHARED || existing.kind === EXTENDS_INVALID) {
+    throw extendsWriteError('existing', path, existing.value)
+  }
+  // 3) 可安全保留的值：入参优先；入参没写就用文件里已有的（否则等于悄悄改了语义）。
+  const keepExtends = incoming === EXTENDS_KEEP
+    ? { value: input.extends }
+    : existing.kind === EXTENDS_KEEP
+      ? { value: existing.value }
+      : null
   const checked = validateConfig(config)
   if (!checked.ok) throw new Error(checked.error)
-  const path = configPathFor(scope, { repo, home, env })
+  const normalized = checked.config
+  // 明确的字段顺序：extends 跟在 name 后面，读文件的人一眼能看到这一层挂在哪。
+  const output = {
+    version: normalized.version,
+    name: normalized.name,
+    ...(keepExtends ? { extends: keepExtends.value } : {}),
+    rules: normalized.rules,
+    semantic: normalized.semantic,
+  }
   mkdirSync(dirname(path), { recursive: true })
   const tmp = path + '.tmp-' + process.pid + '-' + Date.now()
   try {
     if (existsSync(path)) copyFileSync(path, path + '.bak')
-    writeFileSync(tmp, JSON.stringify(checked.config, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
+    writeFileSync(tmp, JSON.stringify(output, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
     renameSync(tmp, path)
   } catch (error) {
     try {
@@ -470,7 +584,7 @@ export function writeGateConfig(scope, config, { repo = process.cwd(), home = ho
     }
     throw error
   }
-  return { path, config: checked.config }
+  return { path, config: output }
 }
 
 /**
