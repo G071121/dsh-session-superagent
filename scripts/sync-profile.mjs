@@ -19,17 +19,17 @@
 //   node scripts/sync-profile.mjs --dir <path>  指定 profile 安装目录
 //
 // 退出码：0 = 干净；1 = profile 有漂移（--repair 能修）；2 = 仓库侧问题（TARGETS 条目在仓库里
-// 不存在 / 门禁子包源目录不存在 / lib 的相对 import 解析失败 —— 这几种 --repair 修不了，只能改仓库）。
+// 不存在 / 整个 lib 目录不存在 / 门禁子包源目录不存在 / lib 的相对 import 解析失败 —— 这几种
+// --repair 修不了，只能改仓库）。
 //
-// 失败原子性（S1 v5 / v4 审查 F6）：**`repoMissing` 非空时**整轮只读 —— TARGETS 条目在仓库里
-// 不存在、或 `packages/dsh-gate` 源目录缺失时，所有 link / relink / copy / prune 都不执行，
+// 失败原子性（S1 v6 / v5 Q1 L1-L2）：**四类仓库侧问题全部在任何写盘之前判定**，任一非空时整轮只读 ——
+// TARGETS 条目在仓库里不存在、整个 `lib/` 目录不存在、`packages/dsh-gate` 源目录缺失、
+// 或 `lib/*.js` 的相对 import 解析不到目标文件时，所有 link / relink / copy / prune 都不执行，
 // 判红（exit 2）发生在任何写盘之前。
-// 以前 `--repair` 会先把能做的 relink / 子包复制 / 陈旧 prune 做完再 exit 2 —— 缺的是 `lib/*.js` 时
-// profile 副本已经被当「陈旧」删掉：修不了却改了磁盘，用户以为只是报错，实际 profile 已经被改了一半。
-//
-// 边界（别过度声明）：原子性**只覆盖 `repoMissing`**。`lib/*.js` 的相对 import 解析失败同样是
-// 仓库侧问题（exit 2），但它在**写盘之后**才检测 —— 那一轮 profile 可能已经 relink / prune 过
-// （Q1 L1；要收窄成写盘前判红需把 missingImports 计算前移，未在本轮做）。
+// v5 以前只覆盖前两类（`repoMissing`）：相对 import 失败要等 relink / 子包复制 / 陈旧 prune 做完
+// 才检测（Q1 L1 实测：先 `relinked lib/body.js`、`pruned lib/zzz-stale.js` 再 exit 2）——
+// 修不了却改了磁盘，用户以为只是报错，实际 profile 已经被改了一半。v6 把 `missingImports`
+// 计算前移，四类仓库侧错误现在**一律**只读（注释与实现一致，不再有「只覆盖 repoMissing」的边界）。
 //
 // 另外，本脚本只保证**磁盘上的 profile 副本**与仓库一致；
 // 宿主进程里已加载的模块不会因为替换文件而重载 —— 运行时是否生效要用户重载宿主后另验。
@@ -76,8 +76,18 @@ const TARGETS = [
 // 而派生用例只查「仓库 → 清单」一个方向（发布契约里的文件有没有漏进 TARGETS），同样全绿。
 // 2026-11-08 S1 在仓库副本里删掉 bin/check.mjs 实测：旧实现 `--check` exit 0、派生用例 1/1 绿。
 // 现在缺一条就**点名**并按退出码 2 红（--repair 修不了：文件不会自己回来）。
-const missingSources = TARGETS.filter((rel) => !existsSync(join(ROOT, rel)))
-const presentTargets = TARGETS.filter((rel) => !missingSources.includes(rel))
+const absentTargets = TARGETS.filter((rel) => !existsSync(join(ROOT, rel)))
+const presentTargets = TARGETS.filter((rel) => !absentTargets.includes(rel))
+
+// 整个 `lib/` 目录缺失（S1 v6 / v5 Q1 L2）：旧实现走到下面的 `readdirSync(libDir)` 直接抛
+// `ENOENT` 栈（exit 1），preflight 只能读到「(无输出)」—— 用户看到的是崩溃，不是「缺源 + 点名」。
+// 它和 TARGETS 缺源同类（--repair 变不出源目录来），但汇总里**单独成段**：把 `lib` 塞进
+// 「TARGETS 缺源」会重演 v5 Q1 L3 的措辞问题（`packages/dsh-gate` 不是 TARGETS 条目）。
+// 目录整个没了就不再逐条报它下面的 10 个文件：同一个原因刷 10 行只会盖住根因。
+const libDir = join(ROOT, 'lib')
+const libDirMissing = !existsSync(libDir)
+// 汇总里的「TARGETS 缺源」：整个 lib/ 目录缺失时由上面的 `lib 目录缺失` 段代表，不重复计数。
+const missingSources = libDirMissing ? absentTargets.filter((rel) => !rel.startsWith('lib/')) : absentTargets
 
 // 门禁子包源目录（仓库侧）：`packages/dsh-gate` 整个目录不存在时，旧实现 `if (existsSync(gateSrc))`
 // 静默跳过 —— profile 检查可能仍然「四段全零」，门禁子包根本没人管（v4 审查 F7）。
@@ -87,9 +97,48 @@ const gateSrc = join(ROOT, 'packages', 'dsh-gate')
 const gateDst = join(DEST, 'node_modules', '@mycf711', 'dsh-gate')
 const gateRel = 'node_modules/@mycf711/dsh-gate'
 const gateDirMissing = !existsSync(gateSrc)
-const repoMissing = [...missingSources, ...(gateDirMissing ? ['packages/dsh-gate'] : [])]
-// 仓库侧问题 = 这一轮只许读、不许写（失败原子性）。
-const REPO_BLOCKED = repoMissing.length > 0
+
+/**
+ * `lib/*.js` 里每个相对 import 都必须能解析（这正是事故 1 的直接原因）。
+ *
+ * S1 v6（v5 Q1 L1）：**必须在任何写盘之前跑**。以前它在 relink / 子包复制 / 陈旧 prune 之后，
+ * 那一轮 profile 已经改了一半才 exit 2；现在它和 `repoMissing` 一起决定 `REPO_BLOCKED`。
+ * 整个 `lib/` 目录缺失时调用方不进来（已收进仓库侧缺源），所以不会抛 `ENOENT`。
+ */
+function scanMissingImports(dir) {
+  const missing = []
+  for (const name of readdirSync(dir)) {
+    if (!name.endsWith('.js')) continue
+    const code = readFileSync(join(dir, name), 'utf8')
+    for (const line of code.split(String.fromCharCode(10))) {
+      const trimmed = line.trim()
+      if (!trimmed.startsWith('import ')) continue
+      const at = trimmed.lastIndexOf("from '")
+      let spec = null
+      if (at >= 0) {
+        spec = trimmed.slice(at + 6).split("'")[0]
+      } else if (trimmed.slice('import '.length).startsWith("'")) {
+        spec = trimmed.slice('import '.length + 1).split("'")[0]
+      }
+      if (spec && spec.startsWith('.') && !existsSync(join(dir, spec))) {
+        missing.push(name + ' -> ' + spec)
+      }
+    }
+  }
+  return missing
+}
+
+const missingImports = libDirMissing ? [] : scanMissingImports(libDir)
+
+// 仓库侧缺源：TARGETS 条目 / 整个 lib 目录 / 门禁子包源目录 —— 三类各自独立成段点名。
+const repoMissing = [
+  ...missingSources,
+  ...(libDirMissing ? ['lib'] : []),
+  ...(gateDirMissing ? ['packages/dsh-gate'] : []),
+]
+// 仓库侧问题 = 这一轮只许读、不许写（失败原子性）。相对 import 失败也算：它同样 --repair 修不了，
+// 而且把它漏在外面就是「先改盘再报错」（v5 Q1 L1 的原始形状）。
+const REPO_BLOCKED = repoMissing.length > 0 || missingImports.length > 0
 
 if (!existsSync(DEST)) {
   console.error('找不到 profile 安装目录：' + DEST)
@@ -195,7 +244,7 @@ function gateDiffDetail(srcRoot, dstRoot) {
 // 门禁子包：主插件静态 import @mycf711/dsh-gate，profile 里必须有这一份。
 // 硬链只对文件生效，目录用递归复制；**按内容判定**，不一致就整体替换（保留 package 结构）。
 // 源目录存在性在上面的 `gateDirMissing` 已经判过（缺源 = 仓库侧问题，整轮只读 + exit 2）。
-if (existsSync(gateSrc)) {
+if (!gateDirMissing) {
   if (!existsSync(gateDst)) {
     drift.missing.push(gateRel)
     // 整目录缺失必须点名：旧实现只让「缺失」+1，--check 里看到「缺失 1」不知道缺的是门禁子包。
@@ -230,36 +279,25 @@ if (existsSync(gateSrc)) {
   }
 }
 
-// 陈旧文件：profile 里有、仓库里已经没有（例如删掉的模块）
-for (const name of readdirSync(join(DEST, 'lib')).filter((f) => f.endsWith('.js'))) {
-  if (!existsSync(join(ROOT, 'lib', name))) {
-    drift.stale.push('lib/' + name)
-    if (REPAIR && !CHECK && !REPO_BLOCKED) {
-      try { unlinkSync(join(DEST, 'lib', name)); console.log('pruned   lib/' + name) } catch {}
-    } else {
-      console.log('陈旧     lib/' + name + '（仓库已删除，profile 里还在）')
-    }
-  }
-}
-
-// lib/ 里每个相对 import 都必须能解析（这正是事故 1 的直接原因）
-const libDir = join(ROOT, 'lib')
-const missingImports = []
-for (const name of readdirSync(libDir)) {
-  if (!name.endsWith('.js')) continue
-  const code = readFileSync(join(libDir, name), 'utf8')
-  for (const line of code.split(String.fromCharCode(10))) {
-    const trimmed = line.trim()
-    if (!trimmed.startsWith('import ')) continue
-    const at = trimmed.lastIndexOf("from '")
-    let spec = null
-    if (at >= 0) {
-      spec = trimmed.slice(at + 6).split("'")[0]
-    } else if (trimmed.slice('import '.length).startsWith("'")) {
-      spec = trimmed.slice('import '.length + 1).split("'")[0]
-    }
-    if (spec && spec.startsWith('.') && !existsSync(join(libDir, spec))) {
-      missingImports.push(name + ' -> ' + spec)
+// 陈旧文件：profile 里有、仓库里已经没有（例如删掉的模块）。
+// 整个仓库 `lib/` 目录缺失时**不逐文件判陈旧**：那些「陈旧」只是缺源的影子，报出来会和汇总里的
+// 「lib 目录缺失」互相矛盾（汇总准确）；这一轮本来也不许写盘。
+const destLibDir = join(DEST, 'lib')
+if (!libDirMissing) {
+  if (!existsSync(destLibDir)) {
+    // profile 侧整个 lib/ 目录没装：旧实现会在这里 `readdirSync` 抛 ENOENT 栈（--check 变成崩溃）。
+    // 缺失计数已经由上面的 TARGETS 循环给过（每个 lib/*.js 各一条），这里只补一句「缺的是整个目录」。
+    if (!REPO_BLOCKED) console.log('缺失     lib/（profile 里没有整个 lib 目录：--repair 会按 TARGETS 重建硬链接）')
+  } else {
+    for (const name of readdirSync(destLibDir).filter((f) => f.endsWith('.js'))) {
+      if (!existsSync(join(ROOT, 'lib', name))) {
+        drift.stale.push('lib/' + name)
+        if (REPAIR && !CHECK && !REPO_BLOCKED) {
+          try { unlinkSync(join(destLibDir, name)); console.log('pruned   lib/' + name) } catch {}
+        } else {
+          console.log('陈旧     lib/' + name + '（仓库已删除，profile 里还在）')
+        }
+      }
     }
   }
 }
@@ -270,29 +308,44 @@ for (const name of readdirSync(libDir)) {
 // 垫片反而会报出「陈旧 1，但 profile 里没有多余文件」的误导，所以撤掉。
 // 四个数的含义：缺失 = profile 少文件、断链 = inode 不同（改了不同步）、
 // 陈旧 = profile 多出仓库已删的 lib 文件、门禁子包漂移 = 子包内容与 packages/dsh-gate 不一致。
-// 第五个数「TARGETS 缺源」只在清单条目不成立时才出现（S1）：正常状态不该多一段噪音。
-// 第五段同时收仓库侧的「门禁子包源目录缺失」（S1 v5 / v4 审查 F7）：它和 TARGETS 缺源同类 ——
-// --repair 变不出源目录来，只能改仓库，所以一起点名、一起算不干净（preflight 的 clean 兜底也认得它）。
+//
+// 第五段起是**仓库侧缺源**，每类独立成段、只在非零时出现（clean 无噪音）：
+//   TARGETS 缺源 N（...）       —— 清单条目在仓库里不存在（S1 v5）
+//   lib 目录缺失 1（lib）        —— 整个 lib/ 目录不存在（S1 v6 / v5 Q1 L2）
+//   门禁子包源缺失 1（...）       —— packages/dsh-gate 整个目录不存在（S1 v5 / v4 审查 F7）
+//   相对 import 缺失 N（...）     —— lib/*.js 的相对 import 解析不到（S1 v6 / v5 Q1 L1）
+// 为什么必须进汇总行：只打印「四个 0」再 exit 2 就是 0.10.8 那种假绿/假红的形状。
+// 为什么分开写：把 `packages/dsh-gate` / `lib` 塞进「TARGETS 缺源」是 v5 Q1 L3 的措辞问题
+// （它们不是 TARGETS 条目），preflight 的解析与 clean 判定也按类别分开。
 const drifted = drift.missing.length + drift.broken.length + drift.stale.length + drift.gate.length
 for (const rel of missingSources) console.log('缺源     ' + rel + '（仓库里没有这个文件：恢复它，或把这一行从 TARGETS 删掉）')
+if (libDirMissing) console.log('缺源     lib/（仓库里没有整个 lib 目录：恢复它，--repair 修不了）')
 if (gateDirMissing) console.log('缺源     packages/dsh-gate（仓库里没有门禁子包整个目录：恢复它，--repair 修不了）')
+for (const item of missingImports) console.log('import   ' + item + '（相对 import 解析不到目标文件：恢复它，--repair 修不了）')
 console.log('---')
 console.log(`目标：${DEST}`)
-console.log(`缺失 ${drift.missing.length} / 断链 ${drift.broken.length} / 陈旧 ${drift.stale.length} / 门禁子包漂移 ${drift.gate.length}` +
-  (repoMissing.length > 0 ? ` / TARGETS 缺源 ${repoMissing.length}（${repoMissing.join(', ')}）` : '') +
-  (linked ? `，本次处理 ${linked} 个` : ''))
+let summary = `缺失 ${drift.missing.length} / 断链 ${drift.broken.length} / 陈旧 ${drift.stale.length} / 门禁子包漂移 ${drift.gate.length}`
+if (missingSources.length > 0) summary += ` / TARGETS 缺源 ${missingSources.length}（${missingSources.join(', ')}）`
+if (libDirMissing) summary += ' / lib 目录缺失 1（lib）'
+if (gateDirMissing) summary += ' / 门禁子包源缺失 1（packages/dsh-gate）'
+if (missingImports.length > 0) summary += ` / 相对 import 缺失 ${missingImports.length}（${missingImports.join(', ')}）`
+console.log(summary + (linked ? `，本次处理 ${linked} 个` : ''))
 console.log('（只证明 profile 磁盘副本一致；宿主运行时是否生效要在重载后另验）')
 
-// 清单条目不成立是**仓库侧**问题：--repair 变不出文件来，必须红（退出码 2），并且点名。
+// 仓库侧缺源是**仓库侧**问题：--repair 变不出文件/目录来，必须红（退出码 2），并且点名。
 // 这一轮已经整轮只读（REPO_BLOCKED）：走到这里时磁盘一处都没动，失败是原子的。
 if (repoMissing.length > 0) {
-  console.error('TARGETS 有 ' + repoMissing.length + ' 条在仓库里不存在：' + repoMissing.join(', '))
-  console.error('（--repair 修不了：恢复这些文件，或把它们从 TARGETS 删掉；本轮未改任何 profile 文件）')
+  if (missingSources.length > 0) console.error('TARGETS 有 ' + missingSources.length + ' 条在仓库里不存在：' + missingSources.join(', '))
+  if (libDirMissing) console.error('仓库里没有整个 lib 目录：lib')
+  if (gateDirMissing) console.error('仓库里没有门禁子包源目录：packages/dsh-gate')
+  console.error('（--repair 修不了：恢复这些文件/目录，或把不存在的条目从 TARGETS 删掉；本轮未改任何 profile 文件）')
   process.exit(2)
 }
 
+// 相对 import 解析失败同样归仓库侧（exit 2），现在也在任何写盘之前判红（S1 v6 / v5 Q1 L1）。
 if (missingImports.length > 0) {
   console.error('相对 import 解析失败：' + missingImports.join(', '))
+  console.error('（--repair 修不了：恢复被 import 的文件；本轮未改任何 profile 文件）')
   process.exit(2)
 }
 console.log('相对 import 全部可解析 ✓')
