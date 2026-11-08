@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/MYCF711/dsh-session-superagent/releases"><img src="https://img.shields.io/badge/version-0.10.6-green.svg" alt="version"></a>
+  <a href="https://github.com/MYCF711/dsh-session-superagent/releases"><img src="https://img.shields.io/badge/version-0.10.7-green.svg" alt="version"></a>
   <a href="https://www.npmjs.com/package/dsh-session-superagent"><img src="https://img.shields.io/npm/v/dsh-session-superagent?color=4D6BFE" alt="npm"></a>
   <img src="https://img.shields.io/badge/license-MIT-4D6BFE" alt="license">
 </p>
@@ -144,13 +144,13 @@ Gitee 没有 ETag，每轮会真读一次列表；私有仓库需要在面板里
 
 ## 验证
 
-824 项单测、41 项 preflight、11 项 UI、47 项 Chromium 全绿（0.10.5）。
+825 项单测、41 项 preflight、11 项 UI、47 项 Chromium 全绿（0.10.7）。
 
 ## 数据来源
 
 | 说法 | 来源 |
 |---|---|
-| 版本 `0.10.6` | [package.json](package.json)、[npm](https://www.npmjs.com/package/dsh-session-superagent) |
+| 版本 `0.10.7` | [package.json](package.json)、[npm](https://www.npmjs.com/package/dsh-session-superagent) |
 | 项目起点 | [deepseek-ai/dsh-superagent-prototype](https://github.com/deepseek-ai/dsh-superagent-prototype) |
 | DSH 原生 UI | [deepseek-ai/deepseek-harness](https://github.com/deepseek-ai/deepseek-harness)、`$DSH_HOME/DSH-UI-official.md`、`docs/ui-decomp/` |
 | 图标 | [DSH-X/docs/icon-app.png](https://github.com/yyh-001/DSH-X/blob/Staging/docs/icon-app.png)（MIT） |

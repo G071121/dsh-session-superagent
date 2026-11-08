@@ -93,7 +93,7 @@ test('最后评论：自己留的要标 self，别人留的不标', async () => 
   assert.equal(other.self, false)
 })
 
-test('打标签：POST 到 issues/{n}/labels，body 是 labels 数组', async () => {
+test('打标签：POST 到 issues/{n}/labels，body 是裸字符串数组', async () => {
   let captured = null
   const fetchImpl = async (url, init) => {
     captured = { url, init }
@@ -103,8 +103,23 @@ test('打标签：POST 到 issues/{n}/labels，body 是 labels 数组', async ()
   assert.equal(res.ok, true)
   assert.ok(captured.url.endsWith('/repos/a/b/issues/5/labels'))
   assert.equal(captured.init.method, 'POST')
-  assert.deepEqual(JSON.parse(captured.init.body), { labels: ['主理鱼:已处理'] })
+  assert.deepEqual(JSON.parse(captured.init.body), ['主理鱼:已处理'])
   assert.equal(captured.init.headers.authorization, 'token t')
+})
+
+test('打标签的 body 不能包成 { labels: [...] }：Gitee 会回 400 Problems parsing JSON', async () => {
+  // 2026-11-08 真机（Gitee 项目看板式仓库）：裸数组 201，对象体 400 Problems parsing JSON。
+  // Gitee swagger 对该端点的 body 定义是 type: array / items: string，所以对象体不是合法形状。
+  let body = null
+  const fetchImpl = async (_url, init) => {
+    body = JSON.parse(init.body)
+    return { ok: true, status: 200, text: async () => '{}' }
+  }
+  await addGiteeLabel({ repo: 'o/r', token: 't', number: 'IKTQ5G', label: 'L', fetchImpl })
+  assert.ok(Array.isArray(body), 'body 必须是数组')
+  assert.equal(body.length, 1)
+  assert.equal(body[0], 'L')
+  assert.equal(Object.prototype.hasOwnProperty.call(body, 'labels'), false, '不能再包一层 labels 字段')
 })
 
 test('真机样例：issue 的 number 是字符串（IKSQJH），PR 是数字 —— 都不能被转成 0', () => {

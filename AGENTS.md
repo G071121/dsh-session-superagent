@@ -129,7 +129,7 @@ node scripts/render-preview.mjs preview.html
 
 ## 十、当前基线
 
-0.10.6；全量 **824/824**、preflight **41/41**、UI **11/11**、真实 Chromium **47/47**。
+0.10.7；全量 **825/825**、preflight **41/41**、UI **11/11**、真实 Chromium **47/47**。
 未验：真实 DSH WebView 重载后的读屏 / 触摸 / IME、真实 GitHub/Gitee 写操作。没有实测不得写成通过。
 
 ## 十一、Issue/PR 回复边界

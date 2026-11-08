@@ -2,6 +2,18 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.10.7] - 2026-11-08 —— Gitee ack 打标签修复
+
+- 修复 `addGiteeLabel` 的请求体：Gitee 规范（swagger `POST /v5/repos/{owner}/{repo}/issues/{number}/labels`）要求
+  **裸字符串数组**（`["feat","bug"]`）。原实现发 `{ labels: [...] }`，真机在项目看板式仓库回
+  `400 {"message":"Problems parsing JSON"}`，`watch_ack` 的 `phase: label` 因而必失败。
+- 单元测试改为断言裸数组，并新增一条回归用例（防止再次包成 `{ labels: [...] }`）。
+- 真机：项目看板式仓库的 issue 上，修复前 `400 Problems parsing JSON`，修复后用同一令牌 `201`；
+  评论与关闭路径不受影响（同轮真机复核）。
+- 验证：`node test/gitee.test.mjs` 24/24（含新回归用例）。作者环境沙箱禁止 spawn 子进程，
+  全量 `npm test` / preflight 未能跑完，需维护者在 CI 复跑；Windows 下 client/routes/secrets-acl/
+  update-semver/worktree-prune/cli 的既有失败与本次改动无关（干净 HEAD 复现同数）。
+
 ## [0.10.6] - 2026-11-07 —— 设置页门禁面板
 
 - 新增独立子组件 `GateSettings`：默认（只读）/ 我的 / 项目三作用域。
