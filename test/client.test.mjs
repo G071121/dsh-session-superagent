@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import vm from 'node:vm'
 import { createGate, loadGateConfig, readGateScope, validateConfig, writeGateConfig } from '@mycf711/dsh-gate'
 import { deskForm, deskQueue, loadClient, walk, watcher } from './fixtures/panel-harness.mjs'
+import { gateDeferred, gatePayload, gateResponse, gateUrlRepo, loadGatePanel } from './fixtures/gate-panel.mjs'
 import { tempDir } from './fixtures/tmpdir.mjs'
 
 test('client.js 注册主理鱼与 composer dock 上的轨道环', () => {
@@ -4311,6 +4312,200 @@ test('门禁：状态只留在 GateSettings（主面板 23 + 门禁 12 = 35 槽�
     '多一个槽也要抛：位置化队列必须严格对齐（主面板不许悄悄加槽）')
   const nodes = walk(render(desk, gateQueue({ scope: 'user' })))
   assert.ok(gateText(nodes).includes('禁止凭证与密钥'), '槽位对齐下门禁页要完整渲染')
+})
+
+// ── U1：门禁 load 的异步竞态 ────────────────────────────────────────────────
+// 通用桩的 useEffect 是空实现、hook 槽位也不持久 —— 量不出「在途 / 乱序 / 卸载」。
+// 这里用 fixtures/gate-panel.mjs：跑真实 client.js，但状态槽持久、effect 按依赖触发、
+// setState 真的重渲染；fetch 由用例决定什么时候 resolve，才能把响应排成乱序。
+const gateRaceFetch = () => {
+  const requests = []
+  const pending = []
+  const fetchStub = (url, init = {}) => {
+    const text = String(url)
+    requests.push({ url: text, init })
+    // client.js 装载时会发 client-note 心跳：不是门禁请求，直接给成功。
+    if (!text.includes('/gates')) return Promise.resolve(gateResponse({ ok: true }))
+    if (text.includes('/gates/models')) return Promise.resolve(gateResponse({ ok: true, models: [] }))
+    if (text.includes('/gates/preview')) return Promise.resolve(gateResponse({ ok: true, hits: [], semantic: { skipped: true } }))
+    if (text.includes('/gates/optimize')) return Promise.resolve(gateResponse({ ok: true, text: '优化后的提示词' }))
+    if (String(init.method || 'GET').toUpperCase() === 'POST') {
+      return Promise.resolve(gateResponse({ ok: true, scope: 'user', path: '/home/u/.dsh/state/session-superagent/gates.json', config: {} }))
+    }
+    const deferred = gateDeferred()
+    pending.push({ url: text, deferred })
+    return deferred.promise
+  }
+  return {
+    fetch: fetchStub,
+    requests,
+    pending,
+  }
+}
+
+test('门禁 load 乱序：后到的旧仓库响应不能覆盖新仓库（U1-G1）', async () => {
+  const api = gateRaceFetch()
+  const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+  assert.equal(api.pending.length, 1, '首次挂载要读一次 /gates')
+  assert.equal(gateUrlRepo(api.pending[0].url), 'E:/work/demo', '读的是当前仓库')
+
+  // /state 后到把仓库换成 other：还没确认草稿（没有草稿），就要去读新仓库。
+  panel.setRepo('E:/work/other')
+  assert.equal(api.pending.length, 2, '换仓库要再读一次')
+  assert.equal(gateUrlRepo(api.pending[1].url), 'E:/work/other')
+
+  // 新仓库先回。
+  api.pending[1].deferred.resolve(gateResponse(gatePayload('E:/work/other', { prompt: 'other 提示词' })))
+  await panel.settle()
+  assert.equal(panel.control('gate-semantic-prompt').props.value, 'other 提示词')
+
+  // 旧仓库后回：它属于被顶掉的那次请求，不能把新仓库的数据覆盖回去。
+  api.pending[0].deferred.resolve(gateResponse(gatePayload('E:/work/demo', { prompt: 'demo 提示词' })))
+  await panel.settle()
+  assert.equal(panel.control('gate-semantic-prompt').props.value, 'other 提示词', '旧响应不能覆盖新仓库数据')
+  assert.equal(panel.text().includes('demo 提示词'), false, '旧仓库的配置不能再出现在面板上')
+})
+
+test('门禁 load 在途 dirty：切仓库的响应不能清掉新草稿（U1-G2）', async () => {
+  const api = gateRaceFetch()
+  const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+  api.pending[0].deferred.resolve(gateResponse(gatePayload('E:/work/demo', { prompt: 'demo 提示词' })))
+  await panel.settle()
+
+  // 切到 other 的请求在途时，用户改了这份草稿。
+  panel.setRepo('E:/work/other')
+  assert.equal(api.pending.length, 2, '干净的草稿不拦换仓库（先读新仓库）')
+  panel.control('gate-semantic-prompt').props.onChange({ target: { value: '手工改的提示词' } })
+  panel.flush()
+  assert.ok(panel.text().includes('未保存'), '改过草稿后要显示未保存')
+
+  api.pending[1].deferred.resolve(gateResponse(gatePayload('E:/work/other', { prompt: 'other 提示词' })))
+  await panel.settle()
+  assert.equal(panel.control('gate-semantic-prompt').props.value, '手工改的提示词', '在途 dirty 不能被响应清掉')
+  assert.ok(panel.text().includes('未保存'), '草稿还是未保存状态')
+})
+
+test('门禁 load 序号：同一仓库两次读取乱序，先发的后到也不能覆盖（U1-G3）', async () => {
+  const api = gateRaceFetch()
+  const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+  api.pending[0].deferred.resolve(gateResponse({ error: '第一次读取失败' }, 500))
+  await panel.settle()
+  assert.ok(panel.text().includes('第一次读取失败'), '首次读取失败要能看见')
+
+  // 同一帧点两次「重新读取」：两次请求在飞，仓库没变，只能靠序号分辨新旧。
+  const retry = panel.button('重新读取')
+  retry.props.onClick()
+  retry.props.onClick()
+  panel.flush()
+  assert.equal(api.pending.length, 3, '两次重试 = 两次新请求')
+
+  api.pending[2].deferred.resolve(gateResponse(gatePayload('E:/work/demo', { prompt: '第二次读取' })))
+  await panel.settle()
+  assert.equal(panel.control('gate-semantic-prompt').props.value, '第二次读取')
+
+  api.pending[1].deferred.resolve(gateResponse(gatePayload('E:/work/demo', { prompt: '第一次读取' })))
+  await panel.settle()
+  assert.equal(panel.control('gate-semantic-prompt').props.value, '第二次读取', '旧请求后到不能覆盖新结果')
+  assert.equal(panel.text().includes('第一次读取'), false)
+})
+
+test('门禁切仓库：取消不发请求并保留草稿，确认后才读新仓库（U1-G4）', async () => {
+  const api = gateRaceFetch()
+  const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+  api.pending[0].deferred.resolve(gateResponse(gatePayload('E:/work/demo', { prompt: 'demo 提示词' })))
+  await panel.settle()
+  panel.control('gate-semantic-prompt').props.onChange({ target: { value: '草稿提示词' } })
+  panel.flush()
+
+  panel.setRepo('E:/work/other')
+  assert.equal(api.pending.length, 1, '有草稿时不能偷偷去读新仓库')
+  panel.button('取消').props.onClick()
+  panel.flush()
+  assert.ok(panel.text().includes('已保留草稿'), '取消后要说清草稿还在')
+  assert.equal(api.pending.length, 1, '取消不能发请求')
+  assert.equal(panel.control('gate-semantic-prompt').props.value, '草稿提示词')
+
+  panel.button('放弃草稿并切换').props.onClick()
+  panel.flush()
+  const switched = api.pending.slice(1)
+  assert.ok(switched.length >= 1, '确认后才去读新仓库')
+  assert.deepEqual(switched.map((item) => gateUrlRepo(item.url)), switched.map(() => 'E:/work/other'))
+  // 确认放弃后草稿清空，[dirty] effect 会再补一次读取（旧行为：两条都读新仓库），两条都回同一份数据。
+  for (const item of switched) item.deferred.resolve(gateResponse(gatePayload('E:/work/other', { prompt: 'other 提示词' })))
+  await panel.settle()
+  assert.equal(panel.control('gate-semantic-prompt').props.value, 'other 提示词')
+  assert.equal(panel.text().includes('已保留草稿'), false, '确认切过去之后不能再挂保留草稿的提示')
+})
+
+test('门禁取消换仓库：已在途的新仓库响应也不能把数据切走（U1-G4b）', async () => {
+  const api = gateRaceFetch()
+  const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+  api.pending[0].deferred.resolve(gateResponse(gatePayload('E:/work/demo', { prompt: 'demo 提示词' })))
+  await panel.settle()
+
+  // 干净时换仓库 → 新仓库的读取已经发出去了；随后用户改出草稿并点「取消」。
+  panel.setRepo('E:/work/other')
+  assert.equal(api.pending.length, 2, '干净换仓库会先读新仓库')
+  panel.control('gate-semantic-prompt').props.onChange({ target: { value: '草稿提示词' } })
+  panel.flush()
+  panel.button('取消').props.onClick()
+  panel.flush()
+
+  // 请求已经在飞：晚到的响应不能把数据切到新仓库（否则「已保留草稿」的承诺是假的）。
+  api.pending[1].deferred.resolve(gateResponse(gatePayload('E:/work/other', { prompt: 'other 提示词' })))
+  await panel.settle()
+  assert.equal(panel.control('gate-semantic-prompt').props.value, '草稿提示词')
+  assert.ok(panel.text().includes('已保留草稿'), '取消后仍然要显示保留草稿的提示')
+  assert.equal(panel.text().includes('other 提示词'), false, '取消后不能再把数据切到新仓库')
+})
+
+test('门禁保存/预览/优化：目标仓库用 GET 回显的 data.repo（U1-G5）', async () => {
+  const api = gateRaceFetch()
+  const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+  api.pending[0].deferred.resolve(gateResponse(gatePayload('E:/work/demo', { prompt: 'demo 提示词' })))
+  await panel.settle()
+
+  // /state 换成 other，但草稿还在：面板数据仍属于 demo，三个写操作都必须落在 demo。
+  panel.control('gate-semantic-prompt').props.onChange({ target: { value: '草稿提示词' } })
+  panel.flush()
+  panel.setRepo('E:/work/other')
+  assert.equal(api.pending.length, 1, '有草稿时先不换数据')
+
+  await panel.button('预览').props.onClick()
+  panel.flush()
+  const preview = api.requests.find((item) => item.url.includes('/gates/preview'))
+  assert.equal(JSON.parse(preview.init.body).repo, 'E:/work/demo', '预览要用面板数据所属仓库')
+
+  await panel.button('优化提示词').props.onClick()
+  panel.flush()
+  const optimize = api.requests.find((item) => item.url.includes('/gates/optimize'))
+  assert.equal(JSON.parse(optimize.init.body).repo, 'E:/work/demo', '优化提示词要用面板数据所属仓库')
+
+  const saving = panel.button('保存').props.onClick()
+  panel.flush()
+  const post = api.requests.find((item) => item.url.includes('/gates') && String(item.init.method || '').toUpperCase() === 'POST')
+  assert.ok(post, '保存要真的 POST /gates')
+  assert.equal(JSON.parse(post.init.body).repo, 'E:/work/demo', '保存要写面板数据所属仓库')
+
+  // 保存成功后 load 按当前 repo（other）重读，才真正切过去。
+  // 草稿清空后 [dirty] effect 还会补一次读取（旧行为），两条都回同一份数据，只有最后一条算数。
+  await panel.settle(2)
+  const reloads = api.pending.filter((item) => gateUrlRepo(item.url) === 'E:/work/other')
+  assert.ok(reloads.length >= 1, '保存成功后要按当前 repo 重读')
+  for (const item of reloads) item.deferred.resolve(gateResponse(gatePayload('E:/work/other', { prompt: 'other 提示词' })))
+  await panel.settle()
+  await saving
+  assert.equal(panel.control('gate-semantic-prompt').props.value, 'other 提示词')
+})
+
+test('门禁 load 卸载后响应不再改状态（U1-G6）', async () => {
+  const api = gateRaceFetch()
+  const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+  assert.equal(api.pending.length, 1, '挂载时读取在途')
+  panel.unmount()
+  api.pending[0].deferred.resolve(gateResponse(gatePayload('E:/work/demo', { prompt: '迟到的响应' })))
+  await panel.settle()
+  assert.deepEqual(panel.violations(), [], '卸载后不能再 setState（取消/序号要拦住）')
 })
 
 test('门禁作用域：接官方 SegmentedControl，缺导出回退也有方向键/Home/End/跳过 disabled（Q2-F4）', () => {
