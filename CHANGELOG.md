@@ -2,6 +2,42 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.10.10] - 2026-11-08 —— 门禁 v4（并发一致性与异步竞态收尾）
+
+- 门禁子包 `@mycf711/dsh-gate` `0.1.2` → **`0.1.3`**：新增跨进程写锁与 Windows rename 重试
+  （`lib/config-lock.js`，公开子路径 `./lib/config-lock.js`）。同一配置路径的「读旧文件 → 校验 → 备份 →
+  临时写入 → rename」整体在 `<gates.json>.lock` 的 `O_EXCL` 锁内串行，跨进程也不会拿旧快照互相覆盖；
+  拿不到锁显式失败（`code: 'gate_lock_timeout'`，带持有者 `pid/host/startedAt` 与锁年龄），**不**退回无锁写；
+  stale 锁只在超龄或同机所有者已死时接管，年龄与所有者证据进返回值 `lock.broken`。
+  `writeGateConfig` 新增 `lockTimeoutMs` / `lockPollMs` / `lockStaleMs` / `lockGuardStaleMs` /
+  `renameAttempts` / `renameBackoffMs` 选项。
+- 守护锁与释放安全：创建 / 接管串行在 `<lock>.guard`（阈值独立 10s）；搬走 stale 锁到唯一名字后**再核对**
+  token（内容不可解析时比对原文），搬错就用 `link` / `COPYFILE_EXCL` 原子放回，绝不误删；`release()` 只在
+  守护区内核对 token 后才从原位 `unlink`，不匹配一个字节都不碰（拿不到守护锁 2s 上限同样不碰 `lockPath`）；
+  写盘前 `assertOwner()`，锁被接管过就抛 `gate_lock_lost`。新导出 `gateLockPath` / `gateGuardPath` /
+  `GATE_LOCK_SUFFIX` / `GATE_GUARD_SUFFIX` / `DEFAULT_GATE_*` / `acquireGateConfigLock` / `renameWithRetry`，
+  锁句柄新增 `isOwner()` / `assertOwner()`。
+- Windows `rename` 遇 `EPERM` / `EBUSY`：线性有界退避重试，耗尽后保留原文件、清理临时文件与锁，
+  错误带 `code` / `attempts`；`extends` 的 fail-closed、`false` / `'none'`、`.bak` 行为不回归。
+- 设置页门禁面板：每次 `load` 有单调序号、卸载取消与仓库一致性校验，只有最新且仍匹配当前 repo 的响应可提交；
+  草稿显式记录**来源仓库**，在途响应不得清掉 dirty 草稿（确认条保留），保存 / 预览 / 优化与确认条统一认草稿
+  来源仓库；取消换仓库会作废在途 `/gates/models` 并重读面板仓库模型列表；React StrictMode 双挂载在 effect
+  体复位 `aliveRef`。`GateSettings` 状态仍在组件内，主面板 hook 队列（23 槽）与官方 `SegmentedControl` 未动。
+- 发布检查：`sync-profile` 的 `TARGETS` 条目必须真实存在于仓库 —— 以前缺源被静默跳过、`--check` 照样
+  `exit 0`（假绿）；现在缺一条就点名并按 **`exit 2`** 红（`--repair` 修不了），总览行只在缺源时追加
+  「TARGETS 缺源 N」。`preflight` 的 profile 行解析抽成纯函数 `summarizeProfileCheck`（单一事实来源），
+  判定要求 `sync-profile` 退出码 0 **且**解析 clean，并解析新增的**第五段「TARGETS 缺源」**；老格式
+  （只有三段）按不干净处理。
+- 验证（合并 `main` 后最终树实测）：根 `npm test` **934/934**、gate 包 **166/166**、
+  `test/client.test.mjs` **162/162**、`test/update-ui.test.mjs` **53/53**、
+  `test/sync-profile-drift.test.mjs` **11/11**、`PANEL_STRICT=1` 门禁用例 **40/40**、
+  UI 审计 **11/11（100 分）**、面板文案快照 PASS、真实 Chromium **47/47**、
+  门禁专项 Chromium **54/54**、`preflight` 全量 **42 项 = 41 PASS / 1 SKIP**
+  （`smoke:observe` 需真机宿主）、`check-maintenance` 6/6。
+- 边界：跨主机共享盘（NFS/SMB）上的锁语义未验；真实长期文件句柄占用下的 `rename` `EPERM` 只用替身验证；
+  不经过本锁的外部写者并发只靠 `assertOwner()` 兜底；`sync-profile --repair` 只保证 profile **磁盘副本**
+  与仓库一致，宿主运行时是否生效要重载后另验（本轮不重启 DSH）。
+
 ## [0.10.9] - 2026-11-08 —— 门禁 v3（配置边界收尾 + 发布口径）
 
 - 门禁子包 `@mycf711/dsh-gate` `0.1.1` → `0.1.2`：`writeGateConfig` 整层重写对 `extends` **fail closed** ——
