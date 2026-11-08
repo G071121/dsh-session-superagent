@@ -36,7 +36,7 @@ const semanticConfig = (mode = 'warn') => ({
 test('createGate 暴露稳定的 GateProvider 形状', async () => {
   const gate = createGate({ config: customConfig() })
   assert.equal(gate.id, 'dsh-gate')
-  assert.equal(gate.version, '0.1.3')
+  assert.equal(gate.version, '0.1.4')
   assert.equal(typeof gate.check, 'function')
   const result = await gate.check({ trigger: 'issue.reply', text: '干净回复' })
   assert.deepEqual(result, { ok: true, hits: [], semantic: { skipped: true } })

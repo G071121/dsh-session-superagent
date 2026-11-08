@@ -21,12 +21,17 @@
 // 退出码：0 = 干净；1 = profile 有漂移（--repair 能修）；2 = 仓库侧问题（TARGETS 条目在仓库里
 // 不存在 / 门禁子包源目录不存在 / lib 的相对 import 解析失败 —— 这几种 --repair 修不了，只能改仓库）。
 //
-// 失败原子性（S1 v5 / v4 审查 F6）：仓库侧问题一律在**任何写盘之前**判红。
+// 失败原子性（S1 v5 / v4 审查 F6）：**`repoMissing` 非空时**整轮只读 —— TARGETS 条目在仓库里
+// 不存在、或 `packages/dsh-gate` 源目录缺失时，所有 link / relink / copy / prune 都不执行，
+// 判红（exit 2）发生在任何写盘之前。
 // 以前 `--repair` 会先把能做的 relink / 子包复制 / 陈旧 prune 做完再 exit 2 —— 缺的是 `lib/*.js` 时
 // profile 副本已经被当「陈旧」删掉：修不了却改了磁盘，用户以为只是报错，实际 profile 已经被改了一半。
-// 现在 `repoMissing` 非空时整轮只读：所有 link / relink / copy / prune 都不执行。
 //
-// 边界（别过度声明）：本脚本只保证**磁盘上的 profile 副本**与仓库一致；
+// 边界（别过度声明）：原子性**只覆盖 `repoMissing`**。`lib/*.js` 的相对 import 解析失败同样是
+// 仓库侧问题（exit 2），但它在**写盘之后**才检测 —— 那一轮 profile 可能已经 relink / prune 过
+// （Q1 L1；要收窄成写盘前判红需把 missingImports 计算前移，未在本轮做）。
+//
+// 另外，本脚本只保证**磁盘上的 profile 副本**与仓库一致；
 // 宿主进程里已加载的模块不会因为替换文件而重载 —— 运行时是否生效要用户重载宿主后另验。
 import { createHash } from 'node:crypto'
 import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, cpSync, rmSync } from 'node:fs'

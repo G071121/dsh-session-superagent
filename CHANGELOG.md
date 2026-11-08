@@ -2,6 +2,45 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.10.11] - 2026-11-09 —— 门禁 v5（锁残余/旧格式、模型来源、profile 失败原子性）
+
+- 门禁子包 `@mycf711/dsh-gate` `0.1.3` → **`0.1.4`**：锁残余与旧版无 token 锁收尾。
+  接管 / 释放留下的 `.stale-*` / 旧版 `.release-*` 证据在成功路径删干净；清理失败时 `EPERM` / `EBUSY`
+  有界退避三次，并把**真实残留路径**写进 `broken[].leftover`。新增 `pruneLockArtifacts`：按「保留最新
+  3 份 + mtime 满 60s」回收，每轮写盘前对主锁与守护锁各调一次（异常吞掉、不挡写盘），既留得下诊断信息
+  也不无限堆积。旧版无 token 锁的身份不再退化成字面量 `"undefined"`（那会让任意两把旧锁都算同一把），
+  改为**原文逐字节**比对；内容读不出来（`EACCES` / `EBUSY` / `EISDIR`）时 **fail closed** ——
+  不搬走、不删除，超时错误点名「内容不可读 / fail-closed / 手工删除」；坏 JSON / 空文件仍可凭原文核对，
+  解析失败**不再等价于「可删除」**，只有超龄或所有者已死才是接管理由。公开 API 增加
+  `pruneLockArtifacts` / `DEFAULT_GATE_ARTIFACT_KEEP` / `DEFAULT_GATE_ARTIFACT_MIN_AGE_MS`
+  （`./lib/config-lock.js`），`writeGateConfig` 返回值 `lock.broken[]` 带 `leftover`。
+- 设置页门禁面板：`/gates/models` 的列表与按钮全链跟**面板仓库**（草稿来源 → `data.repo` → prop），
+  不再跟 prop 仓库。请求带仓库、落地前二次核对（`requestedRepo !== panelRepoOf()` 直接丢弃），
+  跨仓库迟到响应（成功 / 失败 / 同仓库乱序）都不落地；闸门挡住 `/gates` 时作废在途 models 并重读
+  草稿来源仓库；「取消」仍重读面板仓库、「确认」后跟新仓库；渲染层在 `models.repo` 与面板仓库不一致时
+  下拉只剩当前值并提示重新读取 —— 选中模型不得跨仓库写入。主面板 23 槽 hook 与官方 `SegmentedControl`
+  未动（35 槽与 `PANEL_STRICT` 门禁组通过）。
+- 发布检查：`sync-profile` 的 TARGETS 缺源（含 `packages/dsh-gate` 源目录**整目录**缺失）在
+  **任何写盘之前**判红（`exit 2` + 点名），所有 link / relink / copy / prune 都加 `!REPO_BLOCKED`
+  守卫；注释收窄为「原子性只覆盖 `repoMissing`」—— `lib/*.js` 相对 import 解析失败仍在**写盘后**检测
+  （Q1 L1，本轮只收窄声明）。`preflight` 的 profile 行解析继续认第五段「TARGETS 缺源」；主入口判定收口成
+  `resolveIsMain`（`import.meta.main` 优先，回退用 realpath + Windows 大小写归一化），import 只输出
+  `IS_MAIN=false` 不跑门禁，不再有「逐字符比较 → 静默 exit 0」的回退分支。
+- 验证（合并 `main` 后最终树实测）：根 `npm test` **952/952**、gate 包 **172/172**、
+  `test/client.test.mjs` **167/167**、`test/update-ui.test.mjs` **53/53**、
+  `test/sync-profile-drift.test.mjs` **18/18**、`PANEL_STRICT=1` 门禁用例 **45/45**、
+  UI 审计 **11/11（100 分）**、面板文案快照 PASS、真实 Chromium **47/47**、
+  门禁专项 Chromium **54/54**、v5 模型专项 harness **63/63**、
+  `preflight` 全量 **42 项 = 41 PASS / 1 SKIP**（`smoke:observe` 需真机宿主）、`check-maintenance` 6/6。
+- 边界：`lib/*.js` 相对 import 解析失败不保证写盘前判红（Q1 L1）；整个 `lib/` 目录缺失时
+  `readdirSync` 抛 `ENOENT` → `exit 1` + 栈，而非 `exit 2` + 点名（Q1 L2）；第五段「TARGETS 缺源」
+  同时收 `packages/dsh-gate`（Q1 L3）；prune 的 `minAge` 用继承 mtime（Q1 L4）、Windows 大小写变体
+  残留互不回收（Q1 L5）；渲染期 ref 镜像在并发渲染下可能被丢弃 render 留下旧值（Q2-L1，被 `modelsStale`
+  护栏自愈）；`U5-M4` 把 `/gates` 请求数钉成精确 3（Q2-L2）—— 以上均 low，记录不扩大本轮。
+  跨主机共享盘（NFS/SMB）锁语义、真实长期文件句柄下的 `rename` `EPERM`、真实 WebView / 读屏 / 触摸 /
+  IME、真实 `/gates/models` 服务端跨仓库返回未验；`sync-profile --repair` 只保证 profile **磁盘副本**
+  与仓库一致，宿主运行时是否生效要重载后另验（本轮不重启 DSH）。
+
 ## [0.10.10] - 2026-11-08 —— 门禁 v4（并发一致性与异步竞态收尾）
 
 - 门禁子包 `@mycf711/dsh-gate` `0.1.2` → **`0.1.3`**：新增跨进程写锁与 Windows rename 重试
