@@ -356,6 +356,7 @@ window.__ModuleLoader__.load({
     let hostInput = null
     let hostSwitch = null
     let hostSegmentedTabs = null
+    let hostSegmentedControl = null
     let hostTag = null
     let hostStateDot = null
     let hostPill = null
@@ -373,6 +374,8 @@ window.__ModuleLoader__.load({
       hostSwitch = primitives.Switch || null
       // SegmentedTabs 同样独立探测：缺导出时完整保留下方 SegTabs，不影响其它原语。
       hostSegmentedTabs = primitives.SegmentedTabs || null
+      // SegmentedControl 与 SegmentedTabs 是两个导出：缺导出时回退本地单选分段（方向键/Home/End 同语义）。
+      hostSegmentedControl = primitives.SegmentedControl || null
       // Tag 与 StateDot 各自独立探测：任何一个缺导出都只回退自己，不影响另一个或其它原语。
       hostTag = primitives.Tag || null
       hostStateDot = primitives.StateDot || null
@@ -391,6 +394,7 @@ window.__ModuleLoader__.load({
       hostInput = null
       hostSwitch = null
       hostSegmentedTabs = null
+      hostSegmentedControl = null
       hostTag = null
       hostStateDot = null
       hostPill = null
@@ -418,7 +422,7 @@ window.__ModuleLoader__.load({
     }
 
     // 客户端版本探针：每次模块加载写一次，用来确认浏览器里跑的是哪一版
-    const CLIENT_VERSION = '0.10.7'
+    const CLIENT_VERSION = '0.10.8'
     // SEMVER_COMPARATOR_SOURCE_START
     // This block is duplicated verbatim in client.js because the browser UMD cannot import ESM.
     // test/update-semver.test.mjs audits both copies and exercises their behavior.
@@ -937,20 +941,57 @@ window.__ModuleLoader__.load({
     }
 
     /** 官方 SegmentedControl：单选分段（与 SegTabs 的页签语义不同，用于表单内的互斥选择）。 */
-    function SegmentedControl({ options, value, onChange, label, disabled }) {
-      // 官方分段控件是一行等宽格；`dt-segmented` 本身没写列模板，不补就会竖排（grid 默认单列）。
+    function SegmentedControl({ id, options, value, onChange, label, disabled }) {
+      // 官方组件自带方向键 / Home / End / 跳过 disabled / roving tab stop；这里只转发受控 props。
+      if (hostSegmentedControl) {
+        return h(hostSegmentedControl, { id, options, value, onChange, label, disabled })
+      }
+      // 老宿主完整保留本地实现 —— 键盘行为与官方对齐，不再只靠鼠标。
+      const buttons = useRef({})
+      const enabled = options.filter((option) => !(disabled || option.disabled))
+      const hasValue = options.some((option) => option.value === value)
+      const walk = (event) => {
+        const index = enabled.findIndex((option) => option.value === value)
+        const step = { ArrowRight: 1, ArrowLeft: -1 }[event.key]
+        let next
+        if (step !== undefined) {
+          if (enabled.length === 0) return
+          const from = index < 0 ? 0 : index
+          next = enabled[(from + step + enabled.length) % enabled.length]
+        } else if (event.key === 'Home') {
+          next = enabled[0]
+        } else if (event.key === 'End') {
+          next = enabled[enabled.length - 1]
+        } else {
+          return
+        }
+        if (!next) return
+        event.preventDefault()
+        if (next.value !== value) onChange(next.value)
+        // 焦点跟随：旧选中项变成 tabIndex=-1 后，键盘用户会掉出 radiogroup。
+        const node = buttons.current[next.value]
+        if (node && typeof node.focus === 'function') node.focus()
+      }
       return h('div', {
         className: 'dt-segmented',
+        id,
         role: 'radiogroup',
         'aria-label': label,
+        onKeyDown: walk,
         style: { gridTemplateColumns: 'repeat(' + options.length + ', minmax(0, 1fr))' },
       },
-        options.map((option) => h('button', {
-          key: option.value, type: 'button', role: 'radio',
-          'aria-checked': value === option.value, 'aria-selected': value === option.value,
-          className: 'dt-segment', disabled: disabled || option.disabled,
-          onClick: () => onChange(option.value),
-        }, option.label)))
+        options.map((option, index) => {
+          const selected = option.value === value
+          const unavailable = Boolean(disabled || option.disabled)
+          return h('button', {
+            key: option.value, type: 'button', role: 'radio',
+            'aria-checked': selected,
+            ref: (node) => { buttons.current[option.value] = node },
+            tabIndex: selected ? 0 : (hasValue ? -1 : (index === 0 ? 0 : -1)),
+            className: 'dt-segment', disabled: unavailable,
+            onClick: () => { if (!unavailable) onChange(option.value) },
+          }, option.label)
+        }))
     }
 
     /** 官方 DisclosureRow：折叠行的标准写法（Enter / 空格可切换，带 aria-expanded）。 */
@@ -2155,7 +2196,9 @@ window.__ModuleLoader__.load({
       { value: 'user', label: '我的' },
       { value: 'project', label: '项目' },
     ]
-    const GATE_LAYER_LABELS = { default: '默认', user: '我的', project: '项目' }
+    const GATE_LAYER_LABELS = { default: '默认', user: '我的', project: '项目', local: '本地' }
+    // 四层顺序：数值越大越靠后、优先级越高。面板只能写 user / project 两层。
+    const GATE_LAYER_RANK = { default: 0, user: 1, project: 2, local: 3 }
     const GATE_SCOPE_HINTS = {
       default: '默认规则随包发布，这里只读；要调整就切到「我的」或「项目」。',
       user: '「我的」写到用户全局配置，本机所有仓库都生效。',
@@ -2178,27 +2221,40 @@ window.__ModuleLoader__.load({
     // 语义复审只对这两类触发生效（G1 契约）；面板只如实说明，不另开判断。
     const GATE_SEMANTIC_TRIGGERS = ['merge', 'release']
 
-    /** 规则的可比较快照：只比会落盘的字段，`enabled` 是面板本地状态，不参与。 */
+    /**
+     * 规则的可比较快照：会落盘的字段，**包含** `enabled`（缺省 = 开）。
+     * 不把开关算进来，「本层只有开关不同」就会被当成没改 → 不落盘，等于假启停。
+     */
     const gateRuleKey = (rule) => JSON.stringify([
       rule.id, rule.label, rule.description || '', rule.severity || 'error',
       rule.triggers || null, rule.type, rule.pattern === undefined ? null : rule.pattern,
       rule.flags || '', rule.value === undefined ? null : rule.value, rule.message || '',
+      rule.enabled !== false,
     ])
 
-    /** 本层之下最近的一版同名规则；返回 null = 这条规则是本层新增的。 */
-    const gateInheritedRule = (data, scope, id) => {
-      const chain = scope === 'user' ? ['default'] : scope === 'project' ? ['default', 'user'] : []
-      let found = null
-      for (const name of chain) {
-        const layer = data && data.scopes && data.scopes[name] && data.scopes[name].config
-        const rule = layer && Array.isArray(layer.rules) ? layer.rules.find((item) => item && item.id === id) : null
-        if (rule) found = rule
+    /** 某一层的原始配置对象（GET /gates 的 scopes[scope].config）；null = 这层没有文件。 */
+    const gateRawLayer = (data, scope) => {
+      const layer = data && data.scopes && data.scopes[scope] ? data.scopes[scope].config : null
+      return layer && typeof layer === 'object' && !Array.isArray(layer) ? layer : null
+    }
+
+    /**
+     * 合并后是哪一层把这条规则写成停用的（取最靠后、也即真正生效的那一层）。
+     * 返回层级名；'' = 没有哪一层显式停用（或这条规则来自 extends 基文件）。
+     */
+    const gateDisabledLayer = (data, id) => {
+      let found = ''
+      for (const name of ['default', 'user', 'project', 'local']) {
+        const layer = gateRawLayer(data, name)
+        const rules = layer && Array.isArray(layer.rules) ? layer.rules : []
+        const rule = rules.find((item) => item && item.id === id)
+        if (rule) found = rule.enabled === false ? name : ''
       }
       return found
     }
 
-    /** 这条规则被哪几层定义（卡片上的来源标签）。 */
-    const gateLayerNames = (data, ruleId) => ['default', 'user', 'project'].filter((name) => {
+    /** 这条规则被哪几层定义（卡片上的来源标签；本地层也要显示，否则看不出是手工覆盖）。 */
+    const gateLayerNames = (data, ruleId) => ['default', 'user', 'project', 'local'].filter((name) => {
       const layer = data && data.scopes && data.scopes[name] && data.scopes[name].config
       const rules = layer && Array.isArray(layer.rules) ? layer.rules : []
       return rules.some((rule) => rule && rule.id === ruleId)
@@ -2218,24 +2274,28 @@ window.__ModuleLoader__.load({
       }
     }
 
-    /** 草稿：规则取「生效集合」（四层合并结果），开关默认全开。 */
+    /** 草稿：规则取「四层合并结果」，开关照合并后的真实状态（停用的就是关的）。 */
     const gateDraftOf = (data, scope) => {
       const rules = data && data.config && Array.isArray(data.config.rules) ? data.config.rules : []
       return {
-        rules: rules.map((rule) => ({ ...rule, enabled: true })),
+        rules: rules.map((rule) => ({ ...rule, enabled: rule.enabled !== false })),
         semantic: gateSemanticOf(data, scope),
       }
     }
 
-    /** 落盘形状：只带不等同于下层的规则 —— 层里只有真正的覆盖，不会把默认规则冻进来。 */
+    /**
+     * 落盘形状：完整规则 + 布尔 `enabled`。
+     * 复启也必须写完整规则 —— 只写 `{ id, enabled:true }` 缺 type，validateConfig 会判非法。
+     */
     const gateRuleBody = (rule) => {
       const entry = {
         id: rule.id,
-        label: rule.label,
+        label: String(rule.label || rule.id),
         description: rule.description || '',
         severity: rule.severity === 'warn' ? 'warn' : 'error',
         type: rule.type,
         message: rule.message || rule.label || '未通过门禁',
+        enabled: rule.enabled !== false,
       }
       if (Array.isArray(rule.triggers) && rule.triggers.length > 0) entry.triggers = rule.triggers
       if (rule.pattern !== undefined) entry.pattern = rule.pattern
@@ -2244,22 +2304,56 @@ window.__ModuleLoader__.load({
       return entry
     }
 
+    /**
+     * 落盘配置（写当前层）。
+     * - 本层已有的规则原样保留：保存是**整层替换**，漏一条就等于把它删了；
+     * - 只有和「四层合并结果」不同的规则才新建；
+     * - 关掉写 `enabled:false`（完整规则），打开写 `enabled:true`（完整规则）；
+     * - 本层原有的 `semantic`（对象或 `false`）没改就原样写回 —— 否则一次只改规则的保存
+     *   会顺手把「语义复审开/关」删掉，改变模型调用边界（Q1-F2）。
+     */
     const gateConfigOf = (scope, draft, data) => {
-      const changed = (rule) => {
-        const inherited = gateInheritedRule(data, scope, rule.id)
-        return !inherited || gateRuleKey(inherited) !== gateRuleKey(rule)
+      const derived = gateDraftOf(data, scope)
+      const baseById = new Map(derived.rules.map((rule) => [rule.id, rule]))
+      const rules = new Map()
+      const layer = gateRawLayer(data, scope)
+      const ownRules = layer && Array.isArray(layer.rules) ? layer.rules : []
+      for (const own of ownRules) {
+        if (!own || !own.id) continue
+        rules.set(own.id, gateRuleBody({ ...own, enabled: own.enabled !== false }))
+      }
+      for (const rule of draft.rules) {
+        const base = baseById.get(rule.id)
+        // 没动过的规则不写：本层没有覆盖就继续跟着下层走。
+        if (base && gateRuleKey(base) === gateRuleKey(rule)) continue
+        rules.set(rule.id, gateRuleBody(rule))
       }
       const config = {
         name: scope === 'user' ? 'user' : 'project',
-        rules: draft.rules.filter((rule) => rule.enabled && changed(rule)).map(gateRuleBody),
+        rules: [...rules.values()],
       }
       const base = gateSemanticOf(data, scope)
       const semantic = draft.semantic
+      const rawSemantic = layer && Object.prototype.hasOwnProperty.call(layer, 'semantic') ? layer.semantic : undefined
+      const changed = semantic.enabled !== base.enabled || semantic.model !== base.model || semantic.prompt !== base.prompt
       if (scope === 'project') {
-        // 项目层只能关，不能开或换模型（G1 契约）：勾上才写 false。
-        if (semantic.off && !base.off) config.semantic = false
-      } else if (semantic.enabled !== base.enabled || semantic.model !== base.model || semantic.prompt !== base.prompt) {
-        config.semantic = { enabled: semantic.enabled, model: semantic.model, prompt: semantic.prompt }
+        // 项目层只能关，不能开或换模型（G1 契约）。
+        if (semantic.off !== base.off) {
+          if (semantic.off) config.semantic = false
+          // 取消勾选「关闭」= 去掉本层覆盖、回到继承：不写 semantic 这一项。
+        } else if (rawSemantic !== undefined) {
+          // 没动过：本层原本写的是什么就原样写回（`false` 或对象）—— 否则一次规则保存
+          // 会让项目层重新开始请求模型（Q1-F2 证据 B）。
+          config.semantic = rawSemantic
+        }
+      } else if (changed) {
+        // 面板改过语义复审：以本层原有的 semantic 对象为底，保留 mode / baseURL / timeout
+        // 这些面板不展示的字段。
+        const baseFields = rawSemantic && typeof rawSemantic === 'object' && !Array.isArray(rawSemantic) ? rawSemantic : {}
+        config.semantic = { ...baseFields, enabled: semantic.enabled, model: semantic.model, prompt: semantic.prompt }
+      } else if (rawSemantic !== undefined) {
+        // 没改语义复审：本层原有的 semantic 原样写回（Q1-F2 证据 A）。
+        config.semantic = rawSemantic
       }
       return config
     }
@@ -2325,9 +2419,20 @@ window.__ModuleLoader__.load({
       const semanticLocked = readOnly || scope === 'project'
       const dirty = !readOnly && JSON.stringify(gateConfigOf(scope, current, data)) !== JSON.stringify(gateConfigOf(scope, derived, data))
       const scopePath = data && data.scopes && data.scopes[scope] ? data.scopes[scope].path : ''
+      // 本层写了 extends 时不能从面板保存：服务端写盘是整层重写，会把 extends 和它共享的
+      // 规则一起冲掉（Q1-F3）。这里明确拒绝并让人去改文件，而不是「保存成功」后规则悄悄消失。
+      const rawLayer = gateRawLayer(data, scope)
+      const layerExtends = Boolean(rawLayer && Object.prototype.hasOwnProperty.call(rawLayer, 'extends'))
 
       async function save() {
         if (!data || readOnly || busy) return
+        if (layerExtends) {
+          setStatus({
+            tone: 'error',
+            text: '保存失败：本层写了 extends（共享规则），面板整层重写会把共享规则冲掉；请直接改配置文件' + (scopePath ? '：' + scopePath : ''),
+          })
+          return
+        }
         setBusy('save')
         setStatus(null)
         try {
@@ -2339,7 +2444,7 @@ window.__ModuleLoader__.load({
           if (notify) notify('门禁配置已保存', 'info')
           await load()
         } catch (error) {
-          const text = '保存门禁配置失败：' + String((error && error.message) || error)
+          const text = '保存失败：' + String((error && error.message) || error)
           setStatus({ tone: 'error', text })
           if (notify) notify(text, 'error')
         } finally {
@@ -2358,7 +2463,7 @@ window.__ModuleLoader__.load({
               repo,
               trigger,
               body: sample,
-              semantic: current.semantic.enabled && GATE_SEMANTIC_TRIGGERS.includes(trigger),
+              semantic: semanticOn && GATE_SEMANTIC_TRIGGERS.includes(trigger),
             }),
           })
           if (!value || typeof value !== 'object') throw new Error('服务端没有返回预览结果')
@@ -2396,20 +2501,22 @@ window.__ModuleLoader__.load({
         ...current,
         rules: current.rules.map((rule) => (rule.id === id ? { ...rule, enabled: next } : rule)),
       })
-      const semanticState = !current.semantic.enabled
+      // 本层显式关闭（off）优先于继承来的 enabled：项目层写 semantic:false 时，
+      // 合并后的 enabled 可能还是上层继承值，不能同屏出现「已关闭 + 当前开启」。
+      const semanticOn = current.semantic.off !== true && current.semantic.enabled === true
+      const semanticState = !semanticOn
         ? '当前关闭：规则照跑，语义复审不发请求。'
         : !current.semantic.model
           ? '开了但没选模型：语义复审会跳过，硬门禁照常。'
           : '当前开启：命中只给提示，不阻断回复。'
       const enabledRules = current.rules.filter((rule) => rule.enabled).length
-      // 关掉的规则如果下层也有，本层只能「不覆盖」，停不掉它 —— 卡片上要说清，别让人以为开关失灵。
-      const mutedInherited = current.rules.filter((rule) => !rule.enabled && gateInheritedRule(data, scope, rule.id))
 
       return h(Section, { key: 'gate', title: '门禁' },
-        h(Hint, null, '内容层检查：只看要发出去的正文，不改工具权限。'),
+        h(Hint, null, '内容层检查：只看要发出去的正文，不改工具权限。关掉一条规则会真正停用，不再参与检查。'),
         h('div', { className: 'dt-field' },
           h('span', { className: 'dt-field-head' }, h('span', null, '作用域')),
           h(SegmentedControl, {
+            id: 'gate-scope',
             options: GATE_SCOPES,
             value: scope,
             label: '门禁作用域',
@@ -2437,6 +2544,9 @@ window.__ModuleLoader__.load({
         data
           ? h('ul', { className: 'dt-rules' }, current.rules.map((rule) => {
             const open = advanced === rule.id
+            const disabledLayer = gateDisabledLayer(data, rule.id)
+            // 停用来自更靠后的层（项目 / 本地）：当前作用域写什么都不生效，开关不能假装能改。
+            const lockedByLaterLayer = Boolean(disabledLayer && GATE_LAYER_RANK[disabledLayer] > GATE_LAYER_RANK[scope])
             return h('li', { key: rule.id, className: 'dt-rule' },
               h('div', { className: 'dt-row-main' },
                 h('div', { className: 'dt-row-title' },
@@ -2444,8 +2554,16 @@ window.__ModuleLoader__.load({
                   h(Tag, { tone: rule.severity === 'warn' ? 'warning' : 'quiet' }, rule.severity === 'warn' ? '提示' : '阻断'),
                   gateLayerNames(data, rule.id).map((name) => h(Tag, { key: name, tone: 'outline' }, GATE_LAYER_LABELS[name]))),
                 h('div', { className: 'dt-hint' }, rule.description || '没有说明'),
-                !rule.enabled && gateInheritedRule(data, scope, rule.id)
-                  ? h('div', { className: 'dt-hint' }, '这条来自上层：关掉只是本层不覆盖，上层同名规则照旧生效。')
+                !rule.enabled
+                  ? h('div', { className: 'dt-hint' }, readOnly
+                    ? '已停用：这条规则不参与检查。'
+                    : lockedByLaterLayer
+                      ? disabledLayer === 'local'
+                        ? '本地层（.superagent/gates.local.json，优先级最高）停用了这条：面板改不回来，要恢复请手改这个文件。'
+                        : '「' + GATE_LAYER_LABELS[disabledLayer] + '」层比当前作用域更靠后，停用了这条：这里改不回来，请到「' + GATE_LAYER_LABELS[disabledLayer] + '」层处理。'
+                      : disabledLayer === scope
+                        ? '本层已停用：这条规则不参与检查；打开会把完整规则（含 enabled:true）写回本层。'
+                        : '上层已停用：打开会写一条完整规则到本层，把它恢复。')
                   : null,
                 h(DisclosureRow, {
                   title: '高级',
@@ -2472,23 +2590,29 @@ window.__ModuleLoader__.load({
                 h(Toggle, {
                   id: 'gate-rule-' + rule.id + '-switch',
                   checked: rule.enabled,
-                  disabled: readOnly,
+                  disabled: readOnly || lockedByLaterLayer,
                   label: '启用「' + rule.label + '」',
                   onChange: (next) => toggleRule(rule.id, next),
                 })))
           }))
           : null,
+        !readOnly && data && layerExtends
+          ? h('div', { className: 'dt-banner dt-danger' },
+            h('p', { className: 'dt-error', role: 'alert' },
+              '这一层用了 extends（共享规则）：面板保存会整层重写并把共享规则冲掉，所以这里不写入。请直接改配置文件：'
+              + (scopePath || '（服务端没有返回路径）')))
+          : null,
         !readOnly && data
           ? h('div', { className: 'dt-savebar' },
             h('p', { className: 'dt-hint', 'aria-live': 'polite' },
-              busy === 'save' ? '保存中…' : dirty ? '未保存' : mutedInherited.length > 0 ? '没有要写进本层的改动' : '与已保存的一致'),
+              busy === 'save' ? '保存中…' : layerExtends ? '本层有 extends：保存已禁用' : dirty ? '未保存' : '与已保存的一致'),
             h(Btn, { size: 'sm', variant: 'ghost', disabled: !dirty || Boolean(busy), onClick: () => { setGateDraft(null); setStatus(null) } }, '放弃'),
-            h(Btn, { size: 'sm', variant: 'primary', disabled: !dirty || Boolean(busy), onClick: save }, busy === 'save' ? '保存中…' : '保存'))
+            h(Btn, { size: 'sm', variant: 'primary', disabled: !dirty || Boolean(busy) || layerExtends, onClick: save }, busy === 'save' ? '保存中…' : '保存'))
           : null,
         status
           ? h('p', { className: status.tone === 'error' ? 'dt-error' : 'dt-hint', role: status.tone === 'error' ? 'alert' : 'status' }, status.text)
           : null,
-        h(Hint, null, '本层只写「和下层不一样」的规则：改过的才会落盘，没动过的继续跟着默认走。关掉一条只表示本层不覆盖，下层同名规则照常生效。'),
+        h(Hint, null, '保存是整层替换：本层已有的覆盖会原样带上，没改过的规则继续跟着下层走。关掉一条会写成 enabled:false 真正停用，重新打开会写成完整规则 + enabled:true。'),
         data
           ? h('div', { className: 'dt-part' },
             h('div', { className: 'dt-subhead' }, h('span', null, '试跑预览')),
@@ -2513,7 +2637,9 @@ window.__ModuleLoader__.load({
               })),
             h('div', { className: 'dt-actions' },
               h(Btn, { size: 'sm', variant: 'outline', disabled: Boolean(busy), onClick: runPreview }, busy === 'preview' ? '预览中…' : '预览'),
-              GATE_SEMANTIC_TRIGGERS.includes(trigger) ? h(Tag, { tone: 'info' }, '这类触发会追加语义复审') : null),
+              GATE_SEMANTIC_TRIGGERS.includes(trigger)
+                ? h(Tag, { tone: 'info' }, semanticOn ? '这类触发会追加语义复审' : '这类触发支持语义复审（当前关闭）')
+                : null),
             preview && preview.failed
               ? h('p', { className: 'dt-error', role: 'alert' }, '预览失败：' + preview.failed)
               : preview

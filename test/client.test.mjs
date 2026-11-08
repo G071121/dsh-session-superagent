@@ -8,9 +8,12 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
 import vm from 'node:vm'
+import { createGate, loadGateConfig, readGateScope, writeGateConfig } from '@mycf711/dsh-gate'
 import { deskForm, deskQueue, loadClient, walk, watcher } from './fixtures/panel-harness.mjs'
+import { tempDir } from './fixtures/tmpdir.mjs'
 
 test('client.js 注册主理鱼与 composer dock 上的轨道环', () => {
   const { id, registrations } = loadClient()
@@ -2950,7 +2953,7 @@ function loadFallbackA11y(options = {}) {
   const needle = "    return {\n      inject: ['slots'],"
   assert.ok(source.includes(needle), '找不到 client.js 的返回出口')
   const instrumented = source.replace(needle,
-    '    window.__fallbackA11y = { FallbackInfoTip, Modal, StatusOrbit, isLocalDialogOpen: () => localDialogDepth > 0 }\n'
+    '    window.__fallbackA11y = { FallbackInfoTip, Modal, StatusOrbit, SegmentedControl, isLocalDialogOpen: () => localDialogDepth > 0 }\n'
     + needle)
 
   let mod = null
@@ -3445,7 +3448,23 @@ test('门禁规则卡：中文 label / 说明，正则默认收在「高级」�
   assert.ok(openedText.includes('删掉凭证；需要引用时写 <redacted>。'), '高级里要有命中后提示')
 })
 
-test('门禁保存：只把改过的规则 POST 到 /gates，成功要有回执', async () => {
+// 带某一层已写内容的 GET /gates 形状：本层停用 / 本层覆盖都要能构造出来。
+const gateApiWithLayer = (scope, layerRules, mergedRules = null) => {
+  const base = gateApiPayload()
+  return {
+    ...base,
+    config: mergedRules ? { ...base.config, rules: mergedRules } : base.config,
+    scopes: {
+      ...base.scopes,
+      [scope]: { path: base.scopes[scope].path, exists: true, config: { name: scope, rules: layerRules } },
+    },
+  }
+}
+
+// 合并后的语义复审值与 gateApiPayload 的默认配置一致（避免「没改语义」被写成改动）。
+const GATE_SEMANTIC_DERIVED = { enabled: false, model: 'group/deepseek-v4.1-flash-1017', prompt: '你是代码仓库回复审核员。', off: false }
+
+test('门禁保存：关掉的规则写 enabled:false，改过的规则一起落盘，成功要有回执', async () => {
   const requests = []
   const panel = loadStatefulPanel({
     queue: gateQueue({
@@ -3470,11 +3489,126 @@ test('门禁保存：只把改过的规则 POST 到 /gates，成功要有回执'
   const payload = JSON.parse(post.init.body)
   assert.equal(payload.scope, 'user', '写到「我的」这一层')
   assert.equal(payload.repo, 'E:/work/demo', '项目层要知道写到哪个仓库')
-  assert.deepEqual(payload.config.rules.map((rule) => rule.id), ['abs-path'], '只写跟下层不一样的规则，不把默认规则冻进本层')
-  assert.equal(payload.config.rules[0].message, '改成仓库相对路径。')
+  assert.deepEqual(payload.config.rules.map((rule) => rule.id), ['secret', 'abs-path'], '停用和改文案的规则都要落盘')
+  const secret = payload.config.rules[0]
+  assert.equal(secret.enabled, false, '关掉必须写成 enabled:false，而不是「本层不覆盖」')
+  assert.equal(secret.type, 'regex', '停用也要写完整规则：缺 type 的复启会被 validateConfig 判非法')
+  assert.equal(secret.pattern, GATE_SECRET_RULE.pattern, '停用要保留完整规则内容')
+  const path = payload.config.rules[1]
+  assert.equal(path.enabled, true, '没关的规则也要写 enabled:true')
+  assert.equal(path.message, '改成仓库相对路径。')
   assert.deepEqual(payload.config.semantic, { enabled: true, model: 'group/deepseek-v4.1-flash-1017', prompt: '审核提示词' })
   assert.ok(panel.nodes().some((node) => node.props && node.props.role === 'status' && /已保存/.test(String(node.props.children))),
     '保存成功要有回执')
+  const reloads = requests.filter((item) => item.url.includes('/gates') && (!item.init.method || item.init.method === 'GET'))
+  assert.equal(reloads.length, 1, '保存成功后必须重新读取配置（卡片回到四层合并结果）')
+})
+
+test('门禁开关：卡片状态取四层合并结果，停用的规则显示为关', () => {
+  const { registrations, render } = loadClient()
+  const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
+  const disabledSecret = { ...GATE_SECRET_RULE, enabled: false }
+  const payload = gateApiWithLayer('user', [disabledSecret], [disabledSecret, GATE_PATH_RULE])
+
+  const user = walk(render(desk, gateQueue({ scope: 'user', data: payload })))
+  const switchOf = (id, nodes) => nodes.find((n) => n.type === 'button' && n.props.role === 'switch' && n.props.id === 'gate-rule-' + id + '-switch')
+  assert.equal(switchOf('secret', user).props['aria-checked'], false, '合并后停用的规则，开关必须是关的')
+  assert.equal(switchOf('abs-path', user).props['aria-checked'], true, '没停用的规则照常是开')
+  const text = gateText(user)
+  assert.ok(text.includes('本层已停用'), '要说明这条是本层停用的：' + text.slice(0, 240))
+  assert.ok(!text.includes('关掉只是本层不覆盖'), '不许再说「关掉只是本层不覆盖」')
+  assert.ok(!text.includes('关掉一条只表示本层不覆盖'), '底部说明也不许说「关掉只表示不覆盖」')
+  assert.ok(!text.includes('上层同名规则照旧生效'), '不许再说上层同名规则照旧生效')
+  assert.ok(text.includes('规则 1 / 2'), '规则计数按合并后的开关算：' + text.slice(0, 240))
+
+  const readOnly = walk(render(desk, gateQueue({ scope: 'default', data: payload })))
+  const readOnlySecret = switchOf('secret', readOnly)
+  assert.equal(readOnlySecret.props['aria-checked'], false, '默认层只读，但状态照合并结果显示')
+  assert.equal(readOnlySecret.props.disabled, true, '默认层仍然不可点')
+  assert.ok(gateText(readOnly).includes('已停用：这条规则不参与检查。'), '只读层要如实说停用')
+})
+
+test('门禁开关：只切开关也算改动，落盘只写这一条 enabled:false', async () => {
+  const queue = gateQueue({
+    scope: 'user',
+    draft: gateDraft([{ ...GATE_SECRET_RULE, enabled: false }, { ...GATE_PATH_RULE, enabled: true }], GATE_SEMANTIC_DERIVED),
+  })
+  const { registrations, render } = loadClient()
+  const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
+  const nodes = walk(render(desk, queue))
+  assert.ok(gateText(nodes).includes('未保存'), '只切开关也要算「未保存」：' + gateText(nodes).slice(0, 240))
+  const save = nodes.find((n) => n.type === 'button' && (n.props.children || []).join('') === '保存')
+  assert.equal(save.props.disabled, false, '只切开关也要能点保存')
+
+  const requests = []
+  const panel = loadStatefulPanel({
+    queue,
+    fetch: (url, init = {}) => {
+      requests.push({ url: String(url), init })
+      if (init.method === 'POST') return Promise.resolve(raceResponse({ ok: true, scope: 'user', path: '/home/u/.dsh/state/session-superagent/gates.json', config: {} }))
+      return Promise.resolve(raceResponse(gateApiPayload()))
+    },
+  })
+  await panel.button('保存').props.onClick()
+  const post = requests.find((item) => item.init.method === 'POST')
+  const payload = JSON.parse(post.init.body)
+  assert.deepEqual(payload.config.rules.map((rule) => rule.id), ['secret'], '只写这一条改过的规则')
+  assert.equal(payload.config.rules[0].enabled, false)
+})
+
+test('门禁开关：重新打开写完整规则 + enabled:true', async () => {
+  const disabledSecret = { ...GATE_SECRET_RULE, enabled: false }
+  const data = gateApiWithLayer('user', [disabledSecret], [disabledSecret, GATE_PATH_RULE])
+  const requests = []
+  const panel = loadStatefulPanel({
+    queue: gateQueue({ scope: 'user', data }),
+    fetch: (url, init = {}) => {
+      requests.push({ url: String(url), init })
+      if (init.method === 'POST') return Promise.resolve(raceResponse({ ok: true, scope: 'user', path: '/home/u/.dsh/state/session-superagent/gates.json', config: {} }))
+      return Promise.resolve(raceResponse(data))
+    },
+  })
+  const switchOf = () => panel.nodes().find((n) => n.type === 'button' && n.props.id === 'gate-rule-secret-switch')
+  assert.equal(switchOf().props['aria-checked'], false)
+  switchOf().props.onClick()
+  assert.equal(switchOf().props['aria-checked'], true, '点一下开关要真的打开')
+  await panel.button('保存').props.onClick()
+  const post = requests.find((item) => item.init.method === 'POST')
+  const sent = JSON.parse(post.init.body).config.rules
+  const secret = sent.find((rule) => rule.id === 'secret')
+  assert.ok(secret, '复启要把完整规则写进本层')
+  assert.equal(secret.enabled, true, '重新打开写 enabled:true')
+  assert.equal(secret.type, 'regex', '不能只写 { id, enabled:true }：缺 type 会被判非法')
+  assert.equal(secret.pattern, GATE_SECRET_RULE.pattern, '复启要写完整规则，不是空壳')
+  assert.equal(sent.length, 1, '另一条没动过，不用写')
+})
+
+test('门禁保存：本层已有的覆盖不会被别的保存动作删掉', async () => {
+  const base = gateApiPayload()
+  const ownPath = { ...GATE_PATH_RULE, message: '本层自定义的提示' }
+  const data = {
+    ...base,
+    config: { ...base.config, rules: [GATE_SECRET_RULE, ownPath] },
+    scopes: { ...base.scopes, user: { path: base.scopes.user.path, exists: true, config: { name: 'user', rules: [ownPath] } } },
+  }
+  const requests = []
+  const panel = loadStatefulPanel({
+    queue: gateQueue({ scope: 'user', data }),
+    fetch: (url, init = {}) => {
+      requests.push({ url: String(url), init })
+      if (init.method === 'POST') return Promise.resolve(raceResponse({ ok: true, scope: 'user', path: base.scopes.user.path, config: {} }))
+      return Promise.resolve(raceResponse(data))
+    },
+  })
+  panel.nodes().find((n) => n.type === 'button' && n.props.id === 'gate-rule-secret-switch').props.onClick()
+  await panel.button('保存').props.onClick()
+  const post = requests.find((item) => item.init.method === 'POST')
+  const sent = JSON.parse(post.init.body).config.rules
+  assert.deepEqual(sent.map((rule) => rule.id), ['abs-path', 'secret'], '本层原有规则 + 新停用的规则都要在')
+  const kept = sent.find((rule) => rule.id === 'abs-path')
+  assert.equal(kept.message, '本层自定义的提示', '没动过的本层覆盖不能被保存悄悄删掉')
+  assert.equal(kept.enabled, true)
+  assert.equal(sent.find((rule) => rule.id === 'secret').enabled, false)
 })
 
 test('门禁保存失败：说清原因，不报成功', async () => {
@@ -3493,8 +3627,8 @@ test('门禁保存失败：说清原因，不报成功', async () => {
   })
   await panel.button('保存').props.onClick()
   const nodes = panel.nodes()
-  assert.ok(nodes.some((node) => node.props && node.props.role === 'alert' && /规则 id 重复/.test(a11yText(node))),
-    '保存失败要有 alert 说明原因')
+  assert.ok(nodes.some((node) => node.props && node.props.role === 'alert' && /保存失败：规则 id 重复/.test(a11yText(node))),
+    '保存失败要有 alert，文案以「保存失败」开头并说明原因')
   assert.ok(!nodes.some((node) => node.props && node.props.role === 'status' && /已保存/.test(String(node.props.children))),
     '失败不能报成功')
 })
@@ -3598,4 +3732,356 @@ test('门禁模型下拉：列表来自 /gates/models，当前值不会丢', () 
   assert.deepEqual((emptySelect.props.children || []).map((option) => option.props.value), [''],
     '取不到模型时也要有一个可显示的项')
   assert.ok(gateText(empty).includes('读取模型列表'), '要有重新读取的入口')
+})
+
+// ── U2（Q1-F2 / F3 / F7 修复）─────────────────────────────────────────────────
+// 这三个缺口都是「保存一次就把本层其它配置整层冲掉」：composite 配置里有 semantic / extends
+// 时，面板只改一条规则也会连带丢掉它们。下面用**真实 gate 包**做落盘 + 四层合并 + 模型边界，
+// 不只断言 POST 形状。
+
+/** 用真实 gate 包读一个仓库，构造 GET /gates 的响应（scopes 是服务端 readGateScope 的原始形状）。 */
+const realGateData = (repo, env) => {
+  const loaded = loadGateConfig({ repo, env })
+  const scopes = {}
+  for (const name of ['default', 'user', 'project', 'local']) {
+    const value = readGateScope(name, { repo, env })
+    scopes[name] = { path: value.path, exists: Boolean(value.config), config: value.config }
+  }
+  return { ok: true, repo, sources: loaded.sources, config: loaded.config, scopes }
+}
+
+test('门禁保存：本层 semantic 原样写回，保存后重读仍生效（Q1-F2 A）', async () => {
+  const repo = tempDir('gate-u2-semantic-user-')
+  const env = { ...process.env, DSH_GATE_USER_CONFIG: join(repo, '.superagent', 'user-gates.json') }
+  mkdirSync(join(repo, '.superagent'), { recursive: true })
+  writeGateConfig('user', {
+    name: 'user',
+    semantic: {
+      enabled: true,
+      baseURL: 'http://my-gateway.example/v1',
+      model: 'my-model',
+      mode: 'block',
+      timeoutMs: 30000,
+      maxInputChars: 20000,
+      prompt: '我的审核提示词',
+    },
+    rules: [],
+  }, { repo, env })
+  const data = realGateData(repo, env)
+  const rawUserSemantic = data.scopes.user.config.semantic
+  assert.equal(rawUserSemantic.enabled, true, '前置：本层语义复审已开')
+  const requests = []
+  const panel = loadStatefulPanel({
+    queue: gateQueue({ scope: 'user', data }),
+    fetch: (url, init = {}) => {
+      requests.push({ url: String(url), init })
+      if (init.method === 'POST') return Promise.resolve(raceResponse({ ok: true, scope: 'user', path: data.scopes.user.path, config: {} }))
+      return Promise.resolve(raceResponse(data))
+    },
+  })
+  // 只切一条规则，不碰语义复审
+  panel.nodes().find((n) => n.type === 'button' && n.props.id === 'gate-rule-secret-switch').props.onClick()
+  await panel.button('保存').props.onClick()
+  const post = requests.find((item) => item.init.method === 'POST')
+  const sent = JSON.parse(post.init.body).config
+  assert.deepEqual(sent.semantic, rawUserSemantic, '本层原有 semantic 必须原样写回（含面板不展示的 mode）')
+
+  // 真实落盘 + 四层合并：语义复审与规则停用同时还在
+  writeGateConfig('user', sent, { repo, env })
+  const reread = loadGateConfig({ repo, env })
+  assert.equal(reread.config.semantic.enabled, true, '保存后重读：语义复审仍然开启')
+  assert.equal(reread.config.semantic.model, 'my-model', '模型没被冲掉')
+  assert.equal(reread.config.semantic.mode, 'block', '面板不展示的 mode 也没被冲掉')
+  assert.equal(reread.config.semantic.baseURL, 'http://my-gateway.example/v1', '自定义网关地址没被冲掉')
+  assert.equal(reread.config.semantic.timeoutMs, 30000, '超时没被冲掉')
+  assert.equal(reread.config.semantic.maxInputChars, 20000, '正文上限没被冲掉')
+  assert.equal(reread.config.rules.find((rule) => rule.id === 'secret').enabled, false, '同一次保存里的规则停用也生效')
+
+  // 模型请求边界：语义开着，merge 会请求 1 次（正对照证明计数器不是死的）
+  const calls = []
+  const gate = createGate({
+    config: reread.config,
+    semanticOptions: { fetchImpl: () => { calls.push(1); throw new Error('stub') } },
+  })
+  const result = await gate.check({ trigger: 'merge', text: '这次修复已完成并通过测试。' })
+  assert.equal(calls.length, 1, '语义复审开着时 merge 会请求模型')
+  assert.equal(result.semantic.skipped, false)
+})
+
+test('门禁保存：只改语义开关时，baseURL/mode/timeout 等未暴露字段不丢（Q2-F1 ③）', async () => {
+  const repo = tempDir('gate-u2-semantic-fields-')
+  const env = { ...process.env, DSH_GATE_USER_CONFIG: join(repo, 'user-gates.json') }
+  writeGateConfig('user', {
+    name: 'user',
+    semantic: {
+      enabled: false,
+      baseURL: 'http://my-gateway.example/v1',
+      model: 'my-model',
+      mode: 'block',
+      timeoutMs: 30000,
+      maxInputChars: 20000,
+      prompt: '我的提示词',
+    },
+    rules: [],
+  }, { repo, env })
+  const data = realGateData(repo, env)
+  const rawSemantic = data.scopes.user.config.semantic
+  const requests = []
+  const panel = loadStatefulPanel({
+    queue: gateQueue({ scope: 'user', data }),
+    fetch: (url, init = {}) => {
+      requests.push({ url: String(url), init })
+      if (init.method === 'POST') return Promise.resolve(raceResponse({ ok: true, scope: 'user', path: data.scopes.user.path, config: {} }))
+      return Promise.resolve(raceResponse(data))
+    },
+  })
+  const toggle = panel.nodes().find((n) => n.type === 'button' && n.props.id === 'gate-semantic-enabled')
+  assert.equal(toggle.props['aria-checked'], false, '前置：本层语义复审是关的')
+  toggle.props.onClick()
+  await panel.button('保存').props.onClick()
+  const post = requests.find((item) => item.init.method === 'POST')
+  const sent = JSON.parse(post.init.body).config
+  assert.equal(sent.semantic.enabled, true, '面板改了开关')
+  for (const key of ['baseURL', 'model', 'mode', 'timeoutMs', 'maxInputChars', 'prompt']) {
+    assert.equal(sent.semantic[key], rawSemantic[key], '面板没展示的字段必须原样保留：' + key)
+  }
+  writeGateConfig('user', sent, { repo, env })
+  const reread = loadGateConfig({ repo, env })
+  assert.equal(reread.config.semantic.baseURL, 'http://my-gateway.example/v1', '重读后自定义网关仍在')
+  assert.equal(reread.config.semantic.timeoutMs, 30000, '重读后超时仍在')
+})
+
+test('门禁保存：项目层 semantic:false 不因无关保存重新发模型（Q1-F2 B）', async () => {
+  const repo = tempDir('gate-u2-semantic-project-')
+  const env = { ...process.env, DSH_GATE_USER_CONFIG: join(repo, 'no-user.json') }
+  mkdirSync(join(repo, '.superagent'), { recursive: true })
+  // 「我的」层开着语义复审，项目层显式关掉 —— 项目层关掉才是真正生效的边界
+  writeGateConfig('user', { name: 'user', semantic: { enabled: true, model: 'my-model' }, rules: [] }, { repo, env })
+  const projectFile = join(repo, '.superagent', 'gates.json')
+  writeFileSync(projectFile, JSON.stringify({
+    name: 'project',
+    semantic: false,
+    rules: [{ ...GATE_PATH_RULE, message: '项目层自己的提示' }],
+  }))
+  const data = realGateData(repo, env)
+  assert.equal(data.scopes.user.config.semantic.enabled, true, '前置：我的层开着语义复审')
+  assert.equal(data.config.semantic.enabled, false, '前置：项目层 semantic:false 覆盖了上层')
+
+  const requests = []
+  const panel = loadStatefulPanel({
+    queue: gateQueue({ scope: 'project', data }),
+    fetch: (url, init = {}) => {
+      requests.push({ url: String(url), init })
+      if (init.method === 'POST') return Promise.resolve(raceResponse({ ok: true, scope: 'project', path: data.scopes.project.path, config: {} }))
+      return Promise.resolve(raceResponse(data))
+    },
+  })
+  panel.nodes().find((n) => n.type === 'button' && n.props.id === 'gate-rule-secret-switch').props.onClick()
+  await panel.button('保存').props.onClick()
+  const post = requests.find((item) => item.init.method === 'POST')
+  const sent = JSON.parse(post.init.body).config
+  assert.equal(sent.semantic, false, '项目层原有 semantic:false 必须原样写回，不能因为只改规则就丢掉')
+
+  writeGateConfig('project', sent, { repo, env })
+  const reread = loadGateConfig({ repo, env })
+  assert.equal(reread.config.semantic.enabled, false, '保存后重读：项目层仍然关闭语义复审')
+  assert.equal(reread.config.rules.find((rule) => rule.id === 'secret').enabled, false, '同一次保存的规则改动也生效')
+
+  // 模型请求边界：项目层关着 → merge 不得请求模型；正对照证明同一计数器能数到 1
+  const calls = []
+  const gate = createGate({
+    config: reread.config,
+    semanticOptions: { fetchImpl: () => { calls.push(1); throw new Error('不应请求模型') } },
+  })
+  const result = await gate.check({ trigger: 'merge', text: '这次修复已完成并通过测试。' })
+  assert.equal(calls.length, 0, '项目层关了语义复审：merge 不得请求模型')
+  assert.equal(result.semantic.skipped, true)
+  const positive = createGate({
+    config: { rules: [], semantic: { enabled: true, baseURL: 'http://stub.local', model: 'm' } },
+    semanticOptions: { fetchImpl: () => { calls.push(1); throw new Error('stub') } },
+  })
+  await positive.check({ trigger: 'merge', text: '这次修复已完成并通过测试。' })
+  assert.equal(calls.length, 1, '正对照：语义开启时确实会请求模型')
+})
+
+test('门禁保存：本层有 extends 时拒绝保存，共享规则不会消失（Q1-F3）', async () => {
+  const repo = tempDir('gate-u2-extends-')
+  const env = { ...process.env, DSH_GATE_USER_CONFIG: join(repo, 'no-user.json') }
+  mkdirSync(join(repo, '.superagent'), { recursive: true })
+  writeFileSync(join(repo, '.superagent', 'shared.json'), JSON.stringify({
+    version: 1,
+    name: 'shared',
+    rules: [GATE_SECRET_RULE, GATE_PATH_RULE],
+  }))
+  const projOnly = {
+    id: 'proj-only', label: '项目独有规则', description: '只在这个仓库生效。', severity: 'warn',
+    triggers: ['issue.reply'], type: 'contains', value: '发布', message: '先别发布。',
+  }
+  const projectFile = join(repo, '.superagent', 'gates.json')
+  writeFileSync(projectFile, JSON.stringify({ name: 'project', extends: './shared.json', rules: [projOnly] }))
+  const data = realGateData(repo, env)
+  assert.equal(data.scopes.project.config.extends, './shared.json', '前置：项目层确实写了 extends')
+  assert.ok(data.config.rules.some((rule) => rule.id === 'secret'), '前置：extends 基文件里的共享规则已合并')
+
+  const requests = []
+  const panel = loadStatefulPanel({
+    queue: gateQueue({ scope: 'project', data }),
+    fetch: (url, init = {}) => {
+      requests.push({ url: String(url), init })
+      return Promise.resolve(raceResponse(data))
+    },
+  })
+  panel.nodes().find((n) => n.type === 'button' && n.props.id === 'gate-rule-secret-switch').props.onClick()
+  const save = panel.button('保存')
+  assert.equal(save.props.disabled, true, '本层有 extends 时保存必须禁用')
+  await save.props.onClick()
+  assert.ok(!requests.some((item) => item.init.method === 'POST'), '不能 POST /gates 覆盖掉 extends')
+  const nodes = panel.nodes()
+  assert.ok(nodes.some((node) => node.props && node.props.role === 'alert' && /extends/.test(a11yText(node))),
+    '要用 alert 说明为什么不能保存')
+  assert.ok(/手改|直接改配置文件/.test(gateText(nodes)), '要给出下一步：手改配置文件')
+
+  // 真实文件没被动过：extends 与共享规则都还在
+  const reread = loadGateConfig({ repo, env })
+  for (const id of ['secret', 'abs-path', 'proj-only']) {
+    assert.ok(reread.config.rules.some((rule) => rule.id === id), '共享规则/项目规则不能消失：' + id)
+  }
+  assert.equal(JSON.parse(readFileSync(projectFile, 'utf8')).extends, './shared.json', '磁盘上的 extends 没被冲掉')
+})
+
+test('门禁停用：停用来自本地层时如实说明本地优先，不承诺一键恢复（Q1-F7）', () => {
+  const base = gateApiPayload()
+  const disabledSecret = { ...GATE_SECRET_RULE, enabled: false }
+  const data = {
+    ...base,
+    config: { ...base.config, rules: [disabledSecret, GATE_PATH_RULE] },
+    scopes: {
+      ...base.scopes,
+      local: { path: 'E:/work/demo/.superagent/gates.local.json', exists: true, config: { name: 'local', rules: [disabledSecret] } },
+    },
+  }
+  const { registrations, render } = loadClient()
+  const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
+  const nodes = walk(render(desk, gateQueue({ scope: 'user', data })))
+  const secretSwitch = nodes.find((n) => n.type === 'button' && n.props.id === 'gate-rule-secret-switch')
+  assert.equal(secretSwitch.props['aria-checked'], false, '合并后是停用')
+  assert.equal(secretSwitch.props.disabled, true, '本地层优先级更高：面板开关不该假装能改')
+  const text = gateText(nodes)
+  assert.ok(text.includes('本地层'), '要点明是本地层停用的：' + text.slice(0, 260))
+  assert.ok(text.includes('手改'), '要给出下一步：手改本地配置文件')
+  assert.ok(!text.includes('把它恢复'), '不许承诺一键恢复（本地层优先级最高）')
+  assert.ok(!text.includes('打开会写一条完整规则到本层'), '不许再说「写本层就能恢复」')
+  const localTag = nodes.find((node) => node.type === 'span'
+    && String(node.props && node.props.className || '').includes('dt-tag')
+    && (node.props.children || []).join('') === '本地')
+  assert.ok(localTag, '卡片上要有「本地」来源标签（否则看不出是谁停用的）')
+})
+
+test('门禁项目层：semantic:false 时底部文案与预览都用「当前关闭」（Q2-F3）', async () => {
+  const base = gateApiPayload()
+  const data = {
+    ...base,
+    // 合并值仍是被上层继承的 enabled:true，但项目层显式写了 false —— 两处渲染必须一致。
+    config: { ...base.config, semantic: { ...base.config.semantic, enabled: true } },
+    scopes: {
+      ...base.scopes,
+      project: { path: base.scopes.project.path, exists: true, config: { name: 'project', semantic: false, rules: [] } },
+    },
+  }
+  const requests = []
+  const panel = loadStatefulPanel({
+    queue: gateQueue({ scope: 'project', data, trigger: 'merge', sample: '这次修复已完成并通过测试。' }),
+    fetch: (url, init = {}) => {
+      requests.push({ url: String(url), init })
+      if (init.method === 'POST' && String(url).includes('/gates/preview')) {
+        return Promise.resolve(raceResponse({ ok: true, trigger: 'merge', hits: [], semantic: { skipped: true } }))
+      }
+      return Promise.resolve(raceResponse(data))
+    },
+  })
+  const nodes = panel.nodes()
+  const offToggle = nodes.find((n) => n.type === 'button' && n.props.id === 'gate-semantic-off')
+  assert.equal(offToggle.props['aria-checked'], true, '「在本项目关闭语义复审」是开的')
+  const text = gateText(nodes)
+  assert.ok(text.includes('当前关闭'), '底部必须说「当前关闭」：' + text.slice(-320))
+  assert.ok(!text.includes('当前开启'), '不许同屏出现「当前开启」')
+  await panel.button('预览').props.onClick()
+  const post = requests.find((item) => item.url.includes('/gates/preview'))
+  assert.ok(post, '要真的调预览')
+  assert.equal(JSON.parse(post.init.body).semantic, false, '项目层已关闭时预览不得带 semantic:true')
+  const previewText = gateText(panel.nodes())
+  assert.ok(previewText.includes('这类触发支持语义复审（当前关闭）'), '预览区也要说清当前关闭：' + previewText.slice(-240))
+  assert.ok(!previewText.includes('这类触发会追加语义复审'), '已关闭时不许说「会追加语义复审」')
+
+  // 正对照：语义开着时预览区仍然如实说「会追加」。
+  const { registrations, render } = loadClient()
+  const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
+  const enabledNodes = walk(render(desk, gateQueue({ scope: 'user', trigger: 'merge', draft: gateDraft() })))
+  assert.ok(gateText(enabledNodes).includes('这类触发会追加语义复审'), '语义开着时预览区要说会追加')
+})
+
+test('门禁作用域：接官方 SegmentedControl，缺导出回退也有方向键/Home/End/跳过 disabled（Q2-F4）', () => {
+  const options = [
+    { value: 'default', label: '默认（只读）' },
+    { value: 'user', label: '我的', disabled: true },
+    { value: 'project', label: '项目' },
+  ]
+
+  // 有官方导出：原样委托，id/options/value/label/disabled 全转发（缺导出才允许回退）。
+  const host = loadFallbackA11y({ primitives: { SegmentedControl: 'host-segmented' } })
+  const delegated = host.internals.SegmentedControl({
+    id: 'gate-scope', options, value: 'default', label: '门禁作用域', disabled: true, onChange() {},
+  })
+  assert.equal(delegated.type, 'host-segmented', '有 primitives.SegmentedControl 时必须委托官方组件')
+  assert.equal(delegated.props.id, 'gate-scope')
+  assert.equal(delegated.props.value, 'default')
+  assert.equal(delegated.props.label, '门禁作用域')
+  assert.equal(delegated.props.disabled, true)
+  assert.equal(delegated.props.options, options)
+
+  // 缺导出：本地回退也要有官方同款键盘行为与 radios 语义。
+  const fallback = loadFallbackA11y()
+  const render = (value, extra = {}) => {
+    const changes = []
+    const focused = []
+    const mounted = fallback.mount(fallback.internals.SegmentedControl, {
+      id: 'gate-scope', options, value, label: '门禁作用域', onChange: (next) => changes.push(next), ...extra,
+    })
+    const nodes = mounted.render()
+    const group = nodes.find((n) => n.props && n.props.role === 'radiogroup')
+    const radios = nodes.filter((n) => n.props && n.props.role === 'radio')
+    for (const radio of radios) radio.props.ref({ focus: () => focused.push(radio.props['aria-checked'] === true ? 'selected' : 'other') })
+    return { changes, focused, group, radios, nodes }
+  }
+  const state = render('default')
+  assert.ok(state.group, '回退要保留 radiogroup')
+  assert.equal(state.group.props.id, 'gate-scope')
+  assert.deepEqual(state.radios.map((n) => n.props['aria-checked']), [true, false, false])
+  assert.ok(state.radios.every((n) => !('aria-selected' in n.props)), 'role=radio 不该带 aria-selected')
+  assert.deepEqual(state.radios.map((n) => n.props.tabIndex), [0, -1, -1], 'roving tab stop：只有选中项进 Tab 序列')
+  assert.equal(state.radios[1].props.disabled, true, 'disabled 选项保留 disabled 语义')
+  const key = (group, name) => group.props.onKeyDown({ key: name, preventDefault() {} })
+  key(state.group, 'ArrowRight')
+  assert.deepEqual(state.changes, ['project'], '方向键必须跳过 disabled 项')
+  assert.deepEqual(state.focused, ['other'], '焦点要跟到新选中项')
+  assert.deepEqual(render('default').changes, [])
+  const left = render('default')
+  key(left.group, 'ArrowLeft')
+  assert.deepEqual(left.changes, ['project'], '左方向键从第一项回绕到最后一项（跳过 disabled）')
+  const home = render('project')
+  key(home.group, 'Home')
+  assert.deepEqual(home.changes, ['default'])
+  const end = render('default')
+  key(end.group, 'End')
+  assert.deepEqual(end.changes, ['project'])
+  const noop = render('default')
+  key(noop.group, 'Escape')
+  assert.deepEqual(noop.changes, [], '无关按键不改值')
+  const blocked = render('default', { disabled: true })
+  key(blocked.group, 'ArrowRight')
+  assert.deepEqual(blocked.changes, [], '整体 disabled 时键盘不生效')
+  assert.ok(blocked.radios.every((n) => n.props.disabled === true), '整体 disabled 时每一项都不可点')
+  const clicked = render('default')
+  clicked.radios[1].props.onClick()
+  assert.deepEqual(clicked.changes, [], '点击 disabled 项不回调')
 })

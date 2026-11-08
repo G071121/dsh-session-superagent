@@ -36,7 +36,7 @@ const semanticConfig = (mode = 'warn') => ({
 test('createGate 暴露稳定的 GateProvider 形状', async () => {
   const gate = createGate({ config: customConfig() })
   assert.equal(gate.id, 'dsh-gate')
-  assert.equal(gate.version, '0.1.0')
+  assert.equal(gate.version, '0.1.1')
   assert.equal(typeof gate.check, 'function')
   const result = await gate.check({ trigger: 'issue.reply', text: '干净回复' })
   assert.deepEqual(result, { ok: true, hits: [], semantic: { skipped: true } })
@@ -159,7 +159,25 @@ test('semantic:false 时即使配置开启也跳过语义复审', async () => {
   assert.equal(calls, 0)
 })
 
-test('语义复审不可用时放行，硬门禁仍然生效', async () => {
+test('硬门禁失败时不请求模型（先确定性、后语义），硬门禁判定照旧', async () => {
+  let calls = 0
+  const gate = createGate({
+    config: semanticConfig(),
+    semanticOptions: {
+      fetchImpl: async () => {
+        calls += 1
+        throw new Error('gateway down')
+      },
+    },
+  })
+  const result = await gate.check({ trigger: 'merge', text: 'banana' })
+  assert.equal(result.ok, false)
+  assert.ok(result.hits.some((hit) => hit.id === 'banana'))
+  assert.equal(calls, 0, '硬门禁已经不过，就不该再花一次模型调用')
+  assert.equal(result.semantic.skipped, true)
+})
+
+test('语义复审不可用时放行：硬门禁干净就不阻断', async () => {
   const gate = createGate({
     config: semanticConfig(),
     semanticOptions: {
@@ -168,9 +186,8 @@ test('语义复审不可用时放行，硬门禁仍然生效', async () => {
       },
     },
   })
-  const result = await gate.check({ trigger: 'merge', text: 'banana' })
-  assert.equal(result.ok, false)
-  assert.ok(result.hits.some((hit) => hit.id === 'banana'))
+  const result = await gate.check({ trigger: 'merge', text: '干净回复，没有命中任何硬规则。' })
+  assert.equal(result.ok, true)
   assert.equal(result.semantic.ok, true)
   assert.match(result.semantic.warning, /语义复审不可用/)
 })

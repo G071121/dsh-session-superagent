@@ -146,8 +146,13 @@ async function main(argv) {
   let semantic = { skipped: true }
   const semanticEnabled = Boolean(config.semantic && config.semantic.enabled === true)
   if (SEMANTIC_TRIGGERS.includes(options.trigger) && (options.semantic || semanticEnabled)) {
-    semantic = await semanticReview(text, config, { trigger: options.trigger, current: options.current })
-    hits.push(...(semantic.hits || []))
+    if (!deterministic.ok) {
+      // 先确定性、后语义：硬门禁已经不过，就不再请求模型（也不把正文发出去）。
+      semantic = { skipped: true, reason: '硬门禁未通过，未请求模型' }
+    } else {
+      semantic = await semanticReview(text, config, { trigger: options.trigger, current: options.current })
+      hits.push(...(semantic.hits || []))
+    }
   }
   const ok = hits.every((hit) => hit.severity !== 'error')
   const result = { ok, trigger: options.trigger, current: options.current === undefined ? null : options.current, hits, semantic }

@@ -10,8 +10,9 @@
  *   3. 项目          <repo>/.superagent/gates.json
  *   4. 本地覆盖      <repo>/.superagent/gates.local.json
  *
- * 规则按 id 合并：同 id 覆盖，不同 id 追加。项目 / 本地只能**关闭**语义复审，
- * 不能替用户开复审或换模型。
+ * 规则按 id 合并：同 id 覆盖，不同 id 追加。规则可选 `enabled`（缺省 `true`）：
+ * `enabled:false` 表示本层明确停用该规则，后层写**同 id 完整规则** + `enabled:true` 即恢复。
+ * 项目 / 本地只能**关闭**语义复审，不能替用户开复审或换模型。
  *
  * 除 loadGateConfig / readGateScope / writeGateConfig 这类显式 IO 函数外，其余都是纯函数，方便主插件和测试注入。
  */
@@ -45,7 +46,7 @@ export {
 
 export const PACKAGE_NAME = '@mycf711/dsh-gate'
 /** 与 package.json 的 version 同步（测试守着）。 */
-export const PACKAGE_VERSION = '0.1.0'
+export const PACKAGE_VERSION = '0.1.1'
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -127,7 +128,7 @@ function normalizeRule(rule) {
   // 直接丢弃（validateConfig 会给出具体原因），而不是静默阻断所有回复。
   if (rule.type === 'contains' && (typeof rule.value !== 'string' || rule.value.length === 0)) return null
   if (rule.type === 'maxLength' && !(Number.isFinite(Number(rule.value)) && Number(rule.value) > 0)) return null
-  return {
+  const normalized = {
     id,
     label: String(rule.label || id),
     description: String(rule.description || ''),
@@ -139,6 +140,10 @@ function normalizeRule(rule) {
     value: rule.value,
     message: String(rule.message || rule.label || '未通过门禁'),
   }
+  // 规则级启停：只保留**显式写了的布尔值**，缺省即启用（旧配置写回不凭空加字段）。
+  // 非布尔（例如字符串 "false"）一律忽略：宁可规则继续生效，也不静默把保护关掉。
+  if (typeof rule.enabled === 'boolean') normalized.enabled = rule.enabled
+  return normalized
 }
 
 /** 整理成稳定形状；非法规则被丢弃（`validateConfig` 会给出具体原因）。 */
@@ -330,6 +335,8 @@ export function lintText(text, config, { trigger = 'issue.reply', current } = {}
   const body = String(text ?? '')
   const hits = []
   for (const rule of normalizeConfig(config).rules) {
+    // 本层明确停用（enabled:false）的规则不参与判定：连 warn 都不出，ok 口径不变。
+    if (rule.enabled === false) continue
     if (!rule.triggers.includes(trigger)) continue
     if (!ruleMatches(rule, body, current)) continue
     hits.push({ id: rule.id, label: rule.label, severity: rule.severity, message: rule.message })
@@ -356,7 +363,19 @@ export function validateConfig(input) {
     if (!RULE_ID_RE.test(id)) return { ok: false, error: '规则 id 非法：' + (id || '?') }
     if (seen.has(id)) return { ok: false, error: '规则 id 重复：' + id }
     seen.add(id)
-    if (!RULE_TYPE_SET.has(raw.type)) return { ok: false, error: '规则类型非法：' + id }
+    if (raw.enabled !== undefined && typeof raw.enabled !== 'boolean') {
+      return { ok: false, error: 'enabled 必须是布尔值：' + id }
+    }
+    if (!RULE_TYPE_SET.has(raw.type)) {
+      // 只写 { id, enabled } 的「复启」不是合法规则：不完整规则会被合并丢掉，
+      // 面板必须看到具体原因，而不是以为已经保存、实际还停用着。
+      return {
+        ok: false,
+        error: raw.type === undefined
+          ? '规则缺少 type：' + id + '（只写 id + enabled 不能停用或复启，请写完整规则）'
+          : '规则类型非法：' + id,
+      }
+    }
     if (raw.severity !== undefined && raw.severity !== 'error' && raw.severity !== 'warn') {
       return { ok: false, error: 'severity 只能是 error / warn：' + id }
     }
@@ -463,7 +482,8 @@ export function writeGateConfig(scope, config, { repo = process.cwd(), home = ho
  * if (!result.ok) return
  * ```
  *
- * 语义复审默认跟随配置（`semantic.enabled`），且只对 merge / release 生效。
+ * 语义复审默认跟随配置（`semantic.enabled`），且只对 merge / release 生效；
+ * 确定性门禁先跑，硬门禁已经不过时不再请求模型。
  */
 export function createGate({
   id = 'dsh-gate',
@@ -490,8 +510,13 @@ export function createGate({
       let semanticResult = { skipped: true }
       const semanticEnabled = Boolean(loaded.config.semantic && loaded.config.semantic.enabled === true)
       if (semantic !== false && semanticEnabled && SEMANTIC_TRIGGER_SET.has(trigger)) {
-        semanticResult = await semanticReview(text, loaded.config, { trigger, current, ...semanticOptions })
-        hits.push(...(semanticResult.hits || []))
+        if (!deterministic.ok) {
+          // 先确定性、后语义：硬门禁已经不过，就不再请求模型（省一次调用，也不把正文发出去）。
+          semanticResult = { skipped: true, reason: '硬门禁未通过，未请求模型' }
+        } else {
+          semanticResult = await semanticReview(text, loaded.config, { trigger, current, ...semanticOptions })
+          hits.push(...(semanticResult.hits || []))
+        }
       }
       return {
         ok: hits.every((hit) => hit.severity !== 'error'),

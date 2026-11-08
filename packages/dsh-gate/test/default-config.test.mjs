@@ -19,7 +19,7 @@ test('默认规则 JSON 可解析，包名 / 版本 / bin 一致', () => {
   assert.equal(raw.version, 1)
   assert.equal(raw.name, 'default')
   assert.equal(pkg.name, '@mycf711/dsh-gate')
-  assert.equal(pkg.version, '0.1.0')
+  assert.equal(pkg.version, '0.1.1')
   assert.equal(pkg.bin['dsh-gate'], 'bin/gate.mjs')
   assert.ok(pkg.files.includes('gates/'), 'files 必须包含 gates/')
   assert.ok(pkg.files.includes('lib/'), 'files 必须包含 lib/')
