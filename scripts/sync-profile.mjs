@@ -85,15 +85,19 @@ for (const rel of TARGETS) {
 }
 
 /**
- * 门禁子包参与内容比对的文件：`package.json` + `lib/**\/*.js` + `bin/**\/*.mjs`。
+ * 门禁子包参与内容比对的文件：`package.json` + `lib/**\/*.js` + `bin/**\/*.mjs` + `gates/**\/*.json`。
  *
  * 为什么不能只比 package.json：C1 改了 `lib/index.js` / `bin/gate.mjs`，版本没 bump，
  * 两份 package.json 逐字节相同 → 旧判定认为「已同步」，于是 --check 假绿、--repair 不替换。
+ * 为什么还要带 `gates/**\/*.json`（Q1R-M1）：运行时默认规则是 `gates/default.json`
+ * （`packages/dsh-gate/lib/index.js` 的 DEFAULT_GATE_PATH），只改它同样是「行为变了、profile 没变」，
+ * 漏掉它等于把假绿换个文件重演一遍。
  * 开发件（`test/`、`README.md`）不算运行时：改测试不该让门禁报漂移。
  */
 const GATE_RUNTIME_DIRS = [
   { dir: 'lib', ext: '.js' },
   { dir: 'bin', ext: '.mjs' },
+  { dir: 'gates', ext: '.json' },
 ]
 const GATE_RUNTIME_FILES = ['package.json']
 

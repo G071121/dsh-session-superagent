@@ -92,3 +92,19 @@ test('门禁子包的 test/ 与 README 改动不算漂移（只比运行时文�
   assert.equal(res.code, 0, '运行时文件一致就不该报漂移：' + res.out)
   assert.match(res.out, /门禁子包漂移 0/)
 })
+
+test('只改 gates/default.json 也必须报漂移（Q1R-M1：默认规则是运行时行为）', () => {
+  // `packages/dsh-gate/lib/index.js` 的 DEFAULT_GATE_PATH 指向 gates/default.json：
+  // 只换默认规则 = 行为变了、profile 没变。漏掉它，假绿就换个文件重演一遍。
+  buildDest()
+  const defaultRule = join(DEST, GATE_REL, 'gates', 'default.json')
+  assert.equal(existsSync(defaultRule), true, '门禁子包必须有运行时默认规则 gates/default.json')
+  writeFileSync(defaultRule, readFileSync(defaultRule, 'utf8').replace('{', '{\n'))
+  const res = runSync('--check', '--dir', DEST)
+  assert.equal(res.code, 1, '默认规则改了必须红：' + res.out)
+  assert.match(res.out, /内容与 packages\/dsh-gate 不一致：gates\/default\.json/)
+  assert.match(res.out, /门禁子包漂移 1/)
+  const repaired = runSync('--repair', '--dir', DEST)
+  assert.equal(repaired.code, 0)
+  assert.equal(sha256(join(GATE_SRC, 'gates', 'default.json')), sha256(defaultRule), '--repair 后默认规则要逐字节一致')
+})
