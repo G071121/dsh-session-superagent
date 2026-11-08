@@ -41,3 +41,33 @@
 - 全量 npm test、gate、client、drift、UI、preflight、Chromium 按改动复跑。
 - npm/tag/Release/main CI；profile 只声明磁盘一致。
 - 不做真实 WebView/共享盘/真实句柄/真实模型，不重启 DSH，issue #19 不动。
+
+## 结果（I1 集成与发布）
+
+- 集成：C1（`6a582e0`）、U1（`9c3236a`）、S1（`812df38`）三个提交 + V1 / Q1 / Q2 三份报告，
+  经 **PR #29**（`task/gate-v5-v1`）合入 `main`，merge commit `127bcba`；发布提交
+  `release: 0.10.11（门禁 v5 锁残余、模型来源与 profile 失败原子性）`（`b607149`）打
+  tag `v0.10.11` / `gate-v0.1.4`，`git merge-base --is-ancestor` 复核 tag 在 `main` 历史上；
+  没有强推、没有 `git add -A`。
+- 版本：主包 `0.10.10` → **`0.10.11`**（patch）；门禁子包 `@mycf711/dsh-gate` `0.1.3` → **`0.1.4`**
+  （锁残余清理、旧版无 token 锁 fail closed、`pruneLockArtifacts` 公开 API；沿用仓库既有 0.x 口径按
+  patch）。`package.json` / `package-lock.json` / `lib/index.js` `SERVER_VERSION` / `client.js`
+  `CLIENT_VERSION` / README 徽章 / CHANGELOG 六处同步，README 单测数 934 → 952，`AGENTS.md` 当前基线同步。
+- L1 收窄：`sync-profile.mjs` 的失败原子性注释改成「`repoMissing` 非空时整轮只读」，并写明
+  `lib/*.js` 相对 import 失败仍在**写盘之后**才检测（Q1 L1 本轮只收窄声明、未前移计算）；
+  L2–L5 与 Q2 两条 low 记录在案，不扩大本轮。
+- 最终计数（合并后复跑）：根 `npm test` **952/952**（fail 0，exit 0）、gate 包 **172/172**、
+  `test/client.test.mjs` **167/167**、`test/update-ui.test.mjs` **53/53**、
+  `test/sync-profile-drift.test.mjs` **18/18**、`PANEL_STRICT=1` 门禁用例 **45/45**、
+  UI 审计 **11/11（100 分）**、面板文案快照 PASS、真实 Chromium **47/47**（安装版前端 `0.2.2-rc.1`，
+  client sha256 `c6fe935d…`）、门禁专项 Chromium **54/54**、v5 模型专项 harness **63/63**、
+  `preflight` 全量 **42 项 = 41 PASS / 1 SKIP**（`smoke:observe` 需真机宿主）、`check-maintenance` **6/6**。
+- profile：`node scripts/sync-profile.mjs --repair` 后 `--check` 四段全零
+  （缺失 0 / 断链 0 / 陈旧 0 / 门禁子包漂移 0），第五段「TARGETS 缺源」不出现 ——
+  只声明**磁盘副本一致**；宿主运行时是否生效要重载后另验，本轮不重启 DSH。
+- 发布三件套：`npm publish`（`dsh-session-superagent@0.10.11` + `@mycf711/dsh-gate@0.1.4`）、
+  `git tag v0.10.11` / `gate-v0.1.4`、GitHub Release（`v0.10.11` = Latest，`gate-v0.1.4` 带子包说明）；
+  `main` 上 CI 绿（Node 22/24）。
+- 残余（均不阻塞）：Q1 L1–L5 与 Q2-L1/L2（见两份审查报告）；跨主机共享盘（NFS/SMB）锁语义、
+  真实长期文件句柄占用下的 `rename` `EPERM`、真实 WebView / 读屏 / 触摸 / IME、真实 `/gates/models`
+  服务端跨仓库返回未验。
