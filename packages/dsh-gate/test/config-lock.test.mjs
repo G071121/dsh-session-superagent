@@ -21,6 +21,7 @@ import {
   gateGuardPath,
   gateLockPath,
   projectGatePath,
+  pruneLockArtifacts,
   renameWithRetry,
   writeGateConfig,
 } from '../lib/index.js'
@@ -1026,9 +1027,13 @@ test('v5 C1：清理失败留证有界 —— 接管证据带 leftover，旧残�
 
   const [leftoverName] = artifactNames(dir)
   assert.ok(leftoverName, '前置：接管失败清理必须留下一个隔离文件')
-  const leftover = join(dir, leftoverName)
-  // 让它变旧，再堆三份更新的旧残留：失败证据最多保留最新 3 份，最旧的那份必须被回收。
-  utimesSync(leftover, new Date(Date.now() - 360000), new Date(Date.now() - 360000))
+  // v6 C1 起残留的年龄按**本次搬走时间**算（名字里带 `<ts>`）：单纯 utimes 不再能把
+  // 「刚搬走」的证据洗成旧的。这里把它重命名成「6 分钟前搬走」的名字（mtime 一并拨旧，
+  // 与旧格式残留同形），模拟真正的旧失败证据；再堆三份更新的旧残留。
+  const stamped = Date.now() - 360000
+  const aged = join(dir, basename(gateLockPath(configPath)) + '.stale-' + stamped + '-' + randomUUID())
+  renameSync(join(dir, leftoverName), aged)
+  utimesSync(aged, new Date(stamped), new Date(stamped))
   for (const [suffix, age] of [['stale-newer-300', 300000], ['release-newer-240', 240000], ['stale-newer-180', 180000]]) {
     const file = join(dir, basename(gateLockPath(configPath)) + '.' + suffix)
     writeFileSync(file, 'evidence ' + suffix, 'utf8')
@@ -1040,11 +1045,282 @@ test('v5 C1：清理失败留证有界 —— 接管证据带 leftover，旧残�
     home: tempDir('gate-home-'),
     env: {},
   })
-  assert.equal(existsSync(leftover), false, '最旧的失败证据必须被下一次写盘回收（有界）')
+  assert.equal(existsSync(aged), false, '最旧的失败证据必须被下一次写盘回收（有界）')
   assert.equal(
     artifactNames(dir).length,
     3,
     '只保留最新的三份证据（失败路径留证有界，不无限堆积）',
   )
+})
+
+// ── v6 C1：残留回收的年龄基准与大小写边界 ───────────────────────────────────
+//
+// 冻结行为（docs/任务书-dsh-gate-v6.md 第二节，承 v5 L4 / L5）：
+//   - 残留的年龄按**本次搬走 / 发现时间**算，不沿用源文件继承的 mtime：`rename` 会保留被搬锁的
+//     旧 mtime，一把 5 分钟前的 stale 锁搬成 `.stale-*` 后按 mtime 判龄会「生下来就够旧」；
+//   - 名字里的时间戳（`.stale-<ts>-<uuid>`）由 rename 原子落地，是「搬走时间」的权威来源；
+//     没有时间戳的（旧格式 / 手写残留）退回 mtime，行为与 v5 一致；
+//   - 大小写语义跟随文件系统：Windows 上 `.STALE-` 与本路径的 `.stale-` 是同一个命名空间（v5 L5），
+//     POSIX 上是不同文件 —— 一律不碰无关文件（`.bak` / 前缀相似 / 守护锁路径的残留）。
+
+/** 种一把「所有者已死 + 源 mtime 很旧」的 stale 锁（真实 PID 判活）。 */
+function plantDeadOldLock(lockPath, { ageMs = 300000, token = 'old-mtime' } = {}) {
+  const deadPid = 999999
+  assert.throws(() => process.kill(deadPid, 0), /ESRCH/, '前置：该 pid 必须不存在')
+  writeTextFile(lockPath, JSON.stringify({
+    pid: deadPid,
+    hostname: hostname(),
+    startedAt: new Date(Date.now() - ageMs).toISOString(),
+    token,
+  }) + '\n')
+  const stamp = new Date(Date.now() - ageMs)
+  utimesSync(lockPath, stamp, stamp)
+  return lockPath
+}
+
+/** 接管时「清理残留永远 EPERM」的替身：制造 leftover 证据。 */
+function unlinkStaleAlwaysFails() {
+  const counter = { attempts: 0 }
+  counter.unlink = (target) => {
+    if (String(target).includes('.stale-')) {
+      counter.attempts += 1
+      const error = new Error('EPERM: 替身占用')
+      error.code = 'EPERM'
+      throw error
+    }
+    return unlinkSync(target)
+  }
+  return counter
+}
+
+test('v6 C1：接管搬走的老锁按「搬走时间」计龄 —— 证据生下来不算旧，minAge 内不回收', () => {
+  const repo = tempDir('gate-artifact-move-age-')
+  const configPath = projectGatePath(repo)
+  const dir = dirname(configPath)
+  mkdirSync(dir, { recursive: true })
+  const lockPath = plantDeadOldLock(gateLockPath(configPath))
+
+  const flaky = unlinkStaleAlwaysFails()
+  let leftover = null
+  const lock = acquireGateConfigLock(configPath, { timeoutMs: 2000, unlink: flaky.unlink })
+  try {
+    assert.equal(flaky.attempts, 3, '前置：清理失败走 3 次有界重试')
+    const [evidence] = lock.broken
+    assert.ok(evidence, '前置：老锁必须被接管一次')
+    leftover = evidence.leftover
+    assert.ok(leftover && leftover.includes('.stale-'), '前置：清理失败要在证据里点名残留')
+    const movedAgeMs = Date.now() - statSync(leftover).mtimeMs
+    assert.ok(
+      movedAgeMs < 10000,
+      '证据文件的 mtime 必须是本次搬走时间，不能沿用源锁 5 分钟前的 mtime（实际 '
+        + Math.round(movedAgeMs) + 'ms）',
+    )
+  } finally {
+    lock.release()
+  }
+
+  const pruned = pruneLockArtifacts(lockPath, { keep: 0, minAgeMs: 60000 })
+  assert.deepEqual(pruned.removed, [], '刚搬走的在途 / 新鲜证据不能被回收（源锁 mtime 旧也不行）')
+  assert.ok(existsSync(leftover), '证据文件必须还在（够老才回收）')
+})
+
+test('v6 C1：证据新旧按「搬走时间」排 —— 名字里的时间戳优先于继承的 mtime', () => {
+  const repo = tempDir('gate-artifact-order-')
+  const path = projectGatePath(repo)
+  const dir = dirname(path)
+  mkdirSync(dir, { recursive: true })
+  const lockPath = gateLockPath(path)
+  const base = basename(lockPath)
+  const now = Date.now()
+  const artifact = (name, ageMs) => {
+    const file = join(dir, name)
+    writeFileSync(file, 'evidence ' + name, 'utf8')
+    utimesSync(file, new Date(now - ageMs), new Date(now - ageMs))
+    return file
+  }
+
+  const oldest = artifact(base + '.stale-' + (now - 120000) + '-a', 120000)
+  const middle = artifact(base + '.stale-' + (now - 90000) + '-b', 90000)
+  const newer = artifact(base + '.release-' + (now - 62000) + '-c', 62000)
+  // 刚搬走、但继承了源锁 3 小时前 mtime 的隔离文件：按「搬走时间」它才是最新的。
+  const justMoved = join(dir, base + '.stale-' + now + '-d')
+  writeFileSync(justMoved, 'evidence d', 'utf8')
+  utimesSync(justMoved, new Date(now - 3 * 3600000), new Date(now - 3 * 3600000))
+
+  const result = pruneLockArtifacts(lockPath, { keep: 3, minAgeMs: 60000 })
+  assert.deepEqual(result.removed, [oldest], 'keep=3 只回收「搬走时间」最早的那份')
+  assert.ok(existsSync(justMoved), '刚搬走的证据不能被当成最旧删掉（继承 mtime 不算年龄）')
+  assert.ok(existsSync(middle) && existsSync(newer), '更新三份证据要留着')
+  assert.deepEqual([...result.kept].sort(), [justMoved, middle, newer].sort())
+})
+
+test('v6 C1：名字里的搬走时间说了算 —— mtime 被后来触碰过也洗不白旧证据', () => {
+  const repo = tempDir('gate-artifact-touched-')
+  const path = projectGatePath(repo)
+  const dir = dirname(path)
+  mkdirSync(dir, { recursive: true })
+  const lockPath = gateLockPath(path)
+  const base = basename(lockPath)
+  const now = Date.now()
+  // 名字说「10 分钟前搬走」，mtime 却是刚刚（被 touch 过）：按搬走时间它已经够旧。
+  const oldByName = join(dir, base + '.stale-' + (now - 600000) + '-old')
+  writeFileSync(oldByName, 'old evidence', 'utf8')
+
+  const result = pruneLockArtifacts(lockPath, { keep: 0, minAgeMs: 60000 })
+  assert.deepEqual(result.removed, [oldByName], '旧证据不能靠 touch 永驻（有界才成立）')
+})
+
+test('v6 C1：在途 —— rename 之后 / 核对之前的并发 prune 不得回收隔离文件', () => {
+  const repo = tempDir('gate-artifact-inflight-')
+  const configPath = projectGatePath(repo)
+  const dir = dirname(configPath)
+  mkdirSync(dir, { recursive: true })
+  const lockPath = plantDeadOldLock(gateLockPath(configPath))
+
+  let raced = null
+  const rename = (from, to) => {
+    renameSync(from, to)
+    if (from === lockPath && raced === null) {
+      // 另一个写者此刻的回收：源锁 mtime 已 5 分钟，按 mtime 计龄会把刚落地的隔离文件当成「够旧」删掉。
+      raced = pruneLockArtifacts(lockPath, { keep: 0, minAgeMs: 60000 })
+    }
+  }
+  const lock = acquireGateConfigLock(configPath, { timeoutMs: 2000, rename })
+  try {
+    assert.ok(raced, '前置：注入点必须触发')
+    assert.deepEqual(raced.removed, [], '并发 prune 不能回收刚搬走的隔离文件（否则身份核对失败、还原丢失）')
+    assert.equal(lock.broken.length, 1, '接管必须完成并留证一次（被并发回收会让核对拿不到身份）')
+  } finally {
+    lock.release()
+  }
+  assert.deepEqual(artifactNames(dir), [], '成功路径不留隔离文件')
+})
+
+test('v6 C1：大小写变体 —— .STALE-/.RELEASE- 按文件系统语义回收，无关文件一个不动', () => {
+  const repo = tempDir('gate-artifact-case-')
+  const path = projectGatePath(repo)
+  const dir = dirname(path)
+  mkdirSync(dir, { recursive: true })
+  const lockPath = gateLockPath(path)
+  const base = basename(lockPath)
+  const upper = base.toUpperCase()
+  const now = Date.now()
+  const make = (name, ageMs, text = 'evidence') => {
+    const file = join(dir, name)
+    writeFileSync(file, text, 'utf8')
+    utimesSync(file, new Date(now - ageMs), new Date(now - ageMs))
+    return file
+  }
+
+  const lowerOld = make(base + '.stale-' + (now - 400000) + '-a', 400000)
+  const upperOld = make(upper + '.STALE-' + (now - 300000) + '-b', 300000)
+  const upperRelease = make(upper + '.RELEASE-' + (now - 200000) + '-c', 200000)
+  const lowerNew = make(base + '.release-' + (now - 100000) + '-d', 100000)
+  const unrelated = [
+    make(base + '.bak', 500000, 'backup'),
+    make(base + '-notes.txt', 500000, 'notes'),
+    make(base + 'x.stale-' + (now - 500000) + '-y', 500000, 'prefix lookalike'),
+    make(upper + '.BAK', 500000, 'upper backup'),
+  ]
+
+  const posix = pruneLockArtifacts(lockPath, { keep: 0, minAgeMs: 60000, caseInsensitive: false })
+  assert.deepEqual(
+    [...posix.removed].sort(),
+    [lowerOld, lowerNew].sort(),
+    '区分大小写（POSIX 语义）时只认本路径产出的残留',
+  )
+  for (const file of [upperOld, upperRelease, ...unrelated]) {
+    assert.ok(existsSync(file), '大小写变体（区分模式）与无关文件都不能删：' + basename(file))
+  }
+
+  const windows = pruneLockArtifacts(lockPath, { keep: 0, minAgeMs: 60000, caseInsensitive: true })
+  assert.deepEqual(
+    [...windows.removed].sort(),
+    [upperOld, upperRelease].sort(),
+    'Windows 语义下大小写变体是同一个命名空间，一并回收',
+  )
+  for (const file of unrelated) {
+    assert.ok(existsSync(file), '无关文件一个都不许动：' + basename(file))
+  }
+})
+
+test('v6 C1：默认大小写语义跟随平台（Windows 不区分 / POSIX 区分）', () => {
+  const repo = tempDir('gate-artifact-case-default-')
+  const path = projectGatePath(repo)
+  const dir = dirname(path)
+  mkdirSync(dir, { recursive: true })
+  const lockPath = gateLockPath(path)
+  const base = basename(lockPath)
+  const now = Date.now()
+  const upperOld = join(dir, base.toUpperCase() + '.STALE-' + (now - 300000) + '-z')
+  writeFileSync(upperOld, 'upper evidence', 'utf8')
+  utimesSync(upperOld, new Date(now - 300000), new Date(now - 300000))
+
+  const result = pruneLockArtifacts(lockPath, { keep: 0, minAgeMs: 60000 })
+  if (process.platform === 'win32') {
+    assert.deepEqual(result.removed, [upperOld], 'Windows 默认必须把大小写变体当同一个残留')
+  } else {
+    assert.deepEqual(result.removed, [], 'POSIX 默认不碰大小写不同的真实文件')
+    assert.ok(existsSync(upperOld), 'POSIX 上另一个文件原样保留')
+  }
+})
+
+test('v6 C1：刷不动 mtime（EPERM 替身）也不丢证据 —— 名字里的搬走时间兜底', () => {
+  const repo = tempDir('gate-artifact-utimes-fail-')
+  const configPath = projectGatePath(repo)
+  const dir = dirname(configPath)
+  mkdirSync(dir, { recursive: true })
+  const lockPath = plantDeadOldLock(gateLockPath(configPath))
+
+  const flaky = unlinkStaleAlwaysFails()
+  const utimes = () => {
+    const error = new Error('EPERM: 替身占用（utimes）')
+    error.code = 'EPERM'
+    throw error
+  }
+  let leftover = null
+  const lock = acquireGateConfigLock(configPath, { timeoutMs: 2000, unlink: flaky.unlink, utimes })
+  try {
+    const [evidence] = lock.broken
+    assert.ok(evidence, '前置：老锁必须被接管一次')
+    leftover = evidence.leftover
+    assert.ok(leftover && leftover.includes('.stale-'), '前置：清理失败要在证据里点名残留')
+    const untouchedAgeMs = Date.now() - statSync(leftover).mtimeMs
+    assert.ok(untouchedAgeMs > 240000, '前置：mtime 刷不动时仍是源锁的旧 mtime（实际 ' + Math.round(untouchedAgeMs) + 'ms）')
+  } finally {
+    lock.release()
+  }
+
+  const pruned = pruneLockArtifacts(lockPath, { keep: 0, minAgeMs: 60000 })
+  assert.deepEqual(pruned.removed, [], '名字里的搬走时间是权威：mtime 旧也按新鲜在途文件保护')
+  assert.ok(existsSync(leftover), '证据文件必须还在')
+})
+
+test('v6 C1：守护锁路径的残留同规则 —— 按搬走时间计龄，且不被主锁的回收顺带删掉', () => {
+  const repo = tempDir('gate-artifact-guard-')
+  const path = projectGatePath(repo)
+  const dir = dirname(path)
+  mkdirSync(dir, { recursive: true })
+  const lockPath = gateLockPath(path)
+  const guardPath = gateGuardPath(path)
+  const base = basename(lockPath)
+  const now = Date.now()
+  const make = (name, ageMs) => {
+    const file = join(dir, name)
+    writeFileSync(file, 'evidence ' + name, 'utf8')
+    utimesSync(file, new Date(now - ageMs), new Date(now - ageMs))
+    return file
+  }
+
+  // 刚搬走的守护锁证据：继承了源守护锁 3 小时前的 mtime，按搬走时间它是新鲜的。
+  const justMovedGuard = make(base + '.guard.stale-' + now + '-g', 3 * 3600000)
+  const oldGuard = make(base + '.guard.release-' + (now - 300000) + '-h', 300000)
+
+  const lockPrune = pruneLockArtifacts(lockPath, { keep: 3, minAgeMs: 60000 })
+  assert.deepEqual(lockPrune.removed, [], '主锁的回收不能顺带删守护锁路径的残留')
+
+  const guardPrune = pruneLockArtifacts(guardPath, { keep: 0, minAgeMs: 60000 })
+  assert.deepEqual(guardPrune.removed, [oldGuard], '守护锁路径自己回收：旧的删、刚搬走（继承旧 mtime）的留')
+  assert.ok(existsSync(justMovedGuard), '刚搬走的守护锁证据必须留着')
 })
 
