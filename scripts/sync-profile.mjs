@@ -8,12 +8,19 @@
 //   客户端 bundle 却照常加载，表面看起来"插件还在"。
 // 真实事故 2（潜伏）：某些工具用「写临时文件再 rename」保存，profile 里那份仍是旧 inode，
 //   于是宿主跑的是旧代码，而仓库里看着已经是新代码。
+// 真实事故 3（假绿，2026-11-08）：门禁子包只比 package.json 就判「已同步」——
+//   C1 改了 `packages/dsh-gate/lib/index.js`、版本没 bump、package.json 逐字节相同，
+//   于是 `--check` 绿、`--repair` 不替换，profile 里跑的还是旧实现。见下方 gateDigest。
 //
 // 用法：
 //   node scripts/sync-profile.mjs            补齐缺失文件（不动断链，只警告）
-//   node scripts/sync-profile.mjs --repair   断链也重建硬链接，并清理 profile 里的陈旧文件
-//   node scripts/sync-profile.mjs --check    只检查：有缺失/断链/陈旧就 exit 1（给 CI 用）
+//   node scripts/sync-profile.mjs --repair   断链也重建硬链接、门禁子包按内容强制同步、清理陈旧文件
+//   node scripts/sync-profile.mjs --check    只检查：缺失/断链/陈旧/门禁子包漂移任一非零就 exit 1（给 CI 用）
 //   node scripts/sync-profile.mjs --dir <path>  指定 profile 安装目录
+//
+// 边界（别过度声明）：本脚本只保证**磁盘上的 profile 副本**与仓库一致；
+// 宿主进程里已加载的模块不会因为替换文件而重载 —— 运行时是否生效要用户重载宿主后另验。
+import { createHash } from 'node:crypto'
 import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, cpSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -43,7 +50,7 @@ if (!existsSync(DEST)) {
   process.exit(1)
 }
 
-const drift = { missing: [], broken: [], stale: [] }
+const drift = { missing: [], broken: [], stale: [], gate: [] }
 let linked = 0
 
 for (const rel of TARGETS) {
@@ -77,25 +84,99 @@ for (const rel of TARGETS) {
   }
 }
 
+/**
+ * 门禁子包参与内容比对的文件：`package.json` + `lib/**\/*.js` + `bin/**\/*.mjs`。
+ *
+ * 为什么不能只比 package.json：C1 改了 `lib/index.js` / `bin/gate.mjs`，版本没 bump，
+ * 两份 package.json 逐字节相同 → 旧判定认为「已同步」，于是 --check 假绿、--repair 不替换。
+ * 开发件（`test/`、`README.md`）不算运行时：改测试不该让门禁报漂移。
+ */
+const GATE_RUNTIME_DIRS = [
+  { dir: 'lib', ext: '.js' },
+  { dir: 'bin', ext: '.mjs' },
+]
+const GATE_RUNTIME_FILES = ['package.json']
+
+/** 递归列出目录下所有文件（相对路径，用 `/` 分隔 —— 排序后才稳定）。 */
+function walkFiles(root, rel, out) {
+  for (const name of readdirSync(join(root, rel))) {
+    const childRel = rel + '/' + name
+    if (statSync(join(root, childRel)).isDirectory()) { walkFiles(root, childRel, out); continue }
+    out.push(childRel)
+  }
+}
+
+/** 门禁子包的运行时文件清单（排序后）。 */
+function listGateRuntimeFiles(root) {
+  const out = []
+  for (const rel of GATE_RUNTIME_FILES) if (existsSync(join(root, rel))) out.push(rel)
+  for (const rule of GATE_RUNTIME_DIRS) {
+    if (!existsSync(join(root, rule.dir))) continue
+    const found = []
+    walkFiles(root, rule.dir, found)
+    for (const rel of found) if (rel.endsWith(rule.ext)) out.push(rel)
+  }
+  return out.sort()
+}
+
+/** 逐个文件的 sha256 + 相对路径汇总成一个目录指纹；目录不存在给 null（=没装）。 */
+function gateDigest(root) {
+  if (!root || !existsSync(root)) return null
+  const hash = createHash('sha256')
+  for (const rel of listGateRuntimeFiles(root)) {
+    hash.update(rel + '\u0000' + createHash('sha256').update(readFileSync(join(root, rel))).digest('hex') + '\n')
+  }
+  return hash.digest('hex')
+}
+
+/** 列出内容不一致的文件（src 视角；profile 多出来的单独标注），给报错用。 */
+function gateDiffDetail(srcRoot, dstRoot) {
+  const srcFiles = listGateRuntimeFiles(srcRoot)
+  const dstFiles = listGateRuntimeFiles(dstRoot)
+  const changed = []
+  for (const rel of srcFiles) {
+    const dst = join(dstRoot, rel)
+    if (!existsSync(dst) || !readFileSync(join(srcRoot, rel)).equals(readFileSync(dst))) changed.push(rel)
+  }
+  const known = new Set(srcFiles)
+  for (const rel of dstFiles) if (!known.has(rel)) changed.push(rel + '（profile 多出来的）')
+  return changed
+}
+
 // 门禁子包：主插件静态 import @mycf711/dsh-gate，profile 里必须有这一份。
-// 硬链只对文件生效，目录用递归复制；版本不同就整体替换（保留 package 结构）。
+// 硬链只对文件生效，目录用递归复制；**按内容判定**，不一致就整体替换（保留 package 结构）。
 const gateSrc = join(ROOT, 'packages', 'dsh-gate')
 const gateDst = join(DEST, 'node_modules', '@mycf711', 'dsh-gate')
+const gateRel = 'node_modules/@mycf711/dsh-gate'
 if (existsSync(gateSrc)) {
-  const same = existsSync(gateDst)
-    && existsSync(join(gateDst, 'package.json'))
-    && readFileSync(join(gateSrc, 'package.json'), 'utf8') === readFileSync(join(gateDst, 'package.json'), 'utf8')
-  if (!same) {
-    drift.missing.push('node_modules/@mycf711/dsh-gate')
+  if (!existsSync(gateDst)) {
+    drift.missing.push(gateRel)
+    if (REPAIR && !CHECK) {
+      try {
+        mkdirSync(dirname(gateDst), { recursive: true })
+        cpSync(gateSrc, gateDst, { recursive: true })
+        linked += 1
+        console.log('copied   ' + gateRel)
+      } catch (error) {
+        console.log('复制失败：' + gateRel + ' — ' + (error && error.message))
+      }
+    }
+  } else if (gateDigest(gateSrc) !== gateDigest(gateDst)) {
+    const changed = gateDiffDetail(gateSrc, gateDst)
+    drift.gate.push(gateRel)
     if (REPAIR && !CHECK) {
       try {
         rmSync(gateDst, { recursive: true, force: true })
         cpSync(gateSrc, gateDst, { recursive: true })
         linked += 1
-        console.log('copied   node_modules/@mycf711/dsh-gate')
+        console.log('recopied ' + gateRel + '（内容不一致：' + changed.slice(0, 6).join(', ') +
+          (changed.length > 6 ? ' 等 ' + changed.length + ' 处' : '') + '）')
       } catch (error) {
-        console.log('复制失败：node_modules/@mycf711/dsh-gate — ' + (error && error.message))
+        console.log('强制同步失败：' + gateRel + ' — ' + (error && error.message))
       }
+    } else {
+      console.log('注意     ' + gateRel + '（内容与 packages/dsh-gate 不一致：' + changed.slice(0, 6).join(', ') +
+        (changed.length > 6 ? ' 等 ' + changed.length + ' 处' : '') + '；用 --repair 强制同步）')
     }
   }
 }
@@ -134,11 +215,16 @@ for (const name of readdirSync(libDir)) {
   }
 }
 
-const drifted = drift.missing.length + drift.broken.length + drift.stale.length
+// 门禁子包漂移同时计入「陈旧」：preflight 的 profile 行只解析「缺失 / 断链 / 陈旧」三段，
+// 不并入会让它显示「全零却 FAIL」的假红 —— 而 0.10.8 之前那次假绿也正是卡在同一处计数器。
+// 第四段仍是独立计数：排查时看这四个数，别只看前三段。
+const staleTotal = drift.stale.length + drift.gate.length
+const drifted = drift.missing.length + drift.broken.length + staleTotal
 console.log('---')
 console.log(`目标：${DEST}`)
-console.log(`缺失 ${drift.missing.length} / 断链 ${drift.broken.length} / 陈旧 ${drift.stale.length}` +
+console.log(`缺失 ${drift.missing.length} / 断链 ${drift.broken.length} / 陈旧 ${staleTotal} / 门禁子包漂移 ${drift.gate.length}` +
   (linked ? `，本次处理 ${linked} 个` : ''))
+console.log('（只证明 profile 磁盘副本一致；宿主运行时是否生效要在重载后另验）')
 
 if (missingImports.length > 0) {
   console.error('相对 import 解析失败：' + missingImports.join(', '))

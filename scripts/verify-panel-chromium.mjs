@@ -1,23 +1,119 @@
 // 真实 Chromium + 安装版 DSH React/primitives + 完整 session-superagent-desk / orbit / Modal 验收。
-// 运行：ego-browser nodejs < scripts/verify-panel-chromium.mjs
+//
+// 运行（只解析路径，不启动浏览器）：node scripts/verify-panel-chromium.mjs --print-paths
+// 运行（真实验收）：ego-browser 的 nodejs 沙箱**不继承父进程 env**、cwd 是 ego 安装目录，
+//   所以仓库根要用 prelude 显式传进去（Git Bash；`pwd -W` 出的是 D:/… 形式）：
+//     { echo "process.env.DSH_SUPERAGENT_REPO='$(pwd -W)'"; cat scripts/verify-panel-chromium.mjs; } | ego-browser nodejs
+//   直接 `node scripts/verify-panel-chromium.mjs` 时按脚本位置推导，不需要这一步。
+//
+// 路径解析（原来写死过一次旧安装，见 0.10.8 修复）：
+//   仓库根：$DSH_SUPERAGENT_REPO → 脚本所在目录的上一级 → 当前工作目录（后两者都必须真的有 client.js）。
+//           管道/stdio 运行时 import.meta.url 不可用，所以**不再**回落到某台机器上的临时目录。
+//   DSH 安装：$DSH_ASAR + $DSH_ELECTRON（必须成对）→ $DSH_INSTALL_ROOT → 扫描 $DSH_INSTALL_SCAN
+//           （默认 $DSH_HOME 的上一级、$DSH_PROFILE_DIR 的三级上一级）下所有 */resources/app.asar，
+//           取 app.asar mtime 最新的那个；多套安装共存时不会静默验旧版。
 // 独立 loopback fake API；不进入真实 DSH Web GUI，不访问 GitHub/npm，不执行更新、删除或其他真实写操作。
 
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import http from 'node:http'
-import { dirname, resolve } from 'node:path'
+import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const REPO = process.env.DSH_SUPERAGENT_REPO
-  || (import.meta.url.startsWith('file:') && !import.meta.url.includes('[eval')
-    ? resolve(dirname(fileURLToPath(import.meta.url)), '..')
-    : 'D:/主工作区/projects/.tmp-issue9-push-20261106-1244')
-const ASAR = 'D:/DeepSeek Harness/Desktop/resources/app.asar'
-const ELECTRON = 'D:/DeepSeek Harness/Desktop/DeepSeek Harness.exe'
+const ELECTRON_EXE = 'DeepSeek Harness.exe'
+
+function fail(message) {
+  console.error('verify-panel-chromium: ' + message)
+  process.exit(2)
+}
+
+/** 仓库根：环境变量 → 脚本位置 → 当前目录（调用方随后校验真的有 client.js/package.json）。 */
+function resolveRepo(env, importUrl, cwd) {
+  if (env.DSH_SUPERAGENT_REPO) return resolve(env.DSH_SUPERAGENT_REPO)
+  if (typeof importUrl === 'string' && importUrl.startsWith('file:') && !importUrl.includes('[eval')) {
+    return resolve(dirname(fileURLToPath(importUrl)), '..')
+  }
+  return cwd
+}
+
+/** 扫描安装根：父目录下的子目录同时有 resources/app.asar 与 DeepSeek Harness.exe 才算候选。 */
+function scanInstallRoots(parents) {
+  const found = []
+  for (const parent of parents) {
+    let names = []
+    try { names = readdirSync(parent) } catch { continue }
+    for (const name of names) {
+      const root = join(parent, name)
+      const asar = join(root, 'resources', 'app.asar')
+      const electron = join(root, ELECTRON_EXE)
+      if (!existsSync(asar) || !existsSync(electron)) continue
+      found.push({ root, asar, electron, mtimeMs: statSync(asar).mtimeMs })
+    }
+  }
+  return found
+}
+
+/** 解析 DSH 安装（优先级见文件头）。解析不出来就报错，不拼一个"大概能用"的默认路径。 */
+function resolveInstall(env) {
+  const explicitAsar = env.DSH_ASAR ? resolve(env.DSH_ASAR) : null
+  const explicitElectron = env.DSH_ELECTRON ? resolve(env.DSH_ELECTRON) : null
+  if (explicitAsar || explicitElectron) {
+    if (!explicitAsar || !explicitElectron) fail('DSH_ASAR 与 DSH_ELECTRON 必须同时给（只给一个无法保证验的是同一套安装）')
+    if (!existsSync(explicitAsar)) fail('DSH_ASAR 不存在：' + explicitAsar)
+    if (!existsSync(explicitElectron)) fail('DSH_ELECTRON 不存在：' + explicitElectron)
+    return { root: resolve(dirname(explicitAsar), '..'), asar: explicitAsar, electron: explicitElectron, source: 'env:DSH_ASAR+DSH_ELECTRON' }
+  }
+  if (env.DSH_INSTALL_ROOT) {
+    const root = resolve(env.DSH_INSTALL_ROOT)
+    const foundAsar = join(root, 'resources', 'app.asar')
+    const foundElectron = join(root, ELECTRON_EXE)
+    if (!existsSync(foundAsar) || !existsSync(foundElectron)) {
+      fail('DSH_INSTALL_ROOT 下缺 resources/app.asar 或 ' + ELECTRON_EXE + '：' + root)
+    }
+    return { root, asar: foundAsar, electron: foundElectron, source: 'env:DSH_INSTALL_ROOT' }
+  }
+  const parents = []
+  if (env.DSH_INSTALL_SCAN) {
+    for (const part of String(env.DSH_INSTALL_SCAN).split(delimiter)) if (part.trim()) parents.push(resolve(part.trim()))
+  } else {
+    if (env.DSH_HOME) parents.push(resolve(env.DSH_HOME, '..'))
+    if (env.DSH_PROFILE_DIR) parents.push(resolve(env.DSH_PROFILE_DIR, '..', '..', '..'))
+  }
+  const unique = [...new Set(parents)]
+  const candidates = scanInstallRoots(unique)
+  if (candidates.length === 0) {
+    fail('找不到 DSH 安装（扫描：' + (unique.join(' | ') || '无候选目录') + '）。设 DSH_INSTALL_ROOT，或 DSH_ASAR+DSH_ELECTRON。')
+  }
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  const chosen = candidates[0]
+  return { ...chosen, source: 'scan:' + chosen.root + '（' + candidates.length + ' 个候选取 mtime 最新）' }
+}
+
+const REPO = resolveRepo(process.env, import.meta.url, process.cwd())
+if (!REPO || !existsSync(join(REPO, 'client.js')) || !existsSync(join(REPO, 'package.json'))) {
+  fail('仓库根无效（' + (REPO || '未解析到') + '）：请设 DSH_SUPERAGENT_REPO 指向含 client.js 的仓库根')
+}
+const install = resolveInstall(process.env)
+const ASAR = install.asar
+const ELECTRON = install.electron
 const FRONTEND = `${ASAR}/dsh/node_modules/@deepseek-ai/dsh-web-frontend`
 const THEME_CLIENT = `${ASAR}/dsh/node_modules/@deepseek-ai/dsh-client-ui-theme/lib/client.js`
 const SCREENSHOTS = `${REPO}/docs/assets`
+
+// 只解析路径的探针：给测试与「验的到底是哪一版」取证用，不启动浏览器。
+if (process.argv.includes('--print-paths')) {
+  console.log(JSON.stringify({
+    repo: REPO,
+    installRoot: install.root,
+    asar: ASAR,
+    electron: ELECTRON,
+    source: install.source,
+    frontend: FRONTEND,
+    themeClient: THEME_CLIENT,
+  }, null, 2))
+  process.exit(0)
+}
 const SESSION_ID = 'session-panel-chromium-fixture'
 // 每次验收用独立任务空间：崩溃重跑时不能复用上一次残留页面/事件监听，否则会伪造失败。
 const SPACE_NAME = 'dsh-full-panel-chromium-deep-ui-' + String(Date.now())
