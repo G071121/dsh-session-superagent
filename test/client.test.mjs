@@ -9,12 +9,15 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
 import { createGate, loadGateConfig, readGateScope, validateConfig, writeGateConfig } from '@mycf711/dsh-gate'
 import { deskForm, deskQueue, loadClient, walk, watcher } from './fixtures/panel-harness.mjs'
 import { gateDeferred, gatePayload, gateResponse, gateUrlRepo, loadGatePanel } from './fixtures/gate-panel.mjs'
 import { tempDir } from './fixtures/tmpdir.mjs'
+
+const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
 test('client.js 注册主理鱼与 composer dock 上的轨道环', () => {
   const { id, registrations } = loadClient()
@@ -4909,8 +4912,10 @@ test('门禁 models：确认放弃草稿并切换后，模型列表跟着切到�
   assert.equal(api.pending.length, 1, '有草稿时先不读新仓库')
   panel.button('放弃草稿并切换').props.onClick()
   panel.flush()
-  // 确认后：直接 load 一条 + 草稿清空后 [dirty] effect 补一条（都读新仓库）。
-  assert.equal(api.pending.length, 3, '确认后才读新仓库')
+  // 确认后：至少两条读新仓库的 /gates（一条是确认路径直接 load；当前实现还有一条草稿清空后
+  // [dirty] effect 补的 load）。这里只要语义下界 >= 2，不钉当前实现重复 load 的精确次数：
+  // 把两条 load 合并成一条是合理优化，那时 3 会假红（v5 面板审查 Q2-L2）。
+  assert.ok(api.pending.length >= 2, '确认后要读新仓库（>=2 条：直接 load + 草稿清空后的补读）')
   assert.equal(api.models.some((item) => item.repo === 'E:/work/other'), false, '确认前不读新仓库的模型')
 
   const before = api.models.length
@@ -4999,4 +5004,37 @@ test('门禁作用域：接官方 SegmentedControl，缺导出回退也有方向
   const clicked = render('default')
   clicked.radios[1].props.onClick()
   assert.deepEqual(clicked.changes, [], '点击 disabled 项不回调')
+})
+
+// ── 浏览器证据入库护栏（v6 B1）──────────────────────────────────────────────────
+// v5 的门禁/模型场景只活在 /tmp 临时 harness 里：删掉、搬走、或退回到「钉精确请求数」，
+// 门禁都不会红（见 docs/报告-gate-v5面板审查.md 的 Q2-L2/L3）。这里守两件事：
+//   ① 正式 Chromium 套件仍带 /gates、/gates/models 两个 fixture 与任务书点名的场景；
+//   ② 套件代码里不许出现仓库外的临时探针路径，注释里必须写明 loopback fixture 不是真实 WebView。
+// 真正跑浏览器的是 scripts/verify-panel-chromium.mjs（真实 Chromium + 安装版 React 18）。
+test('浏览器证据入库：门禁/模型场景留在正式 Chromium 套件里，且不依赖 /tmp 探针', () => {
+  const source = readFileSync(join(ROOT, 'scripts', 'verify-panel-chromium.mjs'), 'utf8')
+  const scenarios = [
+    'U1-V1 乱序（跨仓库）',
+    'U1-V5 targetRepo',
+    'U5-V1（M1 user）',
+    'U5-V2（M2）',
+    'U5-V3b',
+    'U5-V4（M4）',
+    'U5-V5（U2-F2）',
+    'U5-V6b（M1 project）',
+  ]
+  for (const scenario of scenarios) {
+    assert.ok(source.includes(scenario), '正式 Chromium 套件缺场景：' + scenario)
+  }
+  assert.ok(source.includes("url.pathname === '/session-superagent/gates' && method === 'GET'"),
+    '正式套件缺 GET /gates fixture')
+  assert.ok(source.includes("url.pathname === '/session-superagent/gates/models' && method === 'GET'"),
+    '正式套件缺 GET /gates/models fixture')
+  assert.ok(source.includes("'/__fixture/gate-delays'") && source.includes("'/__fixture/model-delays'"),
+    '正式套件缺按请求注入延迟的 fixture 开关（迟到/乱序就没法复现）')
+  // 只在**代码行**里查探针路径：文件头注释写着「不依赖 /tmp 探针」，那正是要保留的说明。
+  const code = source.split('\n').filter((line) => !line.trim().startsWith('//')).join('\n')
+  assert.equal(/\/tmp\//.test(code), false, '正式套件代码不许依赖 /tmp 探针')
+  assert.ok(source.includes('不是真实 WebView'), '必须写明 loopback fixture 不是真实 WebView')
 })
