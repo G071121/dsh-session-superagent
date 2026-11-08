@@ -2406,28 +2406,70 @@ window.__ModuleLoader__.load({
       // 只能在末尾追加（位置化队列），同步 test/client.test.mjs 的 gateQueue。
       const [pendingSwitch, setPendingSwitch] = useState(null)
       const scopeQuery = repo ? '?repo=' + encodeURIComponent(String(repo)) : ''
+      // U1：load 的代际与取消。切仓库 / 保存后重读 / 点「重新读取」都可能并发：
+      // 没有序号时后到的旧响应会覆盖新仓库的数据；没有取消时卸载后还会继续 setState。
+      const loadSeqRef = useRef(0)
+      const aliveRef = useRef(true)
+      // 响应回来时用它判断「仓库还是发起这次请求的那个」：/state 后到时仓库已经换了，
+      // 旧仓库的响应不能再提交（否则面板显示旧配置，保存却按新仓库写）。
+      const repoRef = useRef(repo)
+      repoRef.current = repo
+      // 草稿脏不脏要按「提交那一刻的作用域」算 —— 请求在途时用户可能已经切过作用域。
+      const scopeRef = useRef(scope)
+      scopeRef.current = scope
+      const modelsSeqRef = useRef(0)
+      useEffect(() => () => { aliveRef.current = false }, [])
 
       async function load() {
+        const seq = ++loadSeqRef.current
+        const requestedRepo = repo
         setLoadError('')
         try {
           const value = await call('/gates' + scopeQuery)
+          // 卸载了，或者已经有更新的一次 load：这份响应作废（不许再 setState）。
+          if (!aliveRef.current || seq !== loadSeqRef.current) return
+          // 仓库已经换过：旧仓库的响应不能提交（新仓库的读取由 effect 或确认流程负责）。
+          if (repoRef.current !== requestedRepo) return
           if (!value || value.ok === false) throw new Error((value && value.error) || '服务端没有返回门禁配置')
           setData(value)
-          setGateDraft(null)
+          // 请求在途时用户可能已经改出草稿：只放下「和新数据一致」的草稿，
+          // dirty 的一律留着 —— 旧实现无条件 setGateDraft(null)，切仓库在途的草稿会被静默清掉。
+          setGateDraft((prev) => {
+            if (!prev) return null
+            try {
+              const layerScope = scopeRef.current
+              const nextDerived = gateDraftOf(value, layerScope)
+              const stillDirty = JSON.stringify(gateConfigOf(layerScope, prev, value))
+                !== JSON.stringify(gateConfigOf(layerScope, nextDerived, value))
+              return stillDirty ? prev : null
+            } catch {
+              // 算不清就保留：宁可多留一份草稿，也不能替用户丢掉改动。
+              return prev
+            }
+          })
         } catch (error) {
+          if (!aliveRef.current || seq !== loadSeqRef.current) return
+          if (repoRef.current !== requestedRepo) return
           setLoadError(String((error && error.message) || error))
         }
       }
 
       async function loadModels() {
+        // 模型列表同样是「按仓库读」的请求：乱序/卸载时旧响应不能盖新列表。
+        const seq = ++modelsSeqRef.current
+        const requestedRepo = repo
         setModels((prev) => ({ ...prev, loading: true, error: '' }))
         try {
           const value = await call('/gates/models' + scopeQuery)
+          if (!aliveRef.current || seq !== modelsSeqRef.current) return
+          if (repoRef.current !== requestedRepo) return
           const list = value && Array.isArray(value.models)
             ? value.models.map((item) => ({ id: String((item && item.id) || ''), label: String((item && (item.label || item.id)) || '') })).filter((item) => item.id)
             : []
           setModels({ list, loading: false, error: value && value.ok === false ? String(value.error || '') : '' })
         } catch (error) {
+          if (!aliveRef.current || seq !== modelsSeqRef.current) return
+          if (repoRef.current !== requestedRepo) return
           setModels({ list: [], loading: false, error: String((error && error.message) || error) })
         }
       }
@@ -2571,6 +2613,12 @@ window.__ModuleLoader__.load({
         setPendingSwitch(null)
         if (next) applyScope(next)
       }
+      // 取消换仓库：把已经发出去的新仓库读取一并作废。否则它晚到时代码会把数据切到新仓库，
+      // 和「已保留草稿：面板仍是旧仓库」的承诺相反（草稿还在，数据却换了仓库）。
+      const cancelRepoSwitch = () => {
+        loadSeqRef.current += 1
+        setPendingSwitch({ repoHeld: true })
+      }
       // 切仓库由父面板的 workdir 驱动，没法拦在「点击」上：草稿还在时不去读新仓库，
       // 只有这里（明确放弃）才 reset + load，且 load 用的是新的 repo prop。
       const confirmRepoSwitch = () => {
@@ -2613,7 +2661,7 @@ window.__ModuleLoader__.load({
           ? h('div', { className: 'dt-banner', role: 'group', 'aria-label': '切换仓库确认' },
             h('p', null, '仓库已切换到 ' + repo + '：当前面板还是 ' + dataRepo + ' 的配置，这份草稿还没保存。'),
             h('div', { className: 'dt-actions dt-banner-actions' },
-              h(Btn, { size: 'sm', variant: 'ghost', onClick: () => setPendingSwitch({ repoHeld: true }) }, '取消'),
+              h(Btn, { size: 'sm', variant: 'ghost', onClick: cancelRepoSwitch }, '取消'),
               h(Btn, { size: 'sm', variant: 'primary', onClick: confirmRepoSwitch }, '放弃草稿并切换')))
           : null,
         repoHeld
