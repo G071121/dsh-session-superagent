@@ -3728,7 +3728,7 @@ test('门禁模型下拉：列表来自 /gates/models，当前值不会丢', () 
   const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
   const nodes = walk(render(desk, gateQueue({
     scope: 'user',
-    models: { list: [{ id: 'gpt-x', label: 'GPT X' }], loading: false, error: '' },
+    models: { repo: 'E:/work/demo', list: [{ id: 'gpt-x', label: 'GPT X' }], loading: false, error: '' },
     draft: gateDraft(null, { enabled: true, model: 'old-model', prompt: 'p', off: false }),
   })))
   const select = nodes.find((n) => n.type === 'select' && n.props.id === 'gate-semantic-model')
@@ -4719,7 +4719,40 @@ test('门禁 contam2：改回原样的 clean 草稿不能挡住新仓库数据�
   assert.equal(panel.control('gate-semantic-prompt').props.value, 'other 提示词', 'clean 草稿要放下，新仓库数据直接生效')
 })
 
-test('门禁取消换仓库后 models 不换成新仓库（U2-F2）', async () => {
+/** 模型下拉里实际可选的 id（当前值 + 当前仓库的模型列表）。 */
+const gateModelValues = (panel) => (panel.control('gate-semantic-model').props.children || [])
+  .map((node) => node.props && node.props.value).filter(Boolean)
+
+/** 「读取模型列表」按钮：读取中会换文案，按两种文案 + onClick 找，别让标签变化掩盖真正的断言。 */
+const gateModelsButton = (panel) => {
+  const found = panel.nodes().find((node) => node.props && typeof node.props.onClick === 'function'
+    && (node.props.children || []).some((child) => child === '读取模型列表' || child === '读取中…'))
+  assert.ok(found, '找不到「读取模型列表」按钮')
+  return found
+}
+
+/** 让当前层进入「草稿来自面板仓库」：user 改提示词；project 只能切规则（模型/提示词锁死）。 */
+const gateMarkDirty = (panel, scope) => {
+  if (scope === 'project') panel.control('gate-rule-abs-path-switch').props.onChange(false)
+  else panel.control('gate-semantic-prompt').props.onChange({ target: { value: '草稿提示词' } })
+  panel.flush()
+}
+
+test('门禁模型下拉：不属于面板仓库的模型列表不显示（U5-M0）', () => {
+  const { registrations, render } = loadClient()
+  const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
+  const nodes = walk(render(desk, gateQueue({
+    scope: 'user',
+    models: { repo: 'E:/work/other', list: [{ id: 'm-other', label: 'other 模型' }], loading: false, error: '' },
+    draft: gateDraft(null, { enabled: true, model: 'old-model', prompt: 'p', off: false }),
+  })))
+  const select = nodes.find((n) => n.type === 'select' && n.props.id === 'gate-semantic-model')
+  assert.deepEqual((select.props.children || []).map((option) => option.props.value), ['old-model'],
+    '别的仓库的模型不能出现在下拉里（选它保存就是跨仓库模型 id 污染）')
+  assert.ok(gateText(nodes).includes('重新读取'), '要说明列表被忽略、可以重新读取')
+})
+
+test('门禁取消换仓库后 models 不换成新仓库（U2-F2，v5：不再读 prop 仓库）', async () => {
   const api = gateRaceFetch({ deferModels: true })
   const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
   api.pending[0].deferred.resolve(gateResponse(gatePayload('E:/work/demo')))
@@ -4727,28 +4760,169 @@ test('门禁取消换仓库后 models 不换成新仓库（U2-F2）', async () =
   assert.equal(api.models[0].repo, 'E:/work/demo')
   api.models[0].deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-demo', label: 'demo 模型' }] }))
   await panel.settle()
-  const options = () => (panel.control('gate-semantic-model').props.children || [])
-    .map((node) => node.props && node.props.value).filter(Boolean)
-  assert.ok(options().includes('m-demo'), '前置：demo 的模型在列表里')
+  assert.ok(gateModelValues(panel).includes('m-demo'), '前置：demo 的模型在列表里')
 
   panel.setRepo('E:/work/other')
-  const otherModels = api.models[api.models.length - 1]
-  assert.equal(otherModels.repo, 'E:/work/other', '换仓库会读新仓库的模型列表')
+  panel.flush()
+  assert.equal(api.models.some((item) => item.repo === 'E:/work/other'), false,
+    '面板数据还是 demo：换仓库不能先读新仓库的模型（R1）')
   panel.control('gate-semantic-prompt').props.onChange({ target: { value: '在途手改' } })
   panel.flush()
+  const beforeCancel = api.models.length
   panel.button('取消').props.onClick()
   panel.flush()
   assert.ok(panel.text().includes('已保留草稿'))
 
-  // 取消后：新仓库的模型响应不能落地，读取状态也要收尾。
-  otherModels.deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-other', label: 'other 模型' }] }))
-  const refetch = api.models.find((item, index) => index > 1 && item.repo === 'E:/work/demo')
-  assert.ok(refetch, '取消后要把面板仓库（demo）的模型列表重新读一次')
-  refetch.deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-demo', label: 'demo 模型' }] }))
+  // 取消后：面板仓库（demo）的模型列表重新读一次；新仓库的模型没有落地机会。
+  const refetch = api.models.slice(beforeCancel)
+  assert.equal(refetch.length, 1, '取消后要把面板仓库（demo）的模型列表重新读一次')
+  assert.equal(refetch[0].repo, 'E:/work/demo')
+  refetch[0].deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-demo', label: 'demo 模型' }] }))
   await panel.settle()
-  assert.equal(options().includes('m-other'), false, '取消后模型下拉不能出现新仓库的模型')
-  assert.ok(options().includes('m-demo'), '旧仓库的模型列表要留着')
+  assert.equal(gateModelValues(panel).includes('m-other'), false, '取消后模型下拉不能出现新仓库的模型')
+  assert.ok(gateModelValues(panel).includes('m-demo'), '旧仓库的模型列表要留着')
   assert.equal(panel.text().includes('读取中…'), false, '取消后不能一直停在读取中')
+})
+
+// ── U5（v5 残余 R1）：模型列表统一跟 panelRepo（草稿来源仓库）──────────────
+// v4 的 R1：保留草稿时「读取模型列表」按钮和换仓库时的自动读取都跟 prop 仓库走；
+// 闸门挡住 /gates 后也没人把模型列表拉回草稿来源仓库。三条路径都必须统一到 panelRepo。
+
+test('门禁 models：保留草稿时「读取模型列表」按面板仓库读（U5-M1，project/user）', async () => {
+  for (const scope of ['user', 'project']) {
+    const api = gateRaceFetch({ deferModels: true })
+    const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+    api.pending[0].deferred.resolve(gateResponse(gatePayload('E:/work/demo', { prompt: 'demo 提示词' })))
+    await panel.settle()
+    api.models[0].deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-demo', label: 'demo 模型' }] }))
+    await panel.settle()
+    if (scope === 'project') {
+      panel.control('gate-scope').props.onChange('project')
+      panel.flush()
+    }
+    gateMarkDirty(panel, scope)
+    assert.ok(panel.text().includes('未保存'), scope + '：前置草稿要 dirty')
+
+    panel.setRepo('E:/work/other')
+    panel.flush()
+    assert.equal(api.pending.length, 1, scope + '：有草稿时不能去读新仓库')
+
+    const before = api.models.length
+    gateModelsButton(panel).props.onClick()
+    panel.flush()
+    const fresh = api.models.slice(before)
+    assert.equal(fresh.length, 1, scope + '：按钮只发一条 models 请求')
+    assert.equal(fresh[0].repo, 'E:/work/demo', scope + '：按钮要读面板（草稿来源）仓库，不能读 prop 仓库')
+    fresh[0].deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-demo', label: 'demo 模型' }] }))
+    await panel.settle()
+    assert.deepEqual(gateModelValues(panel), ['group/deepseek-v4.1-flash-1017', 'm-demo'],
+      scope + '：下拉只有面板仓库的模型')
+    assert.equal(api.models.some((item) => item.repo === 'E:/work/other'), false, scope + '：全程不许读新仓库的 models')
+  }
+})
+
+test('门禁 models：闸门挡住 /gates 时作废在途 models 并恢复草稿来源列表（U5-M2，project/user）', async () => {
+  for (const scope of ['user', 'project']) {
+    const api = gateRaceFetch({ deferModels: true })
+    const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+    api.pending[0].deferred.resolve(gateResponse(gatePayload('E:/work/demo', { prompt: 'demo 提示词' })))
+    await panel.settle()
+    api.models[0].deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-demo', label: 'demo 模型' }] }))
+    await panel.settle()
+    if (scope === 'project') {
+      panel.control('gate-scope').props.onChange('project')
+      panel.flush()
+    }
+
+    // 干净时换仓库：新仓库的 /gates 在途，但面板数据/模型列表还是 demo 的。
+    panel.setRepo('E:/work/other')
+    panel.flush()
+    assert.equal(api.pending.length, 2, scope + '：干净换仓库会先读新仓库')
+    assert.equal(api.models.filter((item) => item.repo === 'E:/work/other').length, 0,
+      scope + '：还没换成新仓库数据，就不该读新仓库的模型')
+
+    // 往返窗口里改出草稿：来源仓库是 demo，闸门会挡住新仓库的 /gates。
+    gateMarkDirty(panel, scope)
+    const beforeGate = api.models.length
+    api.pending[1].deferred.resolve(gateResponse(gatePayload('E:/work/other', { prompt: 'other 提示词' })))
+    await panel.settle()
+    assert.ok(panel.text().includes('仓库已切换到 E:/work/other'), scope + '：确认条要还在')
+    assert.ok(panel.text().includes('未保存'))
+    assert.equal(panel.text().includes('other 提示词'), false, scope + '：新仓库数据不能上屏')
+
+    // 闸门路径：作废在途 models、把列表拉回草稿来源仓库（demo）。
+    const restored = api.models.slice(beforeGate)
+    assert.equal(restored.length, 1, scope + '：闸门挡住后要重读面板仓库的模型列表')
+    assert.equal(restored[0].repo, 'E:/work/demo', scope + '：重读的是草稿来源仓库')
+    restored[0].deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-demo', label: 'demo 模型' }] }))
+    await panel.settle()
+    assert.deepEqual(gateModelValues(panel), ['group/deepseek-v4.1-flash-1017', 'm-demo'],
+      scope + '：模型下拉回到面板仓库')
+    assert.equal(panel.text().includes('读取中…'), false, scope + '：读取状态要收尾')
+  }
+})
+
+test('门禁 models：迟到的旧仓库模型列表不能覆盖面板仓库（U5-M3）', async () => {
+  const api = gateRaceFetch({ deferModels: true })
+  const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+  api.pending[0].deferred.resolve(gateResponse(gatePayload('E:/work/demo', { prompt: 'demo 提示词' })))
+  await panel.settle()
+  api.models[0].deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-demo', label: 'demo 模型' }] }))
+  await panel.settle()
+
+  // demo → other：other 的 /gates 回包后，模型列表跟着换成 other 的（在途）。
+  panel.setRepo('E:/work/other')
+  panel.flush()
+  api.pending[1].deferred.resolve(gateResponse(gatePayload('E:/work/other', { prompt: 'other 提示词' })))
+  await panel.settle()
+  const otherModels = api.models[api.models.length - 1]
+  assert.equal(otherModels.repo, 'E:/work/other', '切到 other 后要读 other 的模型')
+
+  // 又切回 demo：demo 的 /gates 回包后，模型请求换成 demo 的；此时 other 的模型才回来。
+  panel.setRepo('E:/work/demo')
+  panel.flush()
+  api.pending[2].deferred.resolve(gateResponse(gatePayload('E:/work/demo', { prompt: 'demo 提示词' })))
+  await panel.settle()
+  const demoModels = api.models[api.models.length - 1]
+  assert.equal(demoModels.repo, 'E:/work/demo', '切回 demo 后要读 demo 的模型')
+  otherModels.deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-other', label: 'other 模型' }] }))
+  await panel.settle()
+  assert.equal(gateModelValues(panel).includes('m-other'), false, '迟到的 other 模型不能上屏')
+
+  demoModels.deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-demo', label: 'demo 模型' }] }))
+  await panel.settle()
+  assert.ok(gateModelValues(panel).includes('m-demo'), '面板仓库自己的模型要能落地')
+})
+
+test('门禁 models：确认放弃草稿并切换后，模型列表跟着切到新仓库（U5-M4）', async () => {
+  const api = gateRaceFetch({ deferModels: true })
+  const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+  api.pending[0].deferred.resolve(gateResponse(gatePayload('E:/work/demo')))
+  await panel.settle()
+  api.models[0].deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-demo', label: 'demo 模型' }] }))
+  await panel.settle()
+
+  panel.control('gate-semantic-prompt').props.onChange({ target: { value: '草稿提示词' } })
+  panel.flush()
+  panel.setRepo('E:/work/other')
+  panel.flush()
+  assert.equal(api.pending.length, 1, '有草稿时先不读新仓库')
+  panel.button('放弃草稿并切换').props.onClick()
+  panel.flush()
+  // 确认后：直接 load 一条 + 草稿清空后 [dirty] effect 补一条（都读新仓库）。
+  assert.equal(api.pending.length, 3, '确认后才读新仓库')
+  assert.equal(api.models.some((item) => item.repo === 'E:/work/other'), false, '确认前不读新仓库的模型')
+
+  const before = api.models.length
+  for (const item of api.pending.slice(1)) item.deferred.resolve(gateResponse(gatePayload('E:/work/other', { prompt: 'other 提示词' })))
+  await panel.settle()
+  assert.equal(panel.control('gate-semantic-prompt').props.value, 'other 提示词')
+  const switched = api.models.slice(before)
+  assert.ok(switched.length >= 1, '换成新仓库后要读新仓库的模型列表')
+  assert.deepEqual(switched.map((item) => item.repo), switched.map(() => 'E:/work/other'))
+  for (const item of switched) item.deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-other', label: 'other 模型' }] }))
+  await panel.settle()
+  assert.deepEqual(gateModelValues(panel), ['group/deepseek-v4.1-flash-1017', 'm-other'], '模型列表切到新仓库，旧仓库的不能留着')
 })
 
 test('门禁 StrictMode 双挂载：cleanup 后 effect 重跑要复位 alive（U2-F3）', async () => {
