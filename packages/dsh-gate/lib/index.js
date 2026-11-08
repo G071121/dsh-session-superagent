@@ -29,6 +29,7 @@ import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  DEFAULT_GATE_GUARD_STALE_MS,
   DEFAULT_GATE_LOCK_POLL_MS,
   DEFAULT_GATE_LOCK_STALE_MS,
   DEFAULT_GATE_LOCK_TIMEOUT_MS,
@@ -45,13 +46,16 @@ import {
 } from './semantic.js'
 
 export {
+  DEFAULT_GATE_GUARD_STALE_MS,
   DEFAULT_GATE_LOCK_POLL_MS,
   DEFAULT_GATE_LOCK_STALE_MS,
   DEFAULT_GATE_LOCK_TIMEOUT_MS,
   DEFAULT_GATE_RENAME_ATTEMPTS,
   DEFAULT_GATE_RENAME_BACKOFF_MS,
+  GATE_GUARD_SUFFIX,
   GATE_LOCK_SUFFIX,
   acquireGateConfigLock,
+  gateGuardPath,
   gateLockPath,
   renameWithRetry,
 } from './config-lock.js'
@@ -563,6 +567,8 @@ export function readGateScope(scope, { repo = process.cwd(), home = homedir(), e
  * 两个写者不会拿着旧快照互相覆盖；拿不到锁显式失败（`code: 'gate_lock_timeout'`），**不**退回无锁写。
  * Windows 上目标文件被占用时 rename 会 EPERM / EBUSY：`renameAttempts` 次有界退避重试，
  * 最终失败保留原文件、清理临时文件。
+ * 接管 stale 锁的段由守护锁串行、搬走后核对 token 并还原（C2），写盘前还会再确认一次锁仍是自己的：
+ * 锁被接管过就抛 `code: 'gate_lock_lost'`，绝不覆盖别人的写盘。
  *
  * @returns {{ path: string, config: object, lock: { path: string, waitedMs: number, broken: Array<object> } }}
  * `lock.broken` 是本次接管过的 stale 锁证据（年龄 + 所有者），没有接管就是空数组。
@@ -574,6 +580,7 @@ export function writeGateConfig(scope, config, {
   lockTimeoutMs = DEFAULT_GATE_LOCK_TIMEOUT_MS,
   lockPollMs = DEFAULT_GATE_LOCK_POLL_MS,
   lockStaleMs = DEFAULT_GATE_LOCK_STALE_MS,
+  lockGuardStaleMs = DEFAULT_GATE_GUARD_STALE_MS,
   renameAttempts = DEFAULT_GATE_RENAME_ATTEMPTS,
   renameBackoffMs = DEFAULT_GATE_RENAME_BACKOFF_MS,
   // 测试注入点：Windows 上真实的 EPERM 无法稳定制造，用替身证明退避重试与失败清理。
@@ -585,7 +592,13 @@ export function writeGateConfig(scope, config, {
   }
   const path = configPathFor(scope, { repo, home, env })
   mkdirSync(dirname(path), { recursive: true })
-  const lock = acquireGateConfigLock(path, { timeoutMs: lockTimeoutMs, pollMs: lockPollMs, staleMs: lockStaleMs, sleep })
+  const lock = acquireGateConfigLock(path, {
+    timeoutMs: lockTimeoutMs,
+    pollMs: lockPollMs,
+    staleMs: lockStaleMs,
+    guardStaleMs: lockGuardStaleMs,
+    sleep,
+  })
   try {
     const input = config && typeof config === 'object' && !Array.isArray(config) ? config : {}
     // 1) 调用方传入的 extends：能原样保留的写回，其余显式报错。
@@ -617,6 +630,8 @@ export function writeGateConfig(scope, config, {
     }
     const tmp = path + '.tmp-' + process.pid + '-' + Date.now()
     try {
+      // C2：写盘前再确认锁还在自己手里。锁被判定 stale 接管过时，宁可失败也不覆盖别人的写盘。
+      lock.assertOwner()
       if (existsSync(path)) copyFileSync(path, path + '.bak')
       writeFileSync(tmp, JSON.stringify(output, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
       renameWithRetry(tmp, path, { attempts: renameAttempts, backoffMs: renameBackoffMs, rename, sleep })
