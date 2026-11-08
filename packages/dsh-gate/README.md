@@ -159,7 +159,7 @@ if (!result.ok) return
 | `readGateScope(scope, options?)` | `{ path, config, error? }` | `scope` = `default` / `user` / `project` / `local` |
 | `writeGateConfig(scope, config, options?)` | `{ path, config, lock }` | 只允许 `user` / `project` / `local`；同一路径**跨进程写锁**内「读旧文件 → 校验 → `.bak` → 临时写入 → rename」；共享 `extends` 抛错（`code: 'extends_not_preservable'`），锁超时抛错（`code: 'gate_lock_timeout'`）；`options` 支持 `lockTimeoutMs` / `lockPollMs` / `lockStaleMs` / `lockGuardStaleMs` / `renameAttempts` / `renameBackoffMs`；`lock.broken` 是本次接管的 stale 锁证据（年龄 + 所有者 + 清理失败时的 `leftover` 残留路径） |
 | `acquireGateConfigLock(path, options?)` / `renameWithRetry(from, to, options?)` | 锁句柄 / `{ attempts }` | 写盘用的两个原语：跨进程写锁（`gateLockPath(path)` = `<配置>.lock`，接管段另有 `gateGuardPath(path)` = `<配置>.lock.guard` 守护锁）与 EPERM/EBUSY 有界退避重命名；锁句柄带 `release()` / `isOwner()` / `assertOwner()` |
-| `pruneLockArtifacts(lockPath, options?)` | `{ kept, removed }` | 回收接管 / 释放残留（`<lock>.stale-*` / 旧版 `<lock>.release-*`）：只删「最新 `keep` 份之外且 mtime 超过 `minAgeMs`」的文件，新鲜的（可能正在接管）与无关文件一个都不碰；每次 `acquireGateConfigLock` 前自动调用 |
+| `pruneLockArtifacts(lockPath, options?)` | `{ kept, removed }` | 回收接管 / 释放残留（`<lock>.stale-*` / 旧版 `<lock>.release-*`）：只删「最新 `keep` 份之外、且**搬走时间**超过 `minAgeMs`」的文件（名字里的 `<ts>` 优先，其次 mtime；不继承源锁的旧 mtime），新鲜的（可能正在接管）与无关文件一个都不碰；`caseInsensitive` 默认跟随平台（Windows 认大小写变体，POSIX 不认）；每次 `acquireGateConfigLock` 前自动调用 |
 | `DEFAULT_GATE_ARTIFACT_KEEP` / `DEFAULT_GATE_ARTIFACT_MIN_AGE_MS` | `number` | 残留证据的保留份额（默认 3）与回收年龄阈值（默认 60s） |
 | `userGatePath` / `projectGatePath` / `localGatePath` | `string` | 路径派生 |
 | `DEFAULT_GATE_PATH` / `TRIGGERS` / `RULE_TYPES` | 常量 | 默认规则路径与枚举 |
@@ -288,7 +288,11 @@ printf '正文' | node bin/gate.mjs --trigger pr.reply --body-file - --current 1
 - **残留有界留证**：接管把锁搬成 `<lock>.stale-<ts>-<uuid>`，旧版本释放还会留下 `<lock>.release-*`；
   这些只是证据、不是锁。成功路径必须删干净（`EPERM` / `EBUSY` 有界退避重试）；清理失败时路径写进
   接管证据 `lock.broken[].leftover`（诊断用），并由下一次写盘按「每个锁路径最多保留最新 3 份、
-  只回收 mtime 超过 60s 的」回收 —— 留得下证据，也不会无限堆积（`pruneLockArtifacts`）。
+  只回收搬走超过 60s 的」回收（`pruneLockArtifacts`）。年龄按**搬走时间**算：搬走后把 mtime 刷成
+  搬走时间，名字里的 `<ts>` 是权威副本 —— `rename` 会把源锁的旧 mtime 一起搬过来，按 mtime 判龄
+  会让一把 5 分钟前的 stale 锁「生下来就够旧」，并发回收就会在「搬走 → 核对」窗口里删掉它。
+  残留匹配的大小写跟随文件系统：Windows 上 `.STALE-` 与本路径的 `.stale-` 是同一个命名空间，
+  POSIX 上是不同文件 —— 认对了才谈得上「有界」，认错了就是误删。
 - **写盘不丢 `extends`**：整层重写只写 `version/name/rules/semantic`；`false` / `"none"` 原样保留，
   共享形式（`true` / `"default"` / 路径 / 对象）显式报错并点名配置路径 —— 宁可保存失败，也不悄悄冲掉共享规则。
 - **坏配置 fail-open（仅语义复审）**：语义层不可用时放行并给 warning；确定性规则仍逐条执行。
@@ -311,7 +315,9 @@ stale 锁的年龄与所有者证据、rename 的 EPERM/EBUSY 退避重试与最
 无 stale 正对照；stale 守护锁接管；**release 窗口**：旧持有者被挂起、锁被接管、恢复后释放时，
 第三写者不得进临界区）、**锁残余与旧格式**（成功接管不留 `.stale-*` / `.release-*`；
 旧版无 token 锁：活锁不接管、死锁可接管；锁内容读不出来（`EISDIR`）时 fail closed 不搬不删；
-核对窗口内被换成活锁必须还原；残留证据只留最新 3 份、旧的按年龄回收，清理失败写进 `leftover`）。
+核对窗口内被换成活锁必须还原；残留证据只留最新 3 份、旧的按年龄回收，清理失败写进 `leftover`；
+**残留计龄与大小写边界**：搬走时间不继承源锁 mtime（含 `utimes` 失败的兜底）、在途隔离文件不被
+并发回收、`.STALE-` / `.RELEASE-` 按平台语义回收而无关文件（`.bak` / 前缀相似 / 守护锁路径的残留）一个不动）。
 
 ## 未验项
 
@@ -334,9 +340,11 @@ stale 锁的年龄与所有者证据、rename 的 EPERM/EBUSY 退避重试与最
   人工删除锁文件。真实 ACL / 独占句柄造成的不可读只用 `EISDIR`（目录占位）复现，未在真实 ACL 上验证。
 - 残留证据的回收只在**下一次拿锁时**发生：如果这个配置路径再也没有写盘，失败留下的 `.stale-*` /
   `.release-*` 会一直留着（不会影响正确性，也不会被当成锁）。
-- 残留回收的年龄阈值（60s）远大于「搬走 → 核对 → 删除」的微秒窗口，但**不是**形式化保证：
-  如果接管者在 rename 之后被挂起超过 60s（不是崩溃），另一个写者理论上可能回收它正在核对的隔离文件
-  （窗口与「守护锁接管阈值 10s」同类，未专门压测）。
+- 残留回收的年龄阈值（60s）现在从**搬走时间**起算（不再继承源锁 mtime），但**不是**形式化保证：
+  如果接管者在 rename 之后被挂起超过 60s（不是崩溃），另一个写者理论上仍可能回收它正在核对的
+  隔离文件（窗口与「守护锁接管阈值 10s」同类，未专门压测）。
+- 残留匹配的大小写语义按平台判定（Windows 不区分 / POSIX 区分）：网络共享盘（SMB / NFS）上的
+  大小写与 mtime 语义、以及跨主机写同一配置路径未验证。
 
 ## License
 
