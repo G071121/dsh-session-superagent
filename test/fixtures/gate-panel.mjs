@@ -212,6 +212,9 @@ export function loadGatePanel(options = {}) {
   assert.ok(internals && typeof internals.GateSettings === 'function', '调试出口里没有 GateSettings')
 
   let props = { repo: options.repo || 'E:/work/demo', notify: options.notify || (() => {}) }
+  // StrictMode（开发态）双挂载：首轮 effect 跑完立刻 cleanup，再原样重跑一遍。
+  // 只影响挂载，之后与普通模式一致。
+  let strictEffects = Boolean(options.strictEffects)
 
   const runEffects = () => {
     for (const item of collected) {
@@ -235,6 +238,16 @@ export function loadGatePanel(options = {}) {
       collected = []
       tree = internals.GateSettings(props)
       runEffects()
+      if (strictEffects) {
+        strictEffects = false
+        // mount → cleanup → mount：cleanup 必须能被随后的 effect 重跑复位，
+        // 否则 alive 之类的 ref 会永远停在 false（真实 React StrictMode 的坑）。
+        for (const slot of effectSlots) {
+          if (slot && typeof slot.cleanup === 'function') slot.cleanup()
+        }
+        effectSlots.length = 0
+        runEffects()
+      }
       if (++guard > 50) throw new Error('门禁桩渲染没有收敛（effect 里在无限 setState？）')
     } while (pending)
   }
