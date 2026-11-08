@@ -63,7 +63,8 @@ if (!result.ok) return
 一个坏配置文件不应该让整个门禁不可用。
 
 **写盘侧是 fail closed 的**：`writeGateConfig()`（以及面板的 `POST /gates`）是**整层重写**，
-只写 `version` / `name` / `rules` / `semantic`，不会解析也不会重放基文件。所以：
+只写 `version` / `name` / `extends` / `rules` / `semantic`（`extends` 只保留 `false` / `"none"`），
+不会解析也不会重放基文件。所以：
 
 | 写盘时的 `extends` | 行为 |
 |---|---|

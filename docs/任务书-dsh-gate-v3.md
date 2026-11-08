@@ -58,3 +58,25 @@
 - 不修 PANEL_STRICT 全量测试基建（另立任务）。
 - 不做真实 WebView/读屏/触摸/IME，不调用真实模型或真实仓库写操作。
 - 不向外部仓库发 PR，不重启 DSH，issue #19 不动。
+
+## 结果（I1 集成与发布）
+
+- 集成：`feat/gate-v3` 上 C1 / U1 / S1 各一个提交 + 三份报告一个文档提交，`git merge --no-ff`
+  合入 `main`；发布提交 `release: 0.10.9（门禁 v3）` 打 tag `v0.10.9` / `gate-v0.1.2`，
+  tag 指向的提交在 `main` 历史上（`git merge-base --is-ancestor` 复核），没有强推、没有 `git add -A`。
+- 版本：主包 `0.10.8` → **`0.10.9`**（patch）；门禁子包 `@mycf711/dsh-gate` `0.1.1` → **`0.1.2`**
+  （`writeGateConfig` 行为变更）；`PACKAGE_VERSION` / `SERVER_VERSION` / `CLIENT_VERSION` /
+  README 徽章 / CHANGELOG / `package-lock.json` 六处同步。
+- 最终计数（合并后复跑）：根 `npm test` **890/890**（fail 0，exit 0）、gate 包 **143/143**、
+  `test/client.test.mjs` **148/148**、`test/update-ui.test.mjs` **53/53**、
+  `PANEL_STRICT=1` 门禁用例 **26/26**、UI 审计 **11/11（100 分）**、
+  `preflight` 全量 **42 项 = 40 PASS / 2 SKIP**（真机冒烟需宿主、维护一致性在打 tag 后单独跑并通过）、
+  真实 Chromium **47 PASS / 0 FAIL / 14 SKIP**（截图通道不可用）。
+- profile：`node scripts/sync-profile.mjs --repair` 后 `--check` 四段全零
+  （缺失 0 / 断链 0 / 陈旧 0 / 门禁子包漂移 0）——只声明 **磁盘副本一致**，宿主运行时是否生效
+  要重载后另验，本轮不重启 DSH。
+- 发布三件套：`npm publish`（主包 + 门禁子包）、`git tag v0.10.9` / `gate-v0.1.2`、GitHub Release；
+  `main` 上 CI 绿。
+- 残余（low，均不阻塞）：并发写同一层 TOCTOU（无文件锁）、Windows 目标文件被 hold 时 `rename`
+  `EPERM`（既有、fail-safe）、preflight 第四段解析缺自动化用例、`TARGETS` 条目磁盘存在性无守卫。
+  详见 `docs/报告-gate-v3核心审查.md` §八 与 `docs/报告-gate-v3面板审查.md` §八。

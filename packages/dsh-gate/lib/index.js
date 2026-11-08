@@ -46,7 +46,7 @@ export {
 
 export const PACKAGE_NAME = '@mycf711/dsh-gate'
 /** 与 package.json 的 version 同步（测试守着）。 */
-export const PACKAGE_VERSION = '0.1.1'
+export const PACKAGE_VERSION = '0.1.2'
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 
@@ -100,7 +100,8 @@ function configPathFor(scope, { repo = process.cwd(), home = homedir(), env = pr
 // ── extends 的写盘安全 ───────────────────────────────────────────────────────
 // 只有 `false` / `'none'` 能原样写回：它们不引用任何外部内容，写回后语义不变（本层替换）。
 // `true` / `'default'` / 路径字符串 / 内联对象都表示「本层以别处为基」，而写盘是整层重写
-// （只写 version/name/rules/semantic），写下去就把基规则连同 `extends` 一起冲掉 —— 必须报错。
+// （只写 version/name/extends/rules/semantic，其中 extends 只保留 false/'none'），
+// 写下去就把基规则连同 `extends` 一起冲掉 —— 必须报错。
 const EXTENDS_ABSENT = 'absent'
 const EXTENDS_KEEP = 'keep'
 const EXTENDS_SHARED = 'shared'
@@ -529,7 +530,8 @@ export function readGateScope(scope, { repo = process.cwd(), home = homedir(), e
  * 写某一层配置：先备份 `.bak`，再原子替换（临时文件 + rename）。
  * 只允许 user / project / local —— 默认规则随包发布，不能从面板改。
  *
- * 写盘是**整层重写**（只写 version/name/rules/semantic），所以 `extends` 走 fail closed：
+ * 写盘是**整层重写**（只写 version/name/extends/rules/semantic，其中 extends 只保留 false/'none'），
+ * 所以 `extends` 走 fail closed：
  * - 入参 `extends: false | 'none'`：允许，原样写回（写回后仍是「替换」语义）；
  * - 入参 `extends: true | 'default' | '<路径>' | {…}`：抛错（含配置路径与解决方式）；
  * - 文件里已有这类共享 `extends`：不管入参写什么（包括 `false`）都抛错，绝不静默冲掉基规则；
