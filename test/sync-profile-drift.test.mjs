@@ -8,14 +8,16 @@
 // 跨卷硬链接会 EXDEV，所以这里不用 os.tmpdir()。
 import assert from 'node:assert/strict'
 import test, { after } from 'node:test'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { cpSync, existsSync, linkSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { dirname, join, relative } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 // preflight 的 profile 行解析（纯函数）：第四段「门禁子包漂移」的 clean / drift 文案由本文件钉住。
 // 本文件是 CLI 也是模块：import 时只导出纯函数，不会真的跑整轮门禁（主体包在 IS_MAIN 里）。
-import { summarizeProfileCheck } from '../scripts/preflight.mjs'
+// S1 v5：主入口判定（resolveIsMain）也导出成纯函数 —— 直接执行与 import 必须用同一套判断，
+// 且回退分支不许静默 exit 0（v4 审查 F8）。
+import { IS_MAIN, resolveIsMain, summarizeProfileCheck } from '../scripts/preflight.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const SCRIPT = join(ROOT, 'scripts', 'sync-profile.mjs')
@@ -63,6 +65,42 @@ function runScript(script, ...args) {
 const runSync = (...args) => runScript(SCRIPT, ...args)
 
 const sha256 = (file) => createHash('sha256').update(readFileSync(file)).digest('hex')
+
+/** 递归列出目录下的文件（相对路径，`/` 分隔）。 */
+function listFiles(root, rel = '', out = []) {
+  for (const name of readdirSync(join(root, rel))) {
+    const childRel = rel ? rel + '/' + name : name
+    if (statSync(join(root, childRel)).isDirectory()) { listFiles(root, childRel, out); continue }
+    out.push(childRel)
+  }
+  return out
+}
+
+/** 目录快照：相对路径 → sha256。用来证明「写盘前失败」时一处都没动。 */
+function snapshot(root) {
+  const out = new Map()
+  for (const rel of listFiles(root)) out.set(rel, sha256(join(root, rel)))
+  return out
+}
+
+/**
+ * 在仓库同卷建最小可运行副本：`scripts/sync-profile.mjs` + TARGETS 指向的文件 + 门禁子包。
+ * 不复制 test/ docs/（免得被 `node --test` 再扫一遍）。调用方负责 rmSync 清理。
+ */
+function makeRepoCopy(prefix, { withGate = true } = {}) {
+  const copy = join(ROOT, '.tmp-' + prefix + '-' + process.pid)
+  const dest = join(copy, '.tmp-dest')
+  rmSync(copy, { recursive: true, force: true })
+  mkdirSync(join(copy, 'scripts'), { recursive: true })
+  cpSync(SCRIPT, join(copy, 'scripts', 'sync-profile.mjs'))
+  for (const rel of scriptTargets()) {
+    mkdirSync(dirname(join(copy, rel)), { recursive: true })
+    cpSync(join(ROOT, rel), join(copy, rel))
+  }
+  if (withGate) cpSync(GATE_SRC, join(copy, 'packages', 'dsh-gate'), { recursive: true })
+  mkdirSync(dest, { recursive: true })
+  return { copy, dest, script: join(copy, 'scripts', 'sync-profile.mjs') }
+}
 
 test('门禁子包 lib 变了、package.json 没变：--check 必须红（旧脚本在这里是假绿）', () => {
   buildDest({ staleGate: true })
@@ -185,21 +223,8 @@ test('TARGETS 每一条都必须真的在仓库里（清单条目和文件对不
 })
 
 test('仓库副本里删掉一条 TARGETS：--check 红（退出码 2）并点名，旧实现这里是 exit 0', () => {
-  const copy = join(ROOT, '.tmp-s1-targets-copy-' + process.pid)
-  const copyDest = join(copy, '.tmp-dest')
-  const script = join(copy, 'scripts', 'sync-profile.mjs')
+  const { copy, dest: copyDest, script } = makeRepoCopy('s1-targets-copy')
   try {
-    rmSync(copy, { recursive: true, force: true })
-    // 最小可运行副本：脚本 + 清单里的文件 + 门禁子包（**不**复制 test/docs，免得被 node --test 再扫一遍）
-    mkdirSync(join(copy, 'scripts'), { recursive: true })
-    cpSync(SCRIPT, script)
-    for (const rel of scriptTargets()) {
-      mkdirSync(dirname(join(copy, rel)), { recursive: true })
-      cpSync(join(ROOT, rel), join(copy, rel))
-    }
-    cpSync(GATE_SRC, join(copy, 'packages', 'dsh-gate'), { recursive: true })
-
-    mkdirSync(copyDest, { recursive: true })
     assert.equal(runScript(script, '--repair', '--dir', copyDest).code, 0, '副本先要能建出干净 profile')
 
     // 删掉一条清单条目指向的文件：dest 里的硬链接还在（inode 还活着），所以「缺失」仍然是 0
@@ -265,4 +290,131 @@ test('preflight 第五段 TARGETS 缺源：必须解析、点名，且不算干�
   assert.equal(summary.manifest, 1)
   assert.equal(summary.detail,
     '缺失 0 / 断链 0 / 陈旧 0 / TARGETS 缺源 1（bin/check.mjs），清单条目不成立（--repair 修不了）')
+})
+
+// ── S1 v5：缺源写盘前失败 / 门禁子包整目录缺失 / 主入口 ─────────────────────
+// v4 审查 F6：缺源时 `--repair` 会先把能做的 relink / 子包复制 / 陈旧 prune 做完，再 exit 2。
+// 缺的是 `lib/*.js` 时 profile 副本已经被当「陈旧」删掉 —— 修不了却改了磁盘，是最坏的失败方式
+// （用户以为只是报错，实际 profile 已经被改了一半）。所以仓库侧问题必须在**任何写盘之前**判红。
+
+test('TARGETS 缺源：--check / --repair 都必须在任何写盘之前失败（不先 relink / 复制 / prune）', () => {
+  const { copy, dest, script } = makeRepoCopy('s1-repair-atomic')
+  try {
+    assert.equal(runScript(script, '--repair', '--dir', dest).code, 0, '副本先要能建出干净 profile')
+    // 制造三类「--repair 本来会动磁盘」的漂移：断链 / 陈旧 / 门禁子包内容不一致
+    rmSync(join(dest, 'lib', 'body.js'))
+    writeFileSync(join(dest, 'lib', 'body.js'), readFileSync(join(copy, 'lib', 'body.js')))
+    writeFileSync(join(dest, 'lib', 'zzz-stale.js'), '// 仓库已删除的陈旧文件\n')
+    const gateIndex = join(dest, GATE_REL, 'lib', 'index.js')
+    writeFileSync(gateIndex, readFileSync(gateIndex, 'utf8') + '\n// stale gate copy（profile 里还是旧实现）\n')
+    const before = snapshot(dest)
+
+    // 仓库侧删掉一条 TARGETS：--repair 变不出文件来，就必须在写盘前红
+    rmSync(join(copy, 'assets', 'icon-180.png'))
+    const check = runScript(script, '--check', '--dir', dest)
+    assert.equal(check.code, 2, '缺源是仓库侧问题（2）：' + check.out)
+    assert.match(check.out, /缺源\s+assets\/icon-180\.png/, '必须点名是哪一条：' + check.out)
+    assert.deepEqual(snapshot(dest), before, '--check 不该写盘')
+
+    const repaired = runScript(script, '--repair', '--dir', dest)
+    assert.equal(repaired.code, 2, '--repair 也修不了缺源（2）：' + repaired.out)
+    assert.match(repaired.out, /TARGETS 有 1 条在仓库里不存在：assets\/icon-180\.png/)
+    assert.doesNotMatch(repaired.out, /relinked|pruned|recopied/, '缺源时 --repair 不该先改一半磁盘：' + repaired.out)
+    assert.deepEqual(snapshot(dest), before, '缺源时 --repair 改了 profile（必须在写盘前失败）')
+  } finally {
+    rmSync(copy, { recursive: true, force: true })
+  }
+})
+
+// v4 审查 F7：`packages/dsh-gate` 整个目录在仓库里缺失时，旧实现 `if (existsSync(gateSrc))` 静默跳过 ——
+// profile 检查可能仍然「四段全零」，门禁子包根本没人管。这也是仓库侧问题：--repair 修不了，必须点名 + exit 2。
+test('门禁子包整个目录在仓库里缺失：--check / --repair 都点名并 exit 2（旧实现静默跳过）', () => {
+  const { copy, dest, script } = makeRepoCopy('s1-gate-src-missing')
+  try {
+    assert.equal(runScript(script, '--repair', '--dir', dest).code, 0, '副本先要能建出干净 profile')
+    rmSync(join(copy, 'packages', 'dsh-gate'), { recursive: true, force: true })
+    const before = snapshot(dest)
+
+    const check = runScript(script, '--check', '--dir', dest)
+    assert.equal(check.code, 2, '门禁子包源目录缺失必须红（旧实现 exit 0）：' + check.out)
+    assert.match(check.out, /缺源\s+packages\/dsh-gate/, '必须点名缺的是门禁子包目录：' + check.out)
+    assert.match(check.out, /TARGETS 缺源 1（packages\/dsh-gate）/)
+    assert.doesNotMatch(check.out, /缺失 0 \/ 断链 0 \/ 陈旧 0 \/ 门禁子包漂移 0$/m,
+      '旧假绿：四段全零却没有门禁子包')
+
+    const repaired = runScript(script, '--repair', '--dir', dest)
+    assert.equal(repaired.code, 2, '--repair 修不了缺源：' + repaired.out)
+    assert.deepEqual(snapshot(dest), before, '缺源时 --repair 不该写盘')
+  } finally {
+    rmSync(copy, { recursive: true, force: true })
+  }
+})
+
+// profile 侧相反方向：`node_modules/@mycf711/dsh-gate` 整个目录没装 —— 这一条 --repair **能**修（递归复制）。
+// 旧实现在 --check 里只让「缺失」+1，不点名；用户看到「缺失 1」不知道缺的是哪个。
+test('profile 里门禁子包整个目录缺失：--check 点名（缺失 1），--repair 递归复制修复', () => {
+  buildDest()
+  const gateDst = join(DEST, GATE_REL)
+  rmSync(gateDst, { recursive: true, force: true })
+
+  const check = runSync('--check', '--dir', DEST)
+  assert.equal(check.code, 1, 'profile 缺门禁子包必须红：' + check.out)
+  assert.match(check.out, /缺失\s+node_modules\/@mycf711\/dsh-gate/, '必须点名缺的是门禁子包目录：' + check.out)
+  assert.match(check.out, /缺失 1 \/ 断链 0 \/ 陈旧 0 \/ 门禁子包漂移 0/)
+
+  const repaired = runSync('--repair', '--dir', DEST)
+  assert.equal(repaired.code, 0, repaired.out)
+  assert.match(repaired.out, /copied\s+node_modules\/@mycf711\/dsh-gate/)
+  const clean = runSync('--check', '--dir', DEST)
+  assert.equal(clean.code, 0, '修完必须全绿：' + clean.out)
+  assert.match(clean.out, /缺失 0 \/ 断链 0 \/ 陈旧 0 \/ 门禁子包漂移 0/)
+  for (const rel of ['package.json', 'lib/index.js', 'bin/gate.mjs']) {
+    assert.equal(sha256(join(GATE_SRC, rel)), sha256(join(gateDst, rel)), rel + ' 必须与仓库逐字节一致')
+  }
+})
+
+// v4 审查 F8：preflight 的主入口判定以前是「import.meta.main 不存在 → 逐字符比 argv[1]」，
+// 比对上不了就返回 false —— 整轮门禁**静默 exit 0**（无输出、无锁、CI 绿）。这比少跑一项更坏：它是假绿。
+// 现在判定收口成纯函数 resolveIsMain：只有「两边都是确定的路径且确实不同」才算被 import。
+const PREFLIGHT = join(ROOT, 'scripts', 'preflight.mjs')
+const PREFLIGHT_URL = pathToFileURL(PREFLIGHT).href
+
+test('preflight 主入口：import.meta.main 可用时以它为准（直接执行 / 被 import 一致）', () => {
+  assert.equal(resolveIsMain({ mainFlag: true, moduleUrl: PREFLIGHT_URL, argv1: 'whatever.mjs' }), true)
+  assert.equal(resolveIsMain({ mainFlag: false, moduleUrl: PREFLIGHT_URL, argv1: PREFLIGHT }), false)
+  // 真模块被 import 时只导出纯函数（不跑门禁）—— 这是测试能 import 它的前提
+  assert.equal(IS_MAIN, false, 'node --test 里 import preflight 必须判成「非入口」')
+})
+
+test('preflight 主入口回退：相对路径 / 大小写不同也算同一个入口（旧实现逐字符比较 → 静默 exit 0）', () => {
+  const relativeEntry = relative(process.cwd(), PREFLIGHT)
+  assert.equal(resolveIsMain({ mainFlag: undefined, moduleUrl: PREFLIGHT_URL, argv1: relativeEntry }), true,
+    '相对路径直接执行必须当 CLI 跑（旧实现这里 false → 静默 exit 0）')
+  if (process.platform === 'win32') {
+    assert.equal(resolveIsMain({ mainFlag: undefined, moduleUrl: PREFLIGHT_URL, argv1: PREFLIGHT.toUpperCase() }), true,
+      'Windows 大小写不同是同一个文件')
+  }
+  assert.equal(resolveIsMain({ mainFlag: undefined, moduleUrl: PREFLIGHT_URL, argv1: PREFLIGHT }), true)
+})
+
+test('preflight 主入口回退：比不出来时必须当 CLI 跑，不许静默 exit 0', () => {
+  // 没有 argv[1]（node -e / REPL）：当 CLI
+  assert.equal(resolveIsMain({ mainFlag: undefined, moduleUrl: PREFLIGHT_URL, argv1: undefined }), true)
+  assert.equal(resolveIsMain({ mainFlag: undefined, moduleUrl: PREFLIGHT_URL, argv1: '' }), true)
+  // 路径解析失败（文件不存在 / 权限）：当 CLI
+  assert.equal(resolveIsMain({ mainFlag: undefined, moduleUrl: PREFLIGHT_URL, argv1: join(ROOT, 'no-such-entry.mjs') }), true)
+  assert.equal(resolveIsMain({
+    mainFlag: undefined, moduleUrl: PREFLIGHT_URL, argv1: PREFLIGHT,
+    realpath: () => { throw new Error('EPERM: realpath 解析失败') },
+  }), true)
+  // 只有「确实是另一个真实文件」才判「被 import」
+  assert.equal(resolveIsMain({ mainFlag: undefined, moduleUrl: PREFLIGHT_URL, argv1: SCRIPT }), false)
+})
+
+test('preflight 被 import 时不跑整轮门禁（子进程对照：只有自己的输出）', () => {
+  const res = spawnSync(process.execPath,
+    ['--input-type=module', '-e', `const m = await import(${JSON.stringify(PREFLIGHT_URL)}); console.log('IS_MAIN=' + m.IS_MAIN)`],
+    { cwd: ROOT, encoding: 'utf8', timeout: 60000 })
+  assert.equal(res.status, 0, String(res.stderr || ''))
+  assert.equal(String(res.stdout || '').trim(), 'IS_MAIN=false', 'import 不该跑门禁（更不该静默 exit 0）')
 })
