@@ -46,6 +46,8 @@ import {
 } from './semantic.js'
 
 export {
+  DEFAULT_GATE_ARTIFACT_KEEP,
+  DEFAULT_GATE_ARTIFACT_MIN_AGE_MS,
   DEFAULT_GATE_GUARD_STALE_MS,
   DEFAULT_GATE_LOCK_POLL_MS,
   DEFAULT_GATE_LOCK_STALE_MS,
@@ -57,6 +59,7 @@ export {
   acquireGateConfigLock,
   gateGuardPath,
   gateLockPath,
+  pruneLockArtifacts,
   renameWithRetry,
 } from './config-lock.js'
 
