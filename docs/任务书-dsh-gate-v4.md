@@ -60,3 +60,32 @@
 - 不重写 PANEL_STRICT 全量基建，不改官方视觉和交互。
 - 不做真实 WebView/读屏/触摸/IME，不调用真实模型或真实仓库写操作。
 - 不重启 DSH，不向外部仓库发 PR，issue #19 不动。
+
+## 结果（I1 集成与发布）
+
+- 集成：C1（`c52ce02`）、C2（`4972e92`）、C3（`c6212f3`）、U1（`efdda5b`）、U2（`fccb1c1`）、S1（`bc01388`）
+  六个提交 + V1 / Q1 / Q1R / Q2 / Q2R / Q1R2 六份报告，经 **PR #27**（`task/gate-v4-integration`）合入 `main`，
+  merge commit `e3a7b65`；发布提交 `release: 0.10.10（门禁 v4 并发与竞态收尾）`（`f293eb9`）打
+  tag `v0.10.10` / `gate-v0.1.3`，`git merge-base --is-ancestor` 复核 tag 在 `main` 历史上；
+  没有强推、没有 `git add -A`。main 受保护分支要求 PR + 状态检查，直接 push 被拒后走 PR，符合仓库既有流程。
+- 版本：主包 `0.10.9` → **`0.10.10`**（patch）；门禁子包 `@mycf711/dsh-gate` `0.1.2` → **`0.1.3`**
+  （新增公开子路径 `./lib/config-lock.js` 与锁 API、`writeGateConfig` 新失败路径 `gate_lock_timeout` /
+  `gate_lock_lost`；沿用仓库既有 0.x 口径按 patch）。`package.json` / `package-lock.json` /
+  `lib/index.js` `SERVER_VERSION` / `client.js` `CLIENT_VERSION` / README 徽章 / CHANGELOG 六处同步，
+  README 单测数 890 → 934，`AGENTS.md` 当前基线同步。
+- 最终计数（合并后复跑）：根 `npm test` **934/934**（fail 0，exit 0）、gate 包 **166/166**、
+  `test/client.test.mjs` **162/162**、`test/update-ui.test.mjs` **53/53**、
+  `test/sync-profile-drift.test.mjs` **11/11**、`PANEL_STRICT=1` 门禁用例 **40/40**、
+  UI 审计 **11/11（100 分）**、面板文案快照 PASS、真实 Chromium **47/47**（安装版前端 `0.2.2-rc.1`，
+  client sha256 `d6e65840…`）、门禁专项 Chromium **54/54**、`preflight` 全量 **42 项 = 41 PASS / 1 SKIP**
+  （`smoke:observe` 需真机宿主）、`check-maintenance` **6/6**。
+- profile：`node scripts/sync-profile.mjs --repair` 后 `--check` 四段全零
+  （缺失 0 / 断链 0 / 陈旧 0 / 门禁子包漂移 0），第五段「TARGETS 缺源」不出现 ——
+  只声明**磁盘副本一致**；宿主运行时是否生效要重载后另验，本轮不重启 DSH。
+- 发布三件套：`npm publish`（`dsh-session-superagent@0.10.10` + `@mycf711/dsh-gate@0.1.3`）、
+  `git tag v0.10.10` / `gate-v0.1.3`、GitHub Release（`v0.10.10` = Latest，`gate-v0.1.3` 带子包说明）；
+  `main` 上 CI 绿（Node 22/24，含「维护一致性」）。
+- 残余（均不阻塞）：跨主机共享盘（NFS/SMB）锁语义未验；真实长期文件句柄占用下的 `rename` `EPERM`
+  只用替身验证；不经过本锁的外部写者并发只靠 `assertOwner()` 兜底；真实 WebView 重载后的读屏 / 触摸 / IME、
+  真实 GitHub / Gitee 写操作未验。info / low 项见 `docs/报告-gate-v4核心终审.md` 与
+  `docs/报告-gate-v4面板复审.md` 的未验 / 残余小节。
