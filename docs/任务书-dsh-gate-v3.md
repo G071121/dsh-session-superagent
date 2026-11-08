@@ -70,8 +70,8 @@
 - 最终计数（合并后复跑）：根 `npm test` **890/890**（fail 0，exit 0）、gate 包 **143/143**、
   `test/client.test.mjs` **148/148**、`test/update-ui.test.mjs` **53/53**、
   `PANEL_STRICT=1` 门禁用例 **26/26**、UI 审计 **11/11（100 分）**、
-  `preflight` 全量 **42 项 = 40 PASS / 2 SKIP**（真机冒烟需宿主、维护一致性在打 tag 后单独跑并通过）、
-  真实 Chromium **47 PASS / 0 FAIL / 14 SKIP**（截图通道不可用）。
+  `preflight` 全量 **42 项 = 41 PASS / 1 SKIP**（`smoke:observe` 需要真机宿主；维护一致性在打 tag 后
+  单独跑并通过）、真实 Chromium **47 PASS / 0 FAIL / 14 SKIP**（截图通道不可用）。
 - profile：`node scripts/sync-profile.mjs --repair` 后 `--check` 四段全零
   （缺失 0 / 断链 0 / 陈旧 0 / 门禁子包漂移 0）——只声明 **磁盘副本一致**，宿主运行时是否生效
   要重载后另验，本轮不重启 DSH。
