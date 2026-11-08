@@ -11,15 +11,17 @@
  *   2. 只有**超龄**（或所有者进程已死）的锁才算 stale，清理时留下年龄与所有者证据；
  *   3. Windows 上目标文件被占用时 rename 会 EPERM / EBUSY：有界退避重试，最终失败保留原文件。
  *
- * 并发安全（C2）：`rename` / `unlink` 都是**无条件**操作 —— 只看一眼旧快照就去搬走
- * `lockPath`，可能搬走别的写者刚创建的新锁，于是两个写者同时进临界区（Q1 实测 12 写者 2/44 轮）。
+ * 并发安全（C2/C3）：`rename` / `unlink` 都是**无条件**操作 —— 只看一眼旧快照就动 `lockPath`，
+ * 可能搬走别的写者刚创建的新锁，于是两个写者同时进临界区（Q1 实测 12 写者 2/44 轮）。
  * 所以「创建 / 接管 / 释放」这三个会动 `lockPath` 的动作全部走：
  *   1. **守护锁**（`<lock>.guard`，微秒级、同样 O_EXCL）：把「读快照 → 判定 stale → 搬走 → 新建」
- *      串起来，活着的写者不会互相打断；
+ *      以及「核对 token → 删除」串起来，活着的写者不会互相打断；
  *   2. **搬走后再核对**：rename 到唯一名字后比对 token（内容不可解析时比对原文），
  *      不是快照里那把（搬错了别人刚建的新锁）就用 `link` / `COPYFILE_EXCL` **原子放回去**，绝不误删；
- *   3. **释放先隔离再核对**：释放时先 rename 到私有名字，确认 token 仍属于自己的才删，
- *      否则原样还原 —— 堵住「读完 token 到 unlink 之间锁被换掉」的 TOCTOU。
+ *   3. **释放先核对、不匹配不碰**（C3/Q1R）：释放**不能**先 rename —— 旧持有者被挂起、锁被接管、
+ *      恢复后 release 时，先 rename 会把当前持有者的新锁搬走，`lockPath` 空窗，第三写者趁机进临界区。
+ *      现在的顺序是「进守护区 → 核对 token → 仍是自己的才从原位删」，不匹配原样返回 false；
+ *      拿不到守护锁也不碰 `lockPath`（宁可留着自己的锁，也不误删别人的新锁）。
  * 再加一道**写盘前归属校验**（`assertOwner()`）：锁一旦不在自己手里，宁可失败也不覆盖别人的写盘。
  *
  * 锁是**跨进程互斥**，不是分布式锁：判据是同一台机器、同一路径；跨主机共享盘不保证。
@@ -60,6 +62,12 @@ export const DEFAULT_GATE_RENAME_BACKOFF_MS = 20
 
 /** 只有这两个码值得重试：Windows 上目标文件被别的进程打开时的典型表现。 */
 const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY'])
+
+/**
+ * 释放写锁时等守护锁的上限。守护锁只活微秒级，正常立刻拿到；给上限是为了**永不无限等**。
+ * 拿不到就不碰 lockPath（失败返回 false），宁可留着自己的锁，也不误删别人的新锁。
+ */
+const RELEASE_GUARD_TIMEOUT_MS = 2000
 
 /**
  * 创建锁文件时代表「锁在别人手里」的错误码。
@@ -309,50 +317,53 @@ function lockOwnedBy(lockPath, token) {
 }
 
 /**
- * 释放锁：先 rename 到私有名字**隔离**，确认 token 还是自己的才 unlink。
- * - 是自己的：删掉，返回 true；
- * - 不是自己的（stale 接管后残留的旧持有者）：原样还原，返回 false —— 绝不误删别人的新锁。
- * Windows 上 rename / unlink 偶发 EPERM / EBUSY（防病毒 / 索引器短暂持有）时做几次退避重试。
+ * 只有 token 仍是自己的才删；不是自己的**一个字节都不动**。
+ * 调用者必须保证此刻没有别人在改同一个路径：写锁的释放包在守护区里，守护锁自己不需要再套一层。
  */
-function releaseLock(lockPath, token) {
-  const priv = lockPath + '.release-' + Date.now() + '-' + randomUUID()
-  let moved = false
-  for (let attempt = 1; attempt <= 3 && !moved; attempt += 1) {
+function unlinkIfOwned(path, token) {
+  if (!lockOwnedBy(path, token)) return false
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
     try {
-      renameSync(lockPath, priv)
-      moved = true
+      unlinkSync(path)
+      return true
     } catch (error) {
-      if (!RETRYABLE_RENAME_CODES.has(error && error.code)) return false
+      if (!RETRYABLE_RENAME_CODES.has(error && error.code) || attempt === 3) return false
       sleepSync(attempt * 5)
     }
   }
-  if (!moved) return false
-  let owner = null
-  try {
-    owner = JSON.parse(readFileSync(priv, 'utf8'))
-  } catch {
-    // 内容不可解析：不可能证明是自己的，走还原分支
-  }
-  if (owner && owner.token === token) {
-    for (let attempt = 1; attempt <= 3; attempt += 1) {
-      try {
-        unlinkSync(priv)
-        return true
-      } catch (error) {
-        if (!RETRYABLE_RENAME_CODES.has(error && error.code) || attempt === 3) {
-          try {
-            unlinkSync(priv)
-          } catch {
-            // 残留的 .release- 不是锁，不影响正确性
-          }
-          return false
-        }
-        sleepSync(attempt * 5)
-      }
-    }
-  }
-  restoreFile(priv, lockPath)
   return false
+}
+
+/**
+ * 释放写锁：在守护区里「先核对 token，再从原位删除」。
+ *
+ * 关键（C3 / Q1R）：**不能**先 rename 再核对。rename 是无条件操作 —— 旧持有者被挂起、
+ * 锁被判定 stale 接管、恢复后调 release 时，这么做会把**当前持有者的新锁**搬走，
+ * `lockPath` 出现空窗，第三写者能趁虚而入，两个写者同时进临界区。
+ * 现在 token 不匹配就原样返回 false，绝不碰 `lockPath`。
+ *
+ * 拿不到守护锁时同样选择「不碰 `lockPath`」：宁可留着自己的锁等它超龄，
+ * 也不冒误删别人新锁的风险（守护锁只活微秒级，正常不会拿不到）。
+ */
+function releaseLock(lockPath, token, { guardPath, guardStaleMs, timeoutMs, pollMs, sleep, open, selfHost }) {
+  let guard = null
+  try {
+    guard = acquireGuard(guardPath, {
+      timeoutMs: Math.min(timeoutMs, RELEASE_GUARD_TIMEOUT_MS),
+      pollMs,
+      staleMs: guardStaleMs,
+      sleep,
+      open,
+      selfHost,
+    })
+  } catch {
+    return false
+  }
+  try {
+    return unlinkIfOwned(lockPath, token)
+  } finally {
+    guard.release()
+  }
 }
 
 /**
@@ -378,8 +389,9 @@ function acquireGuard(guardPath, { timeoutMs, pollMs, staleMs, sleep, open, self
       return {
         path: guardPath,
         token,
+        // 守护锁自己不再套一层守护锁：直接核对 token 再删（它只活微秒级，没人会在这一刻接管它）。
         release() {
-          return releaseLock(guardPath, token)
+          return unlinkIfOwned(guardPath, token)
         },
       }
     }
@@ -451,7 +463,16 @@ export function acquireGateConfigLock(configPath, {
     waitedMs: Date.now() - startedAtMs,
     broken,
     release() {
-      return releaseLock(lockPath, token)
+      // 释放同样走守护区：先核对 token 再删，token 不匹配就一个字节都不碰（C3）。
+      return releaseLock(lockPath, token, {
+        guardPath,
+        guardStaleMs: guardStale,
+        timeoutMs: timeout,
+        pollMs: poll,
+        sleep,
+        open,
+        selfHost,
+      })
     },
     isOwner() {
       return lockOwnedBy(lockPath, token)
