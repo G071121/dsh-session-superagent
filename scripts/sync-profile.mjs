@@ -15,8 +15,11 @@
 // 用法：
 //   node scripts/sync-profile.mjs            补齐缺失文件（不动断链，只警告）
 //   node scripts/sync-profile.mjs --repair   断链也重建硬链接、门禁子包按内容强制同步、清理陈旧文件
-//   node scripts/sync-profile.mjs --check    只检查：缺失/断链/陈旧/门禁子包漂移任一非零就 exit 1（给 CI 用）
+//   node scripts/sync-profile.mjs --check    只检查：缺失/断链/陈旧/门禁子包漂移/TARGETS 缺源 任一非零就红（给 CI 用）
 //   node scripts/sync-profile.mjs --dir <path>  指定 profile 安装目录
+//
+// 退出码：0 = 干净；1 = profile 有漂移（--repair 能修）；2 = 仓库侧问题（TARGETS 条目在仓库里
+// 不存在 / lib 的相对 import 解析失败 —— 这两种 --repair 修不了，只能改仓库）。
 //
 // 边界（别过度声明）：本脚本只保证**磁盘上的 profile 副本**与仓库一致；
 // 宿主进程里已加载的模块不会因为替换文件而重载 —— 运行时是否生效要用户重载宿主后另验。
@@ -44,9 +47,10 @@ const DEST = dirFlag >= 0 ? args[dirFlag + 1] : DEFAULT_PROFILE
 // 故意写成**显式清单**而不是目录遍历：`lib/` 旁边就是 `test/` 和 `docs/`，一递归就会把开发件塞进安装副本。
 // 但显式清单的代价是「新增运行时文件忘了加」—— 而这正是事故 1 的形状，且它不会报：
 // profile 里缺 `bin/check.mjs` 时 `--check` 照样打印「缺失 0 / 断链 0 / 陈旧 0」exit 0（实测）。
-// 所以清单由 `test/sync-profile-drift.test.mjs` 的派生规则守着：只要发布契约（package.json 的
+// 所以清单由 `test/sync-profile-drift.test.mjs` 的两条派生规则守着：只要发布契约（package.json 的
 // `files` / `exports` / `bin` / `dsh.bundle.patch`、`lib/**` 任意新 .js、`assets/**`）里多一个运行时件，
-// 那条用例就红并点名。新增运行时文件时必须在这里加一行。
+// 那条用例就红并点名；反过来清单里写了仓库里不存在的文件（删文件的复发形态），下面 missingSources 直接红。
+// 新增运行时文件时必须在这里加一行。
 const TARGETS = [
   'client.js', 'ui-host-primitives.js', 'ui-orbit-popover.js',
   'bin/check.mjs',
@@ -54,6 +58,16 @@ const TARGETS = [
   'assets/icon-180.png', 'assets/icon-app.png',
   'lib/index.js', 'lib/watch.js', 'lib/gh-format.js', 'lib/gitee.js', 'lib/gates.js', 'lib/redact.js', 'lib/body.js', 'lib/state-migration.js', 'lib/update.js', 'lib/semver.js',
 ]
+
+// 反向守卫（S1）：TARGETS 里的每一条都必须真的在仓库里。
+//
+// 以前循环里是 `if (!existsSync(src)) continue` —— 清单条目还在、文件被删（或改名）时**静默跳过**：
+// `--check` 照样打印「缺失 0 / 断链 0 / 陈旧 0」并 exit 0（假绿），profile 里那份旧文件也没人管；
+// 而派生用例只查「仓库 → 清单」一个方向（发布契约里的文件有没有漏进 TARGETS），同样全绿。
+// 2026-11-08 S1 在仓库副本里删掉 bin/check.mjs 实测：旧实现 `--check` exit 0、派生用例 1/1 绿。
+// 现在缺一条就**点名**并按退出码 2 红（--repair 修不了：文件不会自己回来）。
+const missingSources = TARGETS.filter((rel) => !existsSync(join(ROOT, rel)))
+const presentTargets = TARGETS.filter((rel) => !missingSources.includes(rel))
 
 if (!existsSync(DEST)) {
   console.error('找不到 profile 安装目录：' + DEST)
@@ -63,10 +77,9 @@ if (!existsSync(DEST)) {
 const drift = { missing: [], broken: [], stale: [], gate: [] }
 let linked = 0
 
-for (const rel of TARGETS) {
+for (const rel of presentTargets) {
   const src = join(ROOT, rel)
   const dst = join(DEST, rel)
-  if (!existsSync(src)) continue
   if (!existsSync(dst)) {
     drift.missing.push(rel)
     if (!CHECK) {
@@ -235,12 +248,22 @@ for (const name of readdirSync(libDir)) {
 // 垫片反而会报出「陈旧 1，但 profile 里没有多余文件」的误导，所以撤掉。
 // 四个数的含义：缺失 = profile 少文件、断链 = inode 不同（改了不同步）、
 // 陈旧 = profile 多出仓库已删的 lib 文件、门禁子包漂移 = 子包内容与 packages/dsh-gate 不一致。
+// 第五个数「TARGETS 缺源」只在清单条目不成立时才出现（S1）：正常状态不该多一段噪音。
 const drifted = drift.missing.length + drift.broken.length + drift.stale.length + drift.gate.length
+for (const rel of missingSources) console.log('缺源     ' + rel + '（仓库里没有这个文件：恢复它，或把这一行从 TARGETS 删掉）')
 console.log('---')
 console.log(`目标：${DEST}`)
 console.log(`缺失 ${drift.missing.length} / 断链 ${drift.broken.length} / 陈旧 ${drift.stale.length} / 门禁子包漂移 ${drift.gate.length}` +
+  (missingSources.length > 0 ? ` / TARGETS 缺源 ${missingSources.length}（${missingSources.join(', ')}）` : '') +
   (linked ? `，本次处理 ${linked} 个` : ''))
 console.log('（只证明 profile 磁盘副本一致；宿主运行时是否生效要在重载后另验）')
+
+// 清单条目不成立是**仓库侧**问题：--repair 变不出文件来，必须红（退出码 2），并且点名。
+if (missingSources.length > 0) {
+  console.error('TARGETS 有 ' + missingSources.length + ' 条在仓库里不存在：' + missingSources.join(', '))
+  console.error('（--repair 修不了：恢复这些文件，或把它们从 TARGETS 删掉）')
+  process.exit(2)
+}
 
 if (missingImports.length > 0) {
   console.error('相对 import 解析失败：' + missingImports.join(', '))
