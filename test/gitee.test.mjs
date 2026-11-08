@@ -93,7 +93,7 @@ test('最后评论：自己留的要标 self，别人留的不标', async () => 
   assert.equal(other.self, false)
 })
 
-test('打标签：POST 到 issues/{n}/labels，body 是 labels 数组', async () => {
+test('打标签：POST 到 issues/{n}/labels，body 是裸字符串数组', async () => {
   let captured = null
   const fetchImpl = async (url, init) => {
     captured = { url, init }
@@ -103,8 +103,75 @@ test('打标签：POST 到 issues/{n}/labels，body 是 labels 数组', async ()
   assert.equal(res.ok, true)
   assert.ok(captured.url.endsWith('/repos/a/b/issues/5/labels'))
   assert.equal(captured.init.method, 'POST')
-  assert.deepEqual(JSON.parse(captured.init.body), { labels: ['主理鱼:已处理'] })
+  assert.deepEqual(JSON.parse(captured.init.body), ['主理鱼:已处理'])
   assert.equal(captured.init.headers.authorization, 'token t')
+})
+
+test('打标签的 body 不能包成 { labels: [...] }：Gitee 会回 400 Problems parsing JSON', async () => {
+  // 2026-11-08 真机（Gitee 项目看板式仓库）：裸数组 201，对象体 400 Problems parsing JSON。
+  // Gitee swagger 对该端点的 body 定义是 type: array / items: string，所以对象体不是合法形状。
+  let body = null
+  const fetchImpl = async (_url, init) => {
+    body = JSON.parse(init.body)
+    return { ok: true, status: 200, text: async () => '{}' }
+  }
+  await addGiteeLabel({ repo: 'o/r', token: 't', number: 'IKTQ5G', label: 'L', fetchImpl })
+  assert.ok(Array.isArray(body), 'body 必须是数组')
+  assert.equal(body.length, 1)
+  assert.equal(body[0], 'L')
+  assert.equal(Object.prototype.hasOwnProperty.call(body, 'labels'), false, '不能再包一层 labels 字段')
+})
+
+test('边界：按 Gitee swagger 复刻服务端校验 —— 旧对象体 400 / 裸数组 201（同 URL 同令牌）', async () => {
+  // 规范原文（Gitee OpenAPI 5.4.93，`GET https://gitee.com/api/v5/swagger_doc`）：
+  //   POST /v5/repos/{owner}/{repo}/issues/{number}/labels
+  //   body: { in: body, name: body, type: 'array', items: { type: 'string' }, required: true,
+  //           description: '标签名数组，如: ["feat", "bug"]' }
+  //   consumes: ['application/json']，responses: ['201']，number 参数类型是 string
+  //
+  // 这里按该规范做一个「像 Gitee 一样」的假服务端：裸字符串数组 → 201；
+  // 数组里混了非字符串、或整体包成对象 → 400 Problems parsing JSON。
+  // 真机对照（作者 2026-11-08，项目看板式仓库）：裸数组 201 / 对象体 400，与这个假服务端一致。
+  const giteeLike = (raw) => {
+    let parsed
+    try { parsed = JSON.parse(raw) } catch { return { ok: false, status: 400, text: '{"message":"Problems parsing JSON"}' } }
+    if (!Array.isArray(parsed) || !parsed.every((x) => typeof x === 'string')) {
+      return { ok: false, status: 400, text: '{"message":"Problems parsing JSON"}' }
+    }
+    return { ok: true, status: 201, text: '[]' }
+  }
+  let captured = null
+  const fetchImpl = async (url, init) => {
+    captured = { url, init }
+    const r = giteeLike(init.body)
+    return { ok: r.ok, status: r.status, text: async () => r.text }
+  }
+  const res = await addGiteeLabel({ repo: 'o/r', token: 't', number: 'IKSQJH', label: '主理鱼:已处理', fetchImpl })
+  assert.equal(res.ok, true, '规范形状必须被接受')
+  assert.equal(res.status, 201, 'swagger 只声明 201：拿到 201 才说明形状对上了')
+  assert.ok(captured.url.endsWith('/repos/o/r/issues/IKSQJH/labels'), '字符串编号（IKSQJH 这种）要原样进 URL，别转 Number')
+  assert.equal(captured.init.headers['content-type'], 'application/json; charset=utf-8', 'Gitee 只 consumes application/json')
+  // 反向对照：0.10.6 的形状（包一层 labels）在同一个假服务端上必须 400 —— 这就是 ack 卡在 phase:label 的原因
+  const legacy = giteeLike(JSON.stringify({ labels: ['主理鱼:已处理'] }))
+  assert.equal(legacy.ok, false)
+  assert.equal(legacy.status, 400)
+  assert.equal(legacy.text, '{"message":"Problems parsing JSON"}')
+})
+
+test('边界：单标签数组里的引号/反斜杠不能被拼坏，数字 PR 编号也按原样进 URL', async () => {
+  // 标签名来自用户的 filters，可能带引号或反斜杠；JSON.stringify 之后必须还能还原成同一个字符串，
+  // 否则「形状对了、内容坏了」—— 一样会被 Gitee 400。
+  const seen = []
+  const fetchImpl = async (url, init) => {
+    seen.push({ url, body: JSON.parse(init.body) })
+    return { ok: true, status: 201, text: async () => '[]' }
+  }
+  const label = '主理鱼:"已处理"\\'
+  const res = await addGiteeLabel({ repo: 'o/r', token: 't', number: 14, label, fetchImpl })
+  assert.equal(res.ok, true)
+  assert.equal(seen.length, 1, '一次调用只发一次请求')
+  assert.ok(seen[0].url.endsWith('/repos/o/r/issues/14/labels'), '数字编号（PR 14）同样原样拼接')
+  assert.deepEqual(seen[0].body, [label], '始终是长度 1 的字符串数组，转义后能原样还原')
 })
 
 test('真机样例：issue 的 number 是字符串（IKSQJH），PR 是数字 —— 都不能被转成 0', () => {

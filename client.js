@@ -418,7 +418,7 @@ window.__ModuleLoader__.load({
     }
 
     // 客户端版本探针：每次模块加载写一次，用来确认浏览器里跑的是哪一版
-    const CLIENT_VERSION = '0.10.6'
+    const CLIENT_VERSION = '0.10.7'
     // SEMVER_COMPARATOR_SOURCE_START
     // This block is duplicated verbatim in client.js because the browser UMD cannot import ESM.
     // test/update-semver.test.mjs audits both copies and exercises their behavior.
