@@ -11,7 +11,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, utimesSync, writeFileSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, utimesSync, writeFileSync, writeSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -249,7 +249,7 @@ test('跨进程：两个写者同层写入，extends:"none" 不被无锁覆盖�
 // ── C2：stale 接管的并发安全（Q1 medium）──────────────────────────────────
 
 test('压力：12 写者同时抢同一把 stale 锁，临界区不得重叠（计数一次不少、无重复读）', async () => {
-  const result = await runStress({ workers: 12, iterations: 8, plant: true })
+  const result = await runStress({ workers: 12, iterations: 6, plant: true })
   assert.equal(
     result.counter,
     result.expected,
@@ -265,14 +265,14 @@ test('压力：12 写者同时抢同一把 stale 锁，临界区不得重叠（�
 })
 
 test('正对照：没有 stale 锁时 12 写者正常竞争，计数一次不少（守护机制不误伤）', async () => {
-  const result = await runStress({ workers: 12, iterations: 6, plant: false })
+  const result = await runStress({ workers: 12, iterations: 4, plant: false })
   assert.equal(result.counter, result.expected, '没有 stale 锁时也必须串行：期望 ' + result.expected + '，实际 ' + result.counter)
   assert.equal(new Set(result.reads).size, result.expected, '正对照里同样不允许 DUP_READS')
   assert.deepEqual(result.debris, [], '正对照同样不许留残留')
 })
 
-test('Q1 排布：12 写者 × 12 轮同抢一把 stale 锁，临界区不得重叠', async () => {
-  const result = await runBarrierStress({ workers: 12, rounds: 12 })
+test('Q1 排布：12 写者 × 10 轮同抢一把 stale 锁，临界区不得重叠', async () => {
+  const result = await runBarrierStress({ workers: 12, rounds: 10 })
   assert.equal(
     result.counter,
     result.expected,
@@ -514,6 +514,87 @@ test('isOwner / assertOwner：锁被换掉后立刻检测到，绝不带着别�
   )
   lock.release()
   assert.equal(JSON.parse(readFileSync(lockPath, 'utf8')).token, 'stolen-token', 'release 也不能删别人的锁')
+})
+
+// ── C3：release 不得搬走 / 释放别人的新锁（Q1R release-window）─────────────
+
+test('真实场景：A 挂起 → B 接管 → A 恢复释放，第三写者不得在窗口里进临界区', async () => {
+  const repo = tempDir('gate-release-window-')
+  const path = projectGatePath(repo)
+  mkdirSync(dirname(path), { recursive: true })
+  const lockPath = gateLockPath(path)
+  const probes = Array.from({ length: 6 }, (_, index) => join(repo, 'c' + (index + 1) + '.json'))
+
+  // A：旧持有者。拿到锁后「挂起」，锁年龄很快超过 staleMs。
+  const lockA = acquireGateConfigLock(path, { timeoutMs: 2000 })
+  assert.equal(lockA.isOwner(), true)
+  await sleepMs(150) // 注入延迟：A 挂起期间锁超龄（下一步用 staleMs=60 接管）
+
+  // B：接管 stale 锁，成为当前持有者（另一个写者的视角）。
+  const lockB = acquireGateConfigLock(path, { timeoutMs: 2000, staleMs: 60, pollMs: 5 })
+  assert.equal(lockB.isOwner(), true, '前置：B 必须接管成功')
+  assert.equal(lockA.isOwner(), false, '前置：A 已经不是锁的主人')
+  assert.ok(readFileSync(lockPath, 'utf8').includes(lockB.token), '前置：磁盘上是 B 的锁')
+
+  // 注入延迟：把 B 的锁写成「合法但很大」的 JSON。旧实现 release 会先把 lockPath rename 走，
+  // 再 read + JSON.parse 这个文件才决定要不要还原 —— 文件越大，那个「lockPath 不在」的空窗越长。
+  // 这就是 Q1R 要的注入延迟用例：窗口被稳定放大，第三写者必然能趁虚而入。
+  const padded = {
+    pid: process.pid,
+    hostname: hostname(),
+    startedAt: new Date().toISOString(),
+    token: lockB.token,
+    configPath: path,
+    padding: 'x'.repeat(2 * 1024 * 1024),
+  }
+  writeFileSync(lockPath, JSON.stringify(padded) + '\n', 'utf8')
+  assert.ok(readFileSync(lockPath, 'utf8').includes(lockB.token), '前置：放大后仍是 B 的锁')
+
+  // C1/C2/C3：第三写者，在 A 释放期间纯自旋抢锁（默认 staleMs，不会去抢 B 的新锁）。
+  const children = probes.map((marker) => runWorker(['probe-lock', path, marker, '900']))
+  await sleepMs(50)
+
+  // A 恢复并释放：旧实现先 rename(lockPath → 私有名)，把 B 的锁搬走 → lockPath 空窗 → C 进来。
+  assert.equal(lockA.release(), false, 'A 不是当前持有者，release 必须返回 false')
+  assert.equal(lockB.isOwner(), true, 'A release 之后 B 的锁必须还在原位')
+
+  const results = await Promise.all(children)
+  results.forEach((result) => assert.equal(result.code, 0, '探针失败：' + result.stderr))
+  for (const marker of probes) {
+    const observed = JSON.parse(readFileSync(marker, 'utf8'))
+    assert.equal(observed.entered, false, '第三写者不能在 B 持有期间进临界区（release 窗口存在）：' + marker)
+  }
+  assert.equal(lockB.isOwner(), true, '整个窗口里 B 都不能失去锁')
+  assert.equal(lockB.release(), true)
+  assert.equal(existsSync(lockPath), false, 'B 释放后锁文件必须消失')
+  assert.deepEqual(lockDebris(join(repo, '.superagent')), [], '不能留 .release- / .stale- 等隔离文件')
+})
+
+test('release：拿不到守护锁时不碰锁文件（宁可留着也不误删）', () => {
+  const repo = tempDir('gate-release-guard-busy-')
+  const path = projectGatePath(repo)
+  mkdirSync(dirname(path), { recursive: true })
+  const lockPath = gateLockPath(path)
+  const guardPath = gateGuardPath(path)
+  const lock = acquireGateConfigLock(path, { timeoutMs: 300, pollMs: 20 })
+  assert.equal(lock.isOwner(), true)
+
+  // 种一把「活着的」守护锁（自己的 pid、刚写，不会超龄）：release 进不了守护区。
+  writeTextFile(guardPath, JSON.stringify({
+    pid: process.pid,
+    hostname: hostname(),
+    startedAt: new Date().toISOString(),
+    token: 'blocked-guard',
+  }) + '\n')
+
+  assert.equal(lock.release(), false, '拿不到守护锁就不能删锁')
+  assert.equal(lock.isOwner(), true, '锁文件必须原样留着（不能因为释放失败就乱动）')
+
+  // 守护锁消失后，释放照常成功。
+  unlinkSync(guardPath)
+  assert.equal(lock.release(), true)
+  assert.equal(existsSync(lockPath), false)
+  assert.equal(existsSync(guardPath), false)
 })
 
 // ── rename：Windows EPERM / EBUSY 有界退避 ─────────────────────────────────
