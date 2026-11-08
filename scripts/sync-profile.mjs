@@ -39,9 +39,19 @@ const DEFAULT_PROFILE = join(
 )
 const DEST = dirFlag >= 0 ? args[dirFlag + 1] : DEFAULT_PROFILE
 
-/** 运行时要用的文件（不含 docs / test / scripts 这些开发件）。 */
+// 运行时要用的文件（不含 docs / test / scripts 这些开发件）。
+//
+// 故意写成**显式清单**而不是目录遍历：`lib/` 旁边就是 `test/` 和 `docs/`，一递归就会把开发件塞进安装副本。
+// 但显式清单的代价是「新增运行时文件忘了加」—— 而这正是事故 1 的形状，且它不会报：
+// profile 里缺 `bin/check.mjs` 时 `--check` 照样打印「缺失 0 / 断链 0 / 陈旧 0」exit 0（实测）。
+// 所以清单由 `test/sync-profile-drift.test.mjs` 的派生规则守着：只要发布契约（package.json 的
+// `files` / `exports` / `bin` / `dsh.bundle.patch`、`lib/**` 任意新 .js、`assets/**`）里多一个运行时件，
+// 那条用例就红并点名。新增运行时文件时必须在这里加一行。
 const TARGETS = [
-  'client.js', 'ui-host-primitives.js', 'ui-orbit-popover.js', 'package.json', 'cordis.patch.yml', 'README.md', 'CHANGELOG.md', 'LICENSE',
+  'client.js', 'ui-host-primitives.js', 'ui-orbit-popover.js',
+  'bin/check.mjs',
+  'package.json', 'cordis.patch.yml', 'README.md', 'CHANGELOG.md', 'LICENSE',
+  'assets/icon-180.png', 'assets/icon-app.png',
   'lib/index.js', 'lib/watch.js', 'lib/gh-format.js', 'lib/gitee.js', 'lib/gates.js', 'lib/redact.js', 'lib/body.js', 'lib/state-migration.js', 'lib/update.js', 'lib/semver.js',
 ]
 
@@ -219,14 +229,16 @@ for (const name of readdirSync(libDir)) {
   }
 }
 
-// 门禁子包漂移同时计入「陈旧」：preflight 的 profile 行只解析「缺失 / 断链 / 陈旧」三段，
-// 不并入会让它显示「全零却 FAIL」的假红 —— 而 0.10.8 之前那次假绿也正是卡在同一处计数器。
-// 第四段仍是独立计数：排查时看这四个数，别只看前三段。
-const staleTotal = drift.stale.length + drift.gate.length
-const drifted = drift.missing.length + drift.broken.length + staleTotal
+// 四段各自独立计数：门禁子包漂移**不**并入「陈旧」。
+// 并入是 0.10.8 的临时垫片 —— 当时 preflight 只解析「缺失 / 断链 / 陈旧」三段，
+// 不并入就会显示「三个 0 却 FAIL」的假红；现在 preflight 已解析第四段（见 scripts/preflight.mjs），
+// 垫片反而会报出「陈旧 1，但 profile 里没有多余文件」的误导，所以撤掉。
+// 四个数的含义：缺失 = profile 少文件、断链 = inode 不同（改了不同步）、
+// 陈旧 = profile 多出仓库已删的 lib 文件、门禁子包漂移 = 子包内容与 packages/dsh-gate 不一致。
+const drifted = drift.missing.length + drift.broken.length + drift.stale.length + drift.gate.length
 console.log('---')
 console.log(`目标：${DEST}`)
-console.log(`缺失 ${drift.missing.length} / 断链 ${drift.broken.length} / 陈旧 ${staleTotal} / 门禁子包漂移 ${drift.gate.length}` +
+console.log(`缺失 ${drift.missing.length} / 断链 ${drift.broken.length} / 陈旧 ${drift.stale.length} / 门禁子包漂移 ${drift.gate.length}` +
   (linked ? `，本次处理 ${linked} 个` : ''))
 console.log('（只证明 profile 磁盘副本一致；宿主运行时是否生效要在重载后另验）')
 
