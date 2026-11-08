@@ -13,6 +13,12 @@
 - 验证：`node test/gitee.test.mjs` 24/24（含新回归用例）。作者环境沙箱禁止 spawn 子进程，
   全量 `npm test` / preflight 未能跑完，需维护者在 CI 复跑；Windows 下 client/routes/secrets-acl/
   update-semver/worktree-prune/cli 的既有失败与本次改动无关（干净 HEAD 复现同数）。
+- 作者：[@zyz0415](https://github.com/zyz0415)（外部 PR #22）。维护者复核时补了 2 条边界用例
+  （按 Gitee OpenAPI 5.4.93 复刻服务端校验做「对象体 400 / 裸数组 201」差分；单标签含引号/反斜杠、
+  数字 PR 编号原样进 URL），并把单测数同步为 827；本机复跑 `test/gitee.test.mjs` 26/26、
+  `test/meta.test.mjs` 17/17、全量 `npm test` 827/827（0.10.6 基线 824/824，本 PR 净 +3 条用例）。
+  作者所述「Windows 下 client/routes/secrets-acl/update-semver/worktree-prune/cli 既有失败」在维护者
+  Windows 环境（node v24.20.0）未复现：干净基线 824/824、本 PR 825/825 均全绿。
 
 ## [0.10.6] - 2026-11-07 —— 设置页门禁面板
 
