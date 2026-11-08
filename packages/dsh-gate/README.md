@@ -157,8 +157,8 @@ if (!result.ok) return
 | `lintText(text, config, options?)` | `{ ok, hits }` | `options.trigger` / `options.current`；跳过 `enabled: false` 的规则 |
 | `validateConfig(input)` | `{ ok: true, config }` 或 `{ ok: false, error }` | 写盘 / 面板保存前校验；`enabled` 必须是布尔、复启必须写完整规则；`extends` 只校验形状并原样带回 |
 | `readGateScope(scope, options?)` | `{ path, config, error? }` | `scope` = `default` / `user` / `project` / `local` |
-| `writeGateConfig(scope, config, options?)` | `{ path, config, lock }` | 只允许 `user` / `project` / `local`；同一路径**跨进程写锁**内「读旧文件 → 校验 → `.bak` → 临时写入 → rename」；共享 `extends` 抛错（`code: 'extends_not_preservable'`），锁超时抛错（`code: 'gate_lock_timeout'`）；`options` 支持 `lockTimeoutMs` / `lockPollMs` / `lockStaleMs` / `renameAttempts` / `renameBackoffMs`；`lock.broken` 是本次接管的 stale 锁证据（年龄 + 所有者） |
-| `acquireGateConfigLock(path, options?)` / `renameWithRetry(from, to, options?)` | 锁句柄 / `{ attempts }` | 写盘用的两个原语：跨进程写锁（`gateLockPath(path)` = `<配置>.lock`）与 EPERM/EBUSY 有界退避重命名 |
+| `writeGateConfig(scope, config, options?)` | `{ path, config, lock }` | 只允许 `user` / `project` / `local`；同一路径**跨进程写锁**内「读旧文件 → 校验 → `.bak` → 临时写入 → rename」；共享 `extends` 抛错（`code: 'extends_not_preservable'`），锁超时抛错（`code: 'gate_lock_timeout'`）；`options` 支持 `lockTimeoutMs` / `lockPollMs` / `lockStaleMs` / `lockGuardStaleMs` / `renameAttempts` / `renameBackoffMs`；`lock.broken` 是本次接管的 stale 锁证据（年龄 + 所有者） |
+| `acquireGateConfigLock(path, options?)` / `renameWithRetry(from, to, options?)` | 锁句柄 / `{ attempts }` | 写盘用的两个原语：跨进程写锁（`gateLockPath(path)` = `<配置>.lock`，接管段另有 `gateGuardPath(path)` = `<配置>.lock.guard` 守护锁）与 EPERM/EBUSY 有界退避重命名；锁句柄带 `release()` / `isOwner()` / `assertOwner()` |
 | `userGatePath` / `projectGatePath` / `localGatePath` | `string` | 路径派生 |
 | `DEFAULT_GATE_PATH` / `TRIGGERS` / `RULE_TYPES` | 常量 | 默认规则路径与枚举 |
 
@@ -272,6 +272,10 @@ printf '正文' | node bin/gate.mjs --trigger pr.reply --body-file - --current 1
   拿不到锁**显式失败**（`code: 'gate_lock_timeout'`，错误里带持有者 pid/host/开始时间与锁年龄），
   绝不退回无锁写；只有超龄或所有者已死的锁才会被接管，接管证据在返回值 `lock.broken` 里。
   Windows 上并发创建同一锁文件拿到的是 `EPERM` / `EBUSY`（不是 `EEXIST`），按竞争等待重试。
+- **接管不误伤**：创建 / 接管 / 释放全部串行在 `<lock>.guard` 守护锁里；搬走 stale 锁之后**再核对**
+  token（内容不可解析时比对原文），发现搬错了别人刚建的新锁就原样放回去；释放也先 rename 到私有名字、
+  确认 token 仍是自己的才删。写盘前还有一道 `assertOwner()`：锁一旦不在自己手里，宁可失败
+  （`code: 'gate_lock_lost'`）也不覆盖别人的写盘。
 - **写盘不丢 `extends`**：整层重写只写 `version/name/rules/semantic`；`false` / `"none"` 原样保留，
   共享形式（`true` / `"default"` / 路径 / 对象）显式报错并点名配置路径 —— 宁可保存失败，也不悄悄冲掉共享规则。
 - **坏配置 fail-open（仅语义复审）**：语义层不可用时放行并给 warning；确定性规则仍逐条执行。
@@ -289,7 +293,9 @@ node --test
 语义复审只 merge/release 与 fail-open、硬门禁失败不请求模型、CLI 的 PASS/FAIL 退出码、
 默认 JSON 可解析且 10 条规则都真的能命中、**跨进程写锁**（真实子进程：并发「读-改-写」计数一次不少、
 两个写者同层写入不丢 `extends` / 不产生损坏文件 / 不留临时文件）、锁被占用时显式超时失败且不写盘、
-stale 锁的年龄与所有者证据、rename 的 EPERM/EBUSY 退避重试与最终失败清理。
+stale 锁的年龄与所有者证据、rename 的 EPERM/EBUSY 退避重试与最终失败清理、
+**stale 接管的并发安全**（12 写者栅栏同时抢同一把 stale 锁 × 多轮，临界区不重叠、无 DUP_READS，
+无 stale 正对照；stale 守护锁接管；释放不误删别人的锁）。
 
 ## 未验项
 
@@ -302,6 +308,10 @@ stale 锁的年龄与所有者证据、rename 的 EPERM/EBUSY 退避重试与最
   上的时钟与 pid 语义未验证；跨主机并发写同一层不在保证范围。
 - 真实并发 `rename` 竞争在 Windows 上已复现 EPERM（旧实现 12 轮里 11 轮失败）；
   「另一个进程长期持有目标文件句柄」造成的 EPERM 用替身验证退避重试，未做真实句柄占用压测。
+- 守护锁的接管阈值是 10s：持有者被**挂起**（不是崩溃，pid 还活着）超过 10s 时会被当作 stale 接管。
+  守护区内的二次校验 + `O_EXCL` 创建保证不会搬走别人的锁，但这种「双持」窗口没有专门压测。
+- 与**不经过本锁**的外部写者（例如旧版本进程直接改 `gates.json`）并发时，只能靠 `assertOwner()` 兜底；
+  这一点不在测试覆盖范围内。
 
 ## License
 
