@@ -20,7 +20,8 @@
   `--print-paths` 探针。ego-browser 的 nodejs 沙箱不继承父进程 env，运行方式改为 prelude 注入。
 - 边界：`sync-profile --repair` 只保证 profile **磁盘副本**与仓库一致；宿主已加载的模块要重载才生效。
 - 验证：根 `npm test` **873/873**、gate 包 **133/133**、UI 审计 **11/11**、真实 Chromium **47/47**
-  （安装版前端 `0.2.2-rc.1`）、`preflight` 全量 **42/42**。Gitee ack 标签请求体沿用 0.10.7 的裸数组修复。
+  （安装版前端 `0.2.2-rc.1`）、`preflight` 全量 **42 项 = 40 PASS / 2 SKIP**（`smoke:observe` 需真机宿主、`维护一致性`
+  在打 tag 后单独跑并通过 6/6）。Gitee ack 标签请求体沿用 0.10.7 的裸数组修复。
 
 ## [0.10.7] - 2026-11-08 —— Gitee ack 打标签修复
 
