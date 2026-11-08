@@ -568,7 +568,8 @@ export function readGateScope(scope, { repo = process.cwd(), home = homedir(), e
  * Windows 上目标文件被占用时 rename 会 EPERM / EBUSY：`renameAttempts` 次有界退避重试，
  * 最终失败保留原文件、清理临时文件。
  * 接管 stale 锁的段由守护锁串行、搬走后核对 token 并还原（C2），写盘前还会再确认一次锁仍是自己的：
- * 锁被接管过就抛 `code: 'gate_lock_lost'`，绝不覆盖别人的写盘。
+ * 锁被接管过就抛 `code: 'gate_lock_lost'`，绝不覆盖别人的写盘；释放同样在守护区里先核对 token
+ * 再从原位删（C3），token 不匹配就一个字节都不碰。
  *
  * @returns {{ path: string, config: object, lock: { path: string, waitedMs: number, broken: Array<object> } }}
  * `lock.broken` 是本次接管过的 stale 锁证据（年龄 + 所有者），没有接管就是空数组。

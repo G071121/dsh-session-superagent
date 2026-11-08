@@ -156,6 +156,22 @@ if (mode === 'counter') {
     writeFileSync(join(controlDir, 'done-' + last + '-' + index), '1', 'utf8')
   }
   process.stdout.write(JSON.stringify({ ok: last >= rounds, mode, last, rounds, index }) + '\n')
+} else if (mode === 'probe-lock') {
+  // 第三写者：纯自旋抢锁（sleep 空转、pollMs=1），抢到就写 marker 再释放；
+  // 超时就写 entered:false。用来证明「旧持有者 release 期间 lockPath 不该出现空窗」。
+  const [, configPath, markerPath, rawDuration] = args
+  const duration = Number(rawDuration)
+  try {
+    const lock = acquireGateConfigLock(configPath, { timeoutMs: duration, pollMs: 1, sleep: () => {} })
+    try {
+      writeFileSync(markerPath, JSON.stringify({ entered: lock.isOwner() }) + '\n', 'utf8')
+    } finally {
+      lock.release()
+    }
+  } catch (error) {
+    writeFileSync(markerPath, JSON.stringify({ entered: false, code: (error && error.code) || null }) + '\n', 'utf8')
+  }
+  process.stdout.write(JSON.stringify({ ok: true, mode, duration }) + '\n')
 } else if (mode === 'write') {
   const [, repo, home, rawIterations, variant, rawLockTimeoutMs, ...flags] = args
   const iterations = Number(rawIterations)
