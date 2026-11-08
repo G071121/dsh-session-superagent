@@ -11,10 +11,10 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, unlinkSync, utimesSync, writeFileSync, writeSync } from 'node:fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, utimesSync, writeFileSync, writeSync } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   acquireGateConfigLock,
@@ -796,3 +796,255 @@ test('writeGateConfig：extends 共享基被拒绝时也在 finally 里释放锁
   assert.equal(existsSync(gateLockPath(path)), false, '抛错路径也必须释放锁')
   assert.deepEqual(leftovers(join(repo, '.superagent')), [])
 })
+
+// ── v5 C1：锁残余（.stale-* / .release-*）与旧版无 token 锁 ─────────────────
+//
+// 冻结行为（docs/任务书-dsh-gate-v5.md 第二节）：
+//   - 接管 / 释放的隔离文件只是证据：成功路径必须删干净；失败路径留得下诊断信息、但有界（不会无限堆积）；
+//   - 旧版无 token 锁的身份策略：有 token 用 token，无 token 用原文逐字节比对；
+//     连内容都读不出来就没有身份证据 → fail closed（不搬走、不删除）；
+//   - 解析失败不等于「可删除」：接管理由只有超龄 / 所有者已死，且仍要通过身份核对。
+
+/** 锁目录里的隔离文件（接管 `.stale-*` / 旧版释放 `.release-*`）。 */
+const artifactNames = (dir) => readdirSync(dir).filter((name) => /\.(stale|release)-/.test(name)).sort()
+
+test('v5 C1：旧版无 token 锁 + 活着的所有者 → 不接管、超时显式失败、原文原样', () => {
+  const repo = tempDir('gate-lock-legacy-live-')
+  const path = projectGatePath(repo)
+  mkdirSync(dirname(path), { recursive: true })
+  const lockPath = gateLockPath(path)
+  const payload = JSON.stringify({
+    pid: process.pid,
+    hostname: hostname(),
+    startedAt: new Date().toISOString(),
+    legacy: true, // 旧版锁：没有 token
+  }) + '\n'
+  writeTextFile(lockPath, payload)
+
+  assert.throws(
+    () => writeGateConfig('project', { version: 1, name: 'project', rules: [rule('legacy-live')] }, {
+      repo,
+      home: tempDir('gate-home-'),
+      env: {},
+      lockTimeoutMs: 120,
+      lockPollMs: 10,
+    }),
+    (error) => {
+      assert.equal(error.code, 'gate_lock_timeout')
+      assert.equal(error.owner && error.owner.pid, process.pid, '证据里必须有旧版锁的 pid')
+      return true
+    },
+  )
+  assert.equal(readFileSync(lockPath, 'utf8'), payload, '活着的旧版锁必须原样保留')
+  assert.equal(existsSync(path), false, '没拿到锁不能创建配置')
+  assert.deepEqual(artifactNames(dirname(lockPath)), [], '单纯等待不能产生隔离文件')
+})
+
+test('v5 C1：旧版无 token 锁 + 所有者已死 → 可接管（原文身份），成功路径不留 .stale-', () => {
+  const repo = tempDir('gate-lock-legacy-dead-')
+  const path = projectGatePath(repo)
+  mkdirSync(dirname(path), { recursive: true })
+  const lockPath = gateLockPath(path)
+  const deadPid = 999999
+  assert.throws(() => process.kill(deadPid, 0), /ESRCH/, '前置：该 pid 必须不存在')
+  writeTextFile(lockPath, JSON.stringify({
+    pid: deadPid,
+    hostname: hostname(),
+    startedAt: new Date(Date.now() - 2000).toISOString(),
+    legacy: true,
+  }) + '\n')
+
+  const saved = writeGateConfig('project', { version: 1, name: 'project', rules: [rule('legacy-dead')] }, {
+    repo,
+    home: tempDir('gate-home-'),
+    env: {},
+  })
+
+  assert.equal(saved.lock.broken.length, 1, '旧版死锁必须被识别并记录')
+  const [evidence] = saved.lock.broken
+  assert.equal(evidence.reason, 'owner_dead')
+  assert.equal(evidence.owner.pid, deadPid)
+  assert.equal(evidence.leftover, null, '成功清理干净时 leftover 必须是 null')
+  assert.equal(existsSync(lockPath), false, '接管后锁必须释放')
+  assert.deepEqual(artifactNames(dirname(lockPath)), [], '成功接管必须删掉 .stale- 证据文件')
+})
+
+test('v5 C1：锁内容读不出来（EISDIR）→ fail closed：不搬走、不删除，超时点名「内容不可读」', () => {
+  const repo = tempDir('gate-lock-unreadable-')
+  const path = projectGatePath(repo)
+  mkdirSync(dirname(path), { recursive: true })
+  const lockPath = gateLockPath(path)
+  // 目录：stat 看得到、readFileSync 报 EISDIR —— 旧实现会把它当「空锁」接管掉，等于解析失败就删。
+  mkdirSync(lockPath)
+  const old = new Date(Date.now() - 60000)
+  utimesSync(lockPath, old, old)
+  assert.equal(statSync(lockPath).isDirectory(), true, '前置：锁路径必须「看得到、读不出内容」')
+
+  assert.throws(
+    () => writeGateConfig('project', { version: 1, name: 'project', rules: [rule('unreadable')] }, {
+      repo,
+      home: tempDir('gate-home-'),
+      env: {},
+      lockTimeoutMs: 300,
+      lockPollMs: 10,
+    }),
+    (error) => {
+      assert.equal(error.code, 'gate_lock_timeout')
+      assert.ok(error.message.includes(lockPath), '错误必须点名锁路径，实际：' + error.message)
+      assert.match(error.message, /内容不可读/, '错误必须说明「读不出来」，实际：' + error.message)
+      assert.match(error.message, /fail-closed/)
+      assert.match(error.message, /未在无锁状态下写入/)
+      return true
+    },
+  )
+  assert.equal(statSync(lockPath).isDirectory(), true, '不可读的锁必须原样留在原位（不得搬走 / 删除）')
+  assert.equal(existsSync(path), false, 'fail closed 不能写盘')
+  assert.deepEqual(artifactNames(dirname(lockPath)), [], '不能把「读不出来」当成接管，留下 .stale-')
+})
+
+test('v5 C1：核对窗口内被换成活着的旧版锁 → 不得当成同一把接管（无 token ≠ "undefined"）', () => {
+  const repo = tempDir('gate-lock-legacy-swap-')
+  const configPath = projectGatePath(repo)
+  mkdirSync(dirname(configPath), { recursive: true })
+  const lockPath = gateLockPath(configPath)
+  const legacyStale = JSON.stringify({
+    pid: 999999,
+    hostname: hostname(),
+    startedAt: new Date(Date.now() - 60000).toISOString(),
+    legacy: 'stale',
+  }) + '\n'
+  writeTextFile(lockPath, legacyStale)
+  const old = new Date(Date.now() - 60000)
+  utimesSync(lockPath, old, old)
+  const legacyLive = JSON.stringify({
+    pid: process.pid,
+    hostname: hostname(),
+    startedAt: new Date().toISOString(),
+    legacy: 'live',
+  }) + '\n'
+  let swapped = false
+  const rename = (from, to) => {
+    if (!swapped && from === lockPath) {
+      // 注入：在「搬走 → 核对」之间把原位换成另一把**活着的**旧版锁。
+      // 旧实现用 String(owner.token) 比对，两边都是字面量 "undefined"，会把活锁当死锁删掉。
+      writeFileSync(lockPath, legacyLive, 'utf8')
+      swapped = true
+    }
+    return renameSync(from, to)
+  }
+
+  assert.throws(
+    () => acquireGateConfigLock(configPath, { timeoutMs: 400, pollMs: 10, rename }),
+    (error) => {
+      assert.equal(error.code, 'gate_lock_timeout', '活锁被搬到核对窗口时必须还原并继续等待')
+      return true
+    },
+  )
+  assert.equal(swapped, true, '前置：注入点必须真的触发，否则这条用例没验到身份核对')
+  assert.equal(readFileSync(lockPath, 'utf8'), legacyLive, '被误搬的活锁必须原样回到原位')
+  assert.deepEqual(artifactNames(dirname(lockPath)), [], '还原后不能留下 .stale- 隔离文件')
+})
+
+test('v5 C1：残留证据有界 —— 旧的 .stale-* / .release-* 只留最新 3 份，新鲜的与无关文件不动', () => {
+  const repo = tempDir('gate-lock-artifacts-')
+  const path = projectGatePath(repo)
+  const dir = dirname(path)
+  mkdirSync(dir, { recursive: true })
+  const base = basename(gateLockPath(path))
+  const artifacts = [
+    ['stale-old-360', 360000],
+    ['release-old-300', 300000],
+    ['stale-old-240', 240000],
+    ['release-old-180', 180000],
+    ['stale-old-120', 120000],
+    ['release-old-60', 60000],
+  ]
+  for (const [suffix, age] of artifacts) {
+    const file = join(dir, base + '.' + suffix)
+    writeFileSync(file, 'evidence ' + suffix, 'utf8')
+    const stamp = new Date(Date.now() - age)
+    utimesSync(file, stamp, stamp)
+  }
+  const fresh = join(dir, base + '.stale-fresh')
+  writeFileSync(fresh, 'fresh', 'utf8') // 新鲜 = 可能正被别的进程使用，不许删
+  const unrelated = join(dir, base + '-notes.txt')
+  writeFileSync(unrelated, 'keep', 'utf8')
+
+  const saved = writeGateConfig('project', { version: 1, name: 'project', rules: [rule('after-prune')] }, {
+    repo,
+    home: tempDir('gate-home-'),
+    env: {},
+  })
+  assert.deepEqual(saved.lock.broken, [], '这不是接管，只是回收旧残留')
+
+  assert.deepEqual(
+    artifactNames(dir),
+    [base + '.release-old-60', base + '.stale-fresh', base + '.stale-old-120'],
+    '只保留最新的 3 份证据（新鲜的在途文件 + 两份最新的旧文件）',
+  )
+  assert.ok(existsSync(unrelated), '无关文件一个都不许动')
+  assert.ok(existsSync(path), '回收残留不能影响正常写盘')
+})
+
+test('v5 C1：清理失败留证有界 —— 接管证据带 leftover，旧残留由下一次写盘回收', () => {
+  const repo = tempDir('gate-lock-leftover-')
+  const configPath = projectGatePath(repo)
+  mkdirSync(dirname(configPath), { recursive: true })
+  const dir = dirname(configPath)
+  const lockPath = gateLockPath(configPath)
+  const deadPid = 999999
+  assert.throws(() => process.kill(deadPid, 0), /ESRCH/, '前置：该 pid 必须不存在')
+  writeTextFile(lockPath, JSON.stringify({
+    pid: deadPid,
+    hostname: hostname(),
+    startedAt: new Date(Date.now() - 2000).toISOString(),
+    token: 'dead-leftover',
+  }) + '\n')
+
+  let unlinkAttempts = 0
+  const unlink = (target) => {
+    if (String(target).includes('.stale-')) {
+      unlinkAttempts += 1
+      const error = new Error('EPERM: 被占用（替身）')
+      error.code = 'EPERM'
+      throw error
+    }
+    return unlinkSync(target)
+  }
+
+  const lock = acquireGateConfigLock(configPath, { timeoutMs: 2000, unlink })
+  try {
+    assert.equal(lock.broken.length, 1, '死锁必须被接管一次')
+    const [evidence] = lock.broken
+    assert.equal(unlinkAttempts, 3, '清理残留必须有界退避重试（3 次），不是无限重试')
+    assert.ok(evidence.leftover && evidence.leftover.includes('.stale-'), '清理失败必须在证据里点名残留文件')
+    assert.ok(existsSync(evidence.leftover), '残留文件要真的留着（留证）')
+    assert.equal(lock.isOwner(), true, '残留不影响接管结果')
+  } finally {
+    lock.release()
+  }
+
+  const [leftoverName] = artifactNames(dir)
+  assert.ok(leftoverName, '前置：接管失败清理必须留下一个隔离文件')
+  const leftover = join(dir, leftoverName)
+  // 让它变旧，再堆三份更新的旧残留：失败证据最多保留最新 3 份，最旧的那份必须被回收。
+  utimesSync(leftover, new Date(Date.now() - 360000), new Date(Date.now() - 360000))
+  for (const [suffix, age] of [['stale-newer-300', 300000], ['release-newer-240', 240000], ['stale-newer-180', 180000]]) {
+    const file = join(dir, basename(gateLockPath(configPath)) + '.' + suffix)
+    writeFileSync(file, 'evidence ' + suffix, 'utf8')
+    utimesSync(file, new Date(Date.now() - age), new Date(Date.now() - age))
+  }
+
+  writeGateConfig('project', { version: 1, name: 'project', rules: [rule('recycle')] }, {
+    repo,
+    home: tempDir('gate-home-'),
+    env: {},
+  })
+  assert.equal(existsSync(leftover), false, '最旧的失败证据必须被下一次写盘回收（有界）')
+  assert.equal(
+    artifactNames(dir).length,
+    3,
+    '只保留最新的三份证据（失败路径留证有界，不无限堆积）',
+  )
+})
+

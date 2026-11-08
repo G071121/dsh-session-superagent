@@ -46,6 +46,8 @@ import {
 } from './semantic.js'
 
 export {
+  DEFAULT_GATE_ARTIFACT_KEEP,
+  DEFAULT_GATE_ARTIFACT_MIN_AGE_MS,
   DEFAULT_GATE_GUARD_STALE_MS,
   DEFAULT_GATE_LOCK_POLL_MS,
   DEFAULT_GATE_LOCK_STALE_MS,
@@ -57,6 +59,7 @@ export {
   acquireGateConfigLock,
   gateGuardPath,
   gateLockPath,
+  pruneLockArtifacts,
   renameWithRetry,
 } from './config-lock.js'
 
@@ -72,7 +75,7 @@ export {
 
 export const PACKAGE_NAME = '@mycf711/dsh-gate'
 /** 与 package.json 的 version 同步（测试守着）。 */
-export const PACKAGE_VERSION = '0.1.3'
+export const PACKAGE_VERSION = '0.1.4'
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 

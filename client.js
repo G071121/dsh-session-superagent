@@ -422,7 +422,7 @@ window.__ModuleLoader__.load({
     }
 
     // 客户端版本探针：每次模块加载写一次，用来确认浏览器里跑的是哪一版
-    const CLIENT_VERSION = '0.10.10'
+    const CLIENT_VERSION = '0.10.11'
     // SEMVER_COMPARATOR_SOURCE_START
     // This block is duplicated verbatim in client.js because the browser UMD cannot import ESM.
     // test/update-semver.test.mjs audits both copies and exercises their behavior.
@@ -2415,7 +2415,7 @@ window.__ModuleLoader__.load({
       const [sample, setSample] = useState('')
       const [trigger, setTrigger] = useState('issue.reply')
       const [preview, setPreview] = useState(null)
-      const [models, setModels] = useState({ list: [], loading: false, error: '' })
+      const [models, setModels] = useState({ repo: '', list: [], loading: false, error: '' })
       const [busy, setBusy] = useState('')
       const [status, setStatus] = useState(null)
       // 切作用域 / 切仓库时如果还有草稿：先问一句 —— 取消保留草稿，确认才放弃。
@@ -2441,12 +2441,24 @@ window.__ModuleLoader__.load({
       const dataRef = useRef(data)
       dataRef.current = data
       const modelsSeqRef = useRef(0)
+      // 模型列表属于哪个仓库（落地时记进 state.repo）；这里的镜像让异步回调能同步读到最新值。
+      const modelsStateRef = useRef(models)
+      modelsStateRef.current = models
+      // 「面板这份配置现在属于哪个仓库」的渲染值镜像：草稿来源优先（与下面 panelRepo 同一份计算）。
+      const panelRepoRef = useRef('')
       useEffect(() => {
         // StrictMode（开发态）会 mount → cleanup → 再 mount：effect 体里必须复位 alive，
         // 否则第一次 cleanup 把它置 false 之后就永远拦掉响应（门禁页停在「正在读取…」，Q2 F3）。
         aliveRef.current = true
         return () => { aliveRef.current = false }
       }, [])
+
+      /**
+       * 面板这份配置属于哪个仓库：dirty 草稿认它自己的来源，否则认 data.repo，最后才是 prop。
+       * 异步回调（models 落地、load 的闸门分支）都只认这一个值 —— 换仓库时 prop 先变，
+       * 面板数据/草稿还是旧仓库的，模型列表跟着 prop 走就是跨仓库（v4 R1）。
+       */
+      const panelRepoOf = () => panelRepoRef.current || gateDataRepo(dataRef.current) || repoRef.current
 
       async function load() {
         const seq = ++loadSeqRef.current
@@ -2469,7 +2481,14 @@ window.__ModuleLoader__.load({
           if (pendingSource && pendingSource !== replyRepo) {
             const sourceData = gateDataRepo(dataRef.current) === pendingSource ? dataRef.current : null
             const stillDirty = sourceData ? gateDraftDirty(pendingDraft, sourceData, scopeRef.current) : true
-            if (stillDirty) return
+            if (stillDirty) {
+              // 这份响应被闸门挡住：在途的模型列表同样不能落地（新仓库的 baseURL 换了模型 id），
+              // 再把列表拉回草稿来源仓库 —— 保留草稿时面板显示的还是那个仓库的配置（v4 R1）。
+              modelsSeqRef.current += 1
+              setModels((prev) => (prev.loading ? { ...prev, loading: false } : prev))
+              loadModels(pendingSource)
+              return
+            }
             setGateDraft(null)
           }
           setData(value)
@@ -2491,27 +2510,25 @@ window.__ModuleLoader__.load({
         }
       }
 
-      async function loadModels(forRepo = repo) {
+      async function loadModels(forRepo = panelRepoOf()) {
         // 模型列表同样是「按仓库读」的请求：乱序/卸载时旧响应不能盖新列表。
+        const requestedRepo = forRepo || repoRef.current
         const seq = ++modelsSeqRef.current
-        const requestedRepo = forRepo
         setModels((prev) => ({ ...prev, loading: true, error: '' }))
         try {
-          const value = await call('/gates/models' + repoQuery(forRepo))
+          const value = await call('/gates/models' + repoQuery(requestedRepo))
           if (!aliveRef.current || seq !== modelsSeqRef.current) return
-          // 只认「面板当前那份配置的仓库」：当前 repo prop，或者面板数据回显的仓库。
-          // 取消换仓库后面板数据还在旧仓库，旧仓库的模型列表要能重新读回来（Q2 F2）。
-          const currentData = dataRef.current
-          if (requestedRepo !== repoRef.current && requestedRepo !== gateDataRepo(currentData)) return
+          // 只认「现在」的面板仓库：响应在途时仓库/草稿可能已经换过，
+          // 落错仓库的列表一旦被选中保存，就是把别的仓库的模型 id 写进这份配置。
+          if (requestedRepo !== panelRepoOf()) return
           const list = value && Array.isArray(value.models)
             ? value.models.map((item) => ({ id: String((item && item.id) || ''), label: String((item && (item.label || item.id)) || '') })).filter((item) => item.id)
             : []
-          setModels({ list, loading: false, error: value && value.ok === false ? String(value.error || '') : '' })
+          setModels({ repo: requestedRepo, list, loading: false, error: value && value.ok === false ? String(value.error || '') : '' })
         } catch (error) {
           if (!aliveRef.current || seq !== modelsSeqRef.current) return
-          const currentData = dataRef.current
-          if (requestedRepo !== repoRef.current && requestedRepo !== gateDataRepo(currentData)) return
-          setModels({ list: [], loading: false, error: String((error && error.message) || error) })
+          if (requestedRepo !== panelRepoOf()) return
+          setModels({ repo: requestedRepo, list: [], loading: false, error: String((error && error.message) || error) })
         }
       }
 
@@ -2536,8 +2553,16 @@ window.__ModuleLoader__.load({
       // 保存/预览/优化和确认条都必须跟草稿走 —— 跟 data.repo 走就会把旧仓库的草稿写进新仓库（Q2 F1）。
       const draftRepo = gateDraftRepo(draft)
       const panelRepo = dirty && draftRepo ? draftRepo : dataRepo
+      // 渲染值镜像给异步回调用：models 落地、load 的闸门分支都要在「现在」判断面板仓库。
+      panelRepoRef.current = panelRepo
       const targetRepo = panelRepo || repo
       const repoMismatch = Boolean(panelRepo && repo && panelRepo !== repo)
+      // 模型列表只属于面板这份配置的仓库：列表带了别的仓库（旧版本/迟到响应）就忽略，
+      // 下拉里只剩当前值 —— 选它保存就是跨仓库模型 id（v4 R1）。
+      const modelsRepo = models && typeof models.repo === 'string' ? models.repo : ''
+      const modelsPanelRepo = panelRepo || repo
+      const modelsStale = Boolean(modelsRepo && modelsRepo !== modelsPanelRepo)
+      const modelsView = modelsStale ? { list: [], loading: models.loading, error: models.error } : models
       // 创建/修改草稿时记下来源仓库；之后 data 怎么变，这份草稿都只写回它自己的仓库。
       const draftSourceRepo = () => draftRepo || dataRepo || repo
       const setDraftConfig = (next) => setGateDraft({ ...next, repo: draftSourceRepo() })
@@ -2558,9 +2583,13 @@ window.__ModuleLoader__.load({
       useEffect(() => {
         if (dirty || !repoMismatch) return
         load()
-        loadModels()
+        // 同仓库的列表不用重读（切数据后由 [modelsPanelRepo] effect 负责）；不同仓库才补。
+        const currentModels = modelsStateRef.current
+        if (currentModels.loading || currentModels.repo !== modelsPanelRepo) loadModels(modelsPanelRepo)
       }, [dirty])
-      useEffect(() => { loadModels() }, [repo])
+      // 模型列表跟着「面板这份配置」的仓库走：保留草稿时是草稿来源，数据换了之后才是新仓库。
+      // 以前依赖 prop repo —— 换仓库会立刻读新仓库的模型列表，而面板数据还是旧仓库的（R1）。
+      useEffect(() => { loadModels(modelsPanelRepo) }, [modelsPanelRepo])
 
       async function save() {
         if (!data || readOnly || busy) return
@@ -2904,10 +2933,13 @@ window.__ModuleLoader__.load({
                 value: current.semantic.model,
                 disabled: semanticLocked,
                 onChange: (event) => setSemantic({ model: event.target.value }),
-              }, gateModelOptions(current.semantic.model, models).map((item) => h('option', { key: item.id || 'empty', value: item.id }, item.label === item.id ? item.id : item.label + '（' + item.id + '）')))),
+              }, gateModelOptions(current.semantic.model, modelsView).map((item) => h('option', { key: item.id || 'empty', value: item.id }, item.label === item.id ? item.id : item.label + '（' + item.id + '）')))),
             h('div', { className: 'dt-actions' },
               h(Btn, { size: 'sm', variant: 'ghost', disabled: models.loading, onClick: () => { loadModels() } }, models.loading ? '读取中…' : '读取模型列表'),
               models.error ? h('span', { className: 'dt-error' }, '模型列表读取失败：' + models.error) : null,
+              modelsStale
+                ? h('span', { className: 'dt-error' }, '模型列表属于 ' + modelsRepo + '，不是当前面板的 ' + modelsPanelRepo + '：已忽略，请重新读取')
+                : null,
               scope === 'project' ? h('span', { className: 'dt-hint' }, '项目层只能关闭语义复审，不能换模型或改提示词') : null),
             h('div', { className: 'dt-field' },
               h('span', { className: 'dt-field-head' }, h('span', null, '审核提示词')),

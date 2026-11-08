@@ -19,9 +19,19 @@
 //   node scripts/sync-profile.mjs --dir <path>  指定 profile 安装目录
 //
 // 退出码：0 = 干净；1 = profile 有漂移（--repair 能修）；2 = 仓库侧问题（TARGETS 条目在仓库里
-// 不存在 / lib 的相对 import 解析失败 —— 这两种 --repair 修不了，只能改仓库）。
+// 不存在 / 门禁子包源目录不存在 / lib 的相对 import 解析失败 —— 这几种 --repair 修不了，只能改仓库）。
 //
-// 边界（别过度声明）：本脚本只保证**磁盘上的 profile 副本**与仓库一致；
+// 失败原子性（S1 v5 / v4 审查 F6）：**`repoMissing` 非空时**整轮只读 —— TARGETS 条目在仓库里
+// 不存在、或 `packages/dsh-gate` 源目录缺失时，所有 link / relink / copy / prune 都不执行，
+// 判红（exit 2）发生在任何写盘之前。
+// 以前 `--repair` 会先把能做的 relink / 子包复制 / 陈旧 prune 做完再 exit 2 —— 缺的是 `lib/*.js` 时
+// profile 副本已经被当「陈旧」删掉：修不了却改了磁盘，用户以为只是报错，实际 profile 已经被改了一半。
+//
+// 边界（别过度声明）：原子性**只覆盖 `repoMissing`**。`lib/*.js` 的相对 import 解析失败同样是
+// 仓库侧问题（exit 2），但它在**写盘之后**才检测 —— 那一轮 profile 可能已经 relink / prune 过
+// （Q1 L1；要收窄成写盘前判红需把 missingImports 计算前移，未在本轮做）。
+//
+// 另外，本脚本只保证**磁盘上的 profile 副本**与仓库一致；
 // 宿主进程里已加载的模块不会因为替换文件而重载 —— 运行时是否生效要用户重载宿主后另验。
 import { createHash } from 'node:crypto'
 import { existsSync, linkSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, cpSync, rmSync } from 'node:fs'
@@ -69,6 +79,18 @@ const TARGETS = [
 const missingSources = TARGETS.filter((rel) => !existsSync(join(ROOT, rel)))
 const presentTargets = TARGETS.filter((rel) => !missingSources.includes(rel))
 
+// 门禁子包源目录（仓库侧）：`packages/dsh-gate` 整个目录不存在时，旧实现 `if (existsSync(gateSrc))`
+// 静默跳过 —— profile 检查可能仍然「四段全零」，门禁子包根本没人管（v4 审查 F7）。
+// 它和 TARGETS 缺源同类：--repair 变不出源目录来，只能改仓库 → 一起进 `repoMissing`，
+// 在任何写盘之前 exit 2。
+const gateSrc = join(ROOT, 'packages', 'dsh-gate')
+const gateDst = join(DEST, 'node_modules', '@mycf711', 'dsh-gate')
+const gateRel = 'node_modules/@mycf711/dsh-gate'
+const gateDirMissing = !existsSync(gateSrc)
+const repoMissing = [...missingSources, ...(gateDirMissing ? ['packages/dsh-gate'] : [])]
+// 仓库侧问题 = 这一轮只许读、不许写（失败原子性）。
+const REPO_BLOCKED = repoMissing.length > 0
+
 if (!existsSync(DEST)) {
   console.error('找不到 profile 安装目录：' + DEST)
   process.exit(1)
@@ -82,7 +104,7 @@ for (const rel of presentTargets) {
   const dst = join(DEST, rel)
   if (!existsSync(dst)) {
     drift.missing.push(rel)
-    if (!CHECK) {
+    if (!CHECK && !REPO_BLOCKED) {
       mkdirSync(dirname(dst), { recursive: true })
       try { linkSync(src, dst); linked += 1; console.log('linked   ' + rel) } catch (error) {
         console.log('link 失败：' + rel + ' — ' + (error && error.message))
@@ -93,7 +115,7 @@ for (const rel of presentTargets) {
   const same = statSync(src).ino === statSync(dst).ino
   if (same) continue
   drift.broken.push(rel)
-  if (REPAIR && !CHECK) {
+  if (REPAIR && !CHECK && !REPO_BLOCKED) {
     try {
       unlinkSync(dst)
       linkSync(src, dst)
@@ -172,13 +194,13 @@ function gateDiffDetail(srcRoot, dstRoot) {
 
 // 门禁子包：主插件静态 import @mycf711/dsh-gate，profile 里必须有这一份。
 // 硬链只对文件生效，目录用递归复制；**按内容判定**，不一致就整体替换（保留 package 结构）。
-const gateSrc = join(ROOT, 'packages', 'dsh-gate')
-const gateDst = join(DEST, 'node_modules', '@mycf711', 'dsh-gate')
-const gateRel = 'node_modules/@mycf711/dsh-gate'
+// 源目录存在性在上面的 `gateDirMissing` 已经判过（缺源 = 仓库侧问题，整轮只读 + exit 2）。
 if (existsSync(gateSrc)) {
   if (!existsSync(gateDst)) {
     drift.missing.push(gateRel)
-    if (REPAIR && !CHECK) {
+    // 整目录缺失必须点名：旧实现只让「缺失」+1，--check 里看到「缺失 1」不知道缺的是门禁子包。
+    console.log('缺失     ' + gateRel + '（profile 里没有门禁子包整个目录：--repair 会递归复制）')
+    if (REPAIR && !CHECK && !REPO_BLOCKED) {
       try {
         mkdirSync(dirname(gateDst), { recursive: true })
         cpSync(gateSrc, gateDst, { recursive: true })
@@ -191,7 +213,7 @@ if (existsSync(gateSrc)) {
   } else if (gateDigest(gateSrc) !== gateDigest(gateDst)) {
     const changed = gateDiffDetail(gateSrc, gateDst)
     drift.gate.push(gateRel)
-    if (REPAIR && !CHECK) {
+    if (REPAIR && !CHECK && !REPO_BLOCKED) {
       try {
         rmSync(gateDst, { recursive: true, force: true })
         cpSync(gateSrc, gateDst, { recursive: true })
@@ -212,7 +234,7 @@ if (existsSync(gateSrc)) {
 for (const name of readdirSync(join(DEST, 'lib')).filter((f) => f.endsWith('.js'))) {
   if (!existsSync(join(ROOT, 'lib', name))) {
     drift.stale.push('lib/' + name)
-    if (REPAIR && !CHECK) {
+    if (REPAIR && !CHECK && !REPO_BLOCKED) {
       try { unlinkSync(join(DEST, 'lib', name)); console.log('pruned   lib/' + name) } catch {}
     } else {
       console.log('陈旧     lib/' + name + '（仓库已删除，profile 里还在）')
@@ -249,19 +271,23 @@ for (const name of readdirSync(libDir)) {
 // 四个数的含义：缺失 = profile 少文件、断链 = inode 不同（改了不同步）、
 // 陈旧 = profile 多出仓库已删的 lib 文件、门禁子包漂移 = 子包内容与 packages/dsh-gate 不一致。
 // 第五个数「TARGETS 缺源」只在清单条目不成立时才出现（S1）：正常状态不该多一段噪音。
+// 第五段同时收仓库侧的「门禁子包源目录缺失」（S1 v5 / v4 审查 F7）：它和 TARGETS 缺源同类 ——
+// --repair 变不出源目录来，只能改仓库，所以一起点名、一起算不干净（preflight 的 clean 兜底也认得它）。
 const drifted = drift.missing.length + drift.broken.length + drift.stale.length + drift.gate.length
 for (const rel of missingSources) console.log('缺源     ' + rel + '（仓库里没有这个文件：恢复它，或把这一行从 TARGETS 删掉）')
+if (gateDirMissing) console.log('缺源     packages/dsh-gate（仓库里没有门禁子包整个目录：恢复它，--repair 修不了）')
 console.log('---')
 console.log(`目标：${DEST}`)
 console.log(`缺失 ${drift.missing.length} / 断链 ${drift.broken.length} / 陈旧 ${drift.stale.length} / 门禁子包漂移 ${drift.gate.length}` +
-  (missingSources.length > 0 ? ` / TARGETS 缺源 ${missingSources.length}（${missingSources.join(', ')}）` : '') +
+  (repoMissing.length > 0 ? ` / TARGETS 缺源 ${repoMissing.length}（${repoMissing.join(', ')}）` : '') +
   (linked ? `，本次处理 ${linked} 个` : ''))
 console.log('（只证明 profile 磁盘副本一致；宿主运行时是否生效要在重载后另验）')
 
 // 清单条目不成立是**仓库侧**问题：--repair 变不出文件来，必须红（退出码 2），并且点名。
-if (missingSources.length > 0) {
-  console.error('TARGETS 有 ' + missingSources.length + ' 条在仓库里不存在：' + missingSources.join(', '))
-  console.error('（--repair 修不了：恢复这些文件，或把它们从 TARGETS 删掉）')
+// 这一轮已经整轮只读（REPO_BLOCKED）：走到这里时磁盘一处都没动，失败是原子的。
+if (repoMissing.length > 0) {
+  console.error('TARGETS 有 ' + repoMissing.length + ' 条在仓库里不存在：' + repoMissing.join(', '))
+  console.error('（--repair 修不了：恢复这些文件，或把它们从 TARGETS 删掉；本轮未改任何 profile 文件）')
   process.exit(2)
 }
 

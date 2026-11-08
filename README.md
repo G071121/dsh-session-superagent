@@ -10,7 +10,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/MYCF711/dsh-session-superagent/releases"><img src="https://img.shields.io/badge/version-0.10.10-green.svg" alt="version"></a>
+  <a href="https://github.com/MYCF711/dsh-session-superagent/releases"><img src="https://img.shields.io/badge/version-0.10.11-green.svg" alt="version"></a>
   <a href="https://www.npmjs.com/package/dsh-session-superagent"><img src="https://img.shields.io/npm/v/dsh-session-superagent?color=4D6BFE" alt="npm"></a>
   <img src="https://img.shields.io/badge/license-MIT-4D6BFE" alt="license">
 </p>
@@ -144,7 +144,7 @@ Gitee 没有 ETag，每轮会真读一次列表；私有仓库需要在面板里
 
 ## 验证
 
-934 项单测、42 项 preflight、11 项 UI、47 项 Chromium 全绿（0.10.10）。
+952 项单测、42 项 preflight、11 项 UI、47 项 Chromium 全绿（0.10.11）。
 
 ## 数据来源
 

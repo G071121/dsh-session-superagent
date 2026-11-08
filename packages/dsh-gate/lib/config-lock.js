@@ -24,6 +24,16 @@
  *      拿不到守护锁也不碰 `lockPath`（宁可留着自己的锁，也不误删别人的新锁）。
  * 再加一道**写盘前归属校验**（`assertOwner()`）：锁一旦不在自己手里，宁可失败也不覆盖别人的写盘。
  *
+ * 残余与旧格式（v5 C1）：
+ * - 接管把 stale 锁 rename 成 `<lock>.stale-<ts>-<uuid>`，释放失败（旧版本）会留下 `<lock>.release-*`。
+ *   这些文件只是**证据**，不是锁：成功路径必须删干净（`EPERM` / `EBUSY` 有界退避重试），
+ *   清理失败时把路径写进接管证据（`broken[].leftover`），并由下一次写盘按「保留最新 N 份 + 只清旧的」
+ *   回收 —— 既留得下诊断信息，也不会无限堆积（`pruneLockArtifacts`）。
+ * - 旧版锁没有 `token`：身份不能退化成 `String(owner.token)`（那会变成字面量 `"undefined"`，
+ *   任何两把旧锁都算同一把）。没有 token 时用**原文逐字节**比对；连内容都读不出来
+ *   （`EACCES` / `EBUSY` / `EISDIR`）就没有任何身份证据，**fail closed**：不搬走、不删除，等到超时显式失败。
+ *   解析失败（坏 JSON / 空文件）不等于「可删除」，只有超龄或所有者已死才是接管理由，且仍要通过身份核对。
+ *
  * 锁是**跨进程互斥**，不是分布式锁：判据是同一台机器、同一路径；跨主机共享盘不保证。
  * 超龄接管的含义：单次写盘耗时超过 `staleMs` 时理论上可能被并发接管 —— 所以默认 30s，
  * 远大于一次「读 → 校验 → 写 → rename」的毫秒级窗口；崩在中间的锁会留下文件，由下一次写入接管。
@@ -34,6 +44,7 @@ import {
   copyFileSync,
   linkSync,
   openSync,
+  readdirSync,
   readFileSync,
   renameSync,
   statSync,
@@ -42,6 +53,7 @@ import {
 } from 'node:fs'
 import { randomUUID } from 'node:crypto'
 import { hostname } from 'node:os'
+import { basename, dirname, join } from 'node:path'
 
 /** 锁文件后缀：`<gates.json>.lock`，和配置同目录（目录不存在时调用方先建）。 */
 export const GATE_LOCK_SUFFIX = '.lock'
@@ -59,6 +71,13 @@ export const DEFAULT_GATE_GUARD_STALE_MS = 10000
 export const DEFAULT_GATE_RENAME_ATTEMPTS = 6
 /** rename 退避基数（线性：base × 第几次）。 */
 export const DEFAULT_GATE_RENAME_BACKOFF_MS = 20
+/** 接管 / 释放残留（`.stale-*` / `.release-*`）最多保留这么多份证据，超出的旧文件被回收。 */
+export const DEFAULT_GATE_ARTIFACT_KEEP = 3
+/**
+ * 残留只有「足够旧」才回收：接管把锁搬走 → 核对 → 删除之间只有微秒级，
+ * 1 分钟的年龄阈值保证永远不会删到另一个进程正在用的隔离文件。
+ */
+export const DEFAULT_GATE_ARTIFACT_MIN_AGE_MS = 60000
 
 /** 只有这两个码值得重试：Windows 上目标文件被别的进程打开时的典型表现。 */
 const RETRYABLE_RENAME_CODES = new Set(['EPERM', 'EBUSY'])
@@ -96,8 +115,12 @@ export function sleepSync(ms) {
 }
 
 /**
- * 读锁文件快照：年龄（按 mtime）+ 所有者（按内容）+ 原文。
- * 原文用于「内容不可解析」时的身份比对（比如刚好崩在 open 与 write 之间）。
+ * 读锁文件快照：年龄（按 mtime）+ 所有者（按内容）+ 原文 + 内容是否读得出来。
+ *
+ * 区分两种失败：
+ * - **读失败**（EACCES / EBUSY / EISDIR）→ `contentReadable: false`：连原文都没有，
+ *   没有任何身份证据，接管必须 fail closed；
+ * - **解析失败**（空文件 / 坏 JSON）→ `contentReadable: true`、`owner: null`：还有原文可以逐字节比对。
  */
 function readLockState(lockPath) {
   let stat
@@ -108,15 +131,49 @@ function readLockState(lockPath) {
   }
   let owner = null
   let raw = ''
+  let contentReadable = false
+  let readError = null
   try {
     raw = readFileSync(lockPath, 'utf8')
-    const parsed = JSON.parse(raw)
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) owner = parsed
-  } catch {
-    // 空 / 坏内容：所有者未知
+    contentReadable = true
+  } catch (error) {
+    // 读不出来（权限 / 占用 / 目录）：所有者与原文都不可得
+    readError = (error && error.code) || 'EREAD'
+  }
+  if (contentReadable) {
+    try {
+      const parsed = JSON.parse(raw)
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) owner = parsed
+    } catch {
+      // 空 / 坏内容：所有者未知，但原文仍可用于身份比对
+    }
   }
   // 年龄按 mtime 算；mtime 带亚毫秒精度，刚创建的锁可能出现 -0.x，钳到 0 避免「负年龄」。
-  return { path: lockPath, mtimeMs: stat.mtimeMs, ageMs: Math.max(0, Date.now() - stat.mtimeMs), owner, raw }
+  return {
+    path: lockPath,
+    mtimeMs: stat.mtimeMs,
+    ageMs: Math.max(0, Date.now() - stat.mtimeMs),
+    owner,
+    raw,
+    contentReadable,
+    readError,
+  }
+}
+
+/**
+ * 锁的身份证据（接管时判断「搬走的是不是快照里那把」）。
+ *
+ * - 有非空 `token`：token 就是身份；
+ * - 旧版**没有 token**：退回到原文**逐字节**比对。绝不能写成 `String(owner.token)` ——
+ *   无 token 时那会得到字面量 `"undefined"`，于是任意两把旧锁都「相等」，
+ *   核对窗口里被换成活锁也会被当作死锁删掉；
+ * - 内容读不出来：没有任何证据 → 返回 `null`，调用方必须 fail closed（不搬、不删）。
+ */
+function lockIdentity(state) {
+  if (!state || state.contentReadable === false) return null
+  const owner = state.owner
+  if (owner && typeof owner.token === 'string' && owner.token.length > 0) return 'token:' + owner.token
+  return 'raw:' + String(state.raw ?? '')
 }
 
 /** 进程是否还活着：ESRCH = 死了；EPERM 等「无权判断」按活着处理（宁可不抢锁）。 */
@@ -191,48 +248,115 @@ function restoreFile(from, to) {
 }
 
 /**
- * 接管 stale 锁并返回证据（年龄 + 所有者）。
+ * 删掉搬走的隔离文件（成功后它就是纯残留）：EPERM / EBUSY 有界退避重试。
+ * 返回 `null` = 已清理干净；返回路径 = 清理失败，作为证据留给下一次写盘按份额回收。
+ */
+function removeArtifact(path, { unlink = unlinkSync } = {}) {
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      unlink(path)
+      return null
+    } catch (error) {
+      if (!RETRYABLE_RENAME_CODES.has(error && error.code) || attempt === 3) return path
+      sleepSync(attempt * 5)
+    }
+  }
+  return path
+}
+
+/**
+ * 接管 stale 锁并返回证据（年龄 + 所有者 + 可能的残留）。
  *
  * 先 rename 到唯一名字，**再核对搬走的是不是快照里那把**：
- * - 是 → 删掉，接管成功；
- * - 不是（别的写者刚创建了新锁）→ 原子放回去，返回 null 重新竞争。
+ * - 是 → 删掉（成功路径不留 `.stale-*`），接管成功；
+ * - 不是（别的写者刚创建了新锁）→ 原子放回去，返回 null 重新竞争；
+ * - 内容读不出来 → 没有身份证据，**fail closed**：连 rename 都不做，返回 null 让调用方等到超时。
  * rename / unlink 本身没有「条件执行」，这一步核对 + 还原就是「不误删新锁」的兜底。
  */
-function takeOverStale(targetPath, snapshot, reason) {
+function takeOverStale(targetPath, snapshot, reason, { rename = renameSync, unlink = unlinkSync } = {}) {
   if (!snapshot) return null
+  const expected = lockIdentity(snapshot)
+  // 读不到内容 = 无法证明搬走的是同一把：宁可超时失败，也不接管（不得把「解析/读取失败」当成可删除）。
+  if (expected === null) return null
   const moved = targetPath + '.stale-' + Date.now() + '-' + randomUUID()
   try {
-    renameSync(targetPath, moved)
+    rename(targetPath, moved)
   } catch {
     return null
   }
-  let movedOwner = null
-  let movedRaw = ''
-  try {
-    movedRaw = readFileSync(moved, 'utf8')
-    const parsed = JSON.parse(movedRaw)
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) movedOwner = parsed
-  } catch {
-    // 内容不可解析：退化为原文比对
-  }
-  const expected = snapshot.owner ? String(snapshot.owner.token) : String(snapshot.raw || '')
-  const actual = movedOwner ? String(movedOwner.token) : movedRaw
-  if (expected !== actual) {
+  const movedState = readLockState(moved)
+  const actual = lockIdentity(movedState)
+  if (actual === null || actual !== expected) {
     restoreFile(moved, targetPath)
     return null
   }
-  try {
-    unlinkSync(moved)
-  } catch {
-    // 残留一个 .stale- 文件不影响正确性（它不会被当成锁）
-  }
+  const leftover = removeArtifact(moved, { unlink })
   return {
     path: targetPath,
     reason,
     ageMs: snapshot.ageMs,
     owner: snapshot.owner,
     brokenAt: new Date().toISOString(),
+    // 清理失败时点名残留文件（诊断用）；成功路径这里是 null。
+    leftover,
   }
+}
+
+/**
+ * 回收锁路径上的接管 / 释放残留（`<lock>.stale-*` / `<lock>.release-*`）。
+ *
+ * 「有界留证」= 每个锁路径最多保留最新 `keep` 份 + 一批还「不够旧」的文件：
+ * - 只删 mtime 早于 `minAgeMs` 的（接管窗口只有微秒级，1 分钟的阈值不会碰到在途文件）；
+ * - 新鲜的残留（可能正被别的进程使用）原样保留；
+ * - 其余文件（`.bak` / `.tmp-` / 无关配置）一个都不碰。
+ *
+ * 由 `acquireGateConfigLock` 在每次拿锁前顺手调用：写盘越频繁，旧证据回收得越及时。
+ *
+ * @returns {{kept: string[], removed: string[]}}
+ */
+export function pruneLockArtifacts(lockPath, {
+  keep = DEFAULT_GATE_ARTIFACT_KEEP,
+  minAgeMs = DEFAULT_GATE_ARTIFACT_MIN_AGE_MS,
+} = {}) {
+  const target = String(lockPath)
+  const dir = dirname(target)
+  const base = basename(target)
+  let names
+  try {
+    names = readdirSync(dir)
+  } catch {
+    return { kept: [], removed: [] }
+  }
+  const pattern = new RegExp('^' + base.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\.(?:stale|release)-')
+  const now = Date.now()
+  const artifacts = []
+  for (const name of names) {
+    if (!pattern.test(name)) continue
+    const path = join(dir, name)
+    try {
+      artifacts.push({ path, mtimeMs: statSync(path).mtimeMs })
+    } catch {
+      // 刚被别的进程删掉
+    }
+  }
+  artifacts.sort((left, right) => right.mtimeMs - left.mtimeMs)
+  const keepCount = Number.isFinite(Number(keep)) ? Math.max(0, Math.trunc(Number(keep))) : DEFAULT_GATE_ARTIFACT_KEEP
+  const minAge = Number.isFinite(Number(minAgeMs)) ? Math.max(0, Number(minAgeMs)) : DEFAULT_GATE_ARTIFACT_MIN_AGE_MS
+  const kept = []
+  const removed = []
+  artifacts.forEach((item, index) => {
+    if (index < keepCount || now - item.mtimeMs < minAge) {
+      kept.push(item.path)
+      return
+    }
+    try {
+      unlinkSync(item.path)
+      removed.push(item.path)
+    } catch {
+      kept.push(item.path)
+    }
+  })
+  return { kept, removed }
 }
 
 function lockCreateError(lockPath, cause) {
@@ -250,10 +374,15 @@ function lockCreateError(lockPath, cause) {
 function lockTimeoutError(lockPath, state, timeoutMs, label = '门禁配置写锁') {
   const owner = state ? state.owner : null
   const ageMs = state ? state.ageMs : null
+  const unreadable = state && state.contentReadable === false
+    ? '；锁内容不可读（' + String(state.readError || 'EREAD') + '），没有任何身份证据，按 fail-closed 策略不自动接管'
+      + '（确认没有写者后请手工删除）'
+    : ''
   const error = new Error(
     '无法获取' + label + '：' + lockPath + '（等待 ' + timeoutMs + 'ms 超时；持有者 '
     + describeOwner(owner)
     + (ageMs === null ? '' : '，锁年龄 ' + ageMs + 'ms')
+    + unreadable
     + '）。为避免并发覆盖，未在无锁状态下写入。',
   )
   error.code = 'gate_lock_timeout'
@@ -345,7 +474,7 @@ function unlinkIfOwned(path, token) {
  * 拿不到守护锁时同样选择「不碰 `lockPath`」：宁可留着自己的锁等它超龄，
  * 也不冒误删别人新锁的风险（守护锁只活微秒级，正常不会拿不到）。
  */
-function releaseLock(lockPath, token, { guardPath, guardStaleMs, timeoutMs, pollMs, sleep, open, selfHost }) {
+function releaseLock(lockPath, token, { guardPath, guardStaleMs, timeoutMs, pollMs, sleep, open, selfHost, rename, unlink }) {
   let guard = null
   try {
     guard = acquireGuard(guardPath, {
@@ -355,6 +484,8 @@ function releaseLock(lockPath, token, { guardPath, guardStaleMs, timeoutMs, poll
       sleep,
       open,
       selfHost,
+      rename,
+      unlink,
     })
   } catch {
     return false
@@ -370,7 +501,7 @@ function releaseLock(lockPath, token, { guardPath, guardStaleMs, timeoutMs, poll
  * 拿守护锁：只护住「创建 / 接管 / 释放」这几微秒，所以 stale 阈值单独给（默认 10s）。
  * 活着的持有者永远不会被接管；崩在中间的守护锁按「所有者已死」立即接管。
  */
-function acquireGuard(guardPath, { timeoutMs, pollMs, staleMs, sleep, open, selfHost }) {
+function acquireGuard(guardPath, { timeoutMs, pollMs, staleMs, sleep, open, selfHost, rename, unlink }) {
   const token = randomUUID()
   const startedAtMs = Date.now()
   const deadline = startedAtMs + Math.max(0, Number(timeoutMs) || 0)
@@ -398,7 +529,7 @@ function acquireGuard(guardPath, { timeoutMs, pollMs, staleMs, sleep, open, self
     createError = created.error
     state = readLockState(guardPath)
     if (staleReason(state, staleMs, selfHost)) {
-      if (takeOverStale(guardPath, state, 'guard')) continue
+      if (takeOverStale(guardPath, state, 'guard', { rename, unlink })) continue
     }
     if (Date.now() >= deadline) {
       if (!state) throw lockCreateError(guardPath, createError)
@@ -418,7 +549,7 @@ function acquireGuard(guardPath, { timeoutMs, pollMs, staleMs, sleep, open, self
  * 也就不会把彼此刚建好的新锁搬走（C2/Q1 medium）。
  *
  * @param {string} configPath 配置文件的绝对路径（锁 = 该路径 + `.lock`，守护锁再加 `.guard`）
- * @param {{timeoutMs?: number, pollMs?: number, staleMs?: number, guardStaleMs?: number, sleep?: (ms: number) => void, open?: typeof openSync}} [options]
+ * @param {{timeoutMs?: number, pollMs?: number, staleMs?: number, guardStaleMs?: number, sleep?: (ms: number) => void, open?: typeof openSync, rename?: typeof renameSync, unlink?: typeof unlinkSync}} [options]
  * @returns {{path: string, configPath: string, token: string, waitedMs: number, broken: Array<object>, release: () => boolean, isOwner: () => boolean, assertOwner: () => true}}
  */
 export function acquireGateConfigLock(configPath, {
@@ -429,9 +560,19 @@ export function acquireGateConfigLock(configPath, {
   sleep = sleepSync,
   // 测试注入点：证明「并发创建拿到 EPERM」按竞争等待，而不是直接失败。
   open = openSync,
+  // 测试注入点：接管时的 rename / unlink（证明「搬走后核对身份」与「清理失败留证」两条路径）。
+  rename = renameSync,
+  unlink = unlinkSync,
 } = {}) {
   const lockPath = gateLockPath(configPath)
   const guardPath = gateGuardPath(configPath)
+  // 上一次接管 / 释放留下的隔离文件：按「保留最新 N 份 + 只清旧的」顺手回收，证据有界。
+  try {
+    pruneLockArtifacts(lockPath)
+    pruneLockArtifacts(guardPath)
+  } catch {
+    // 回收残留永远不能挡住正常写盘
+  }
   const token = randomUUID()
   const selfHost = hostname()
   const startedAtMs = Date.now()
@@ -472,6 +613,8 @@ export function acquireGateConfigLock(configPath, {
         sleep,
         open,
         selfHost,
+        rename,
+        unlink,
       })
     },
     isOwner() {
@@ -504,6 +647,8 @@ export function acquireGateConfigLock(configPath, {
         sleep,
         open,
         selfHost,
+        rename,
+        unlink,
       })
     } catch (error) {
       // 守护锁都拿不到：如果已经见过真锁，按「等锁超时」报（带持有者证据）；否则原样报创建错误。
@@ -517,7 +662,7 @@ export function acquireGateConfigLock(configPath, {
       state = readLockState(lockPath)
       const reason = staleReason(state, stale, selfHost)
       if (reason) {
-        const evidence = takeOverStale(lockPath, state, reason)
+        const evidence = takeOverStale(lockPath, state, reason, { rename, unlink })
         if (evidence) {
           broken.push(evidence)
           // 接管成功后立刻（仍在守护区里）创建自己的锁，不给别人插队的窗口。
