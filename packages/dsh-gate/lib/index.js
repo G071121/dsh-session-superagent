@@ -46,7 +46,7 @@ export {
 
 export const PACKAGE_NAME = '@mycf711/dsh-gate'
 /** 与 package.json 的 version 同步（测试守着）。 */
-export const PACKAGE_VERSION = '0.1.0'
+export const PACKAGE_VERSION = '0.1.1'
 
 const PACKAGE_ROOT = dirname(dirname(fileURLToPath(import.meta.url)))
 

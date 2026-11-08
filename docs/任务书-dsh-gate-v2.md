@@ -45,7 +45,7 @@ npm 实测（`npm view <包名> version`）：`dsh-session-superagent@0.10.6`、
 
 ```text
 $ npm test
-ℹ tests 869 / ℹ pass 869 / ℹ fail 0 / exit 0
+ℹ tests 873 / ℹ pass 873 / ℹ fail 0 / exit 0
 
 $ cd packages/dsh-gate && npm test
 ℹ tests 133 / ℹ pass 133 / ℹ fail 0 / exit 0
@@ -222,7 +222,7 @@ R1 改写前有两条红；改写后只剩 profile 一条（谁负责见 §四�
 ```sh
 # 全量单测（唯一入口，自带离线开关）
 npm test
-# → ℹ tests 869 / ℹ pass 869 / ℹ fail 0 / exit 0
+# → ℹ tests 873 / ℹ pass 873 / ℹ fail 0 / exit 0
 
 # 门禁包单测
 cd packages/dsh-gate && npm test
@@ -262,7 +262,7 @@ printf 'hello\n' | node packages/dsh-gate/bin/gate.mjs --trigger pr.reply --body
 
 ## 六、发布与非目标
 
-- 目标版本：主插件 = 当前 `0.10.6` 的**下一 patch**；gate 包只有真实改动才 bump（当前 `0.1.0`）。
+- 目标版本：主插件 = 当前 `0.10.7`（main `e68da40`）的**下一 patch** = `0.10.8`；gate 包有真实改动，`0.1.0` → `0.1.1`。
   本文件**故意不写死**下一个版本号字面量：`scripts/audit-docs-all.mjs` 拦「文档里出现高于当前版本的版本号」，
   写死就会让整条 preflight 在发布前一直是红的。发布后再回填。
 - 发布三件套：npm + tag + Release（标题只写版本号）；`main` CI 必须 success。

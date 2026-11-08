@@ -2,6 +2,26 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.10.8] - 2026-11-08 —— 门禁 v2（规则真实启停 + 发送前 CLI + 面板 + 发布基线）
+
+- 门禁子包 `@mycf711/dsh-gate` `0.1.0` → `0.1.1`：规则级真实启停（缺省 `enabled:true`、`false` 真停用、
+  后层完整规则可复启），发送前 CLI 硬门禁失败不请求模型。
+- 设置页门禁面板：开关取四层合并结果；保存时未改语义原样写回 `semantic`（`baseURL` / `mode` /
+  `timeoutMs` / `maxInputChars` 等未暴露字段不丢）；本层有 `extends` 时拒绝保存并给出配置文件路径，
+  不整层重写；更后层（项目 / 本地）停用时开关 disabled 并标注来源层；`SegmentedControl` 优先委托
+  官方原语，缺导出时回退可实现方向键 / Home / End / roving tab stop。
+- 发布基线修复：`scripts/sync-profile.mjs` 对门禁子包改为**逐文件内容指纹**
+  （`package.json` + `lib/**/*.js` + `bin/**/*.mjs` + `gates/**/*.json`），`--check` 单列
+  「门禁子包漂移」并 `exit 1`，`--repair` 强制整目录同步 —— 修掉「只改 `lib/` 或
+  `gates/default.json`、版本没 bump 时 profile 假绿、`--repair` 也不替换」这一类问题。
+- `scripts/verify-panel-chromium.mjs` 不再写死旧安装与本机临时仓库路径：仓库根按
+  `DSH_SUPERAGENT_REPO` → 脚本位置 → cwd；DSH 安装按 `DSH_ASAR`+`DSH_ELECTRON` →
+  `DSH_INSTALL_ROOT` → 扫描（取 `app.asar` mtime 最新，多套安装不静默验旧版）；新增
+  `--print-paths` 探针。ego-browser 的 nodejs 沙箱不继承父进程 env，运行方式改为 prelude 注入。
+- 边界：`sync-profile --repair` 只保证 profile **磁盘副本**与仓库一致；宿主已加载的模块要重载才生效。
+- 验证：根 `npm test` **873/873**、gate 包 **133/133**、UI 审计 **11/11**、真实 Chromium **47/47**
+  （安装版前端 `0.2.2-rc.1`）、`preflight` 全量 **42/42**。Gitee ack 标签请求体沿用 0.10.7 的裸数组修复。
+
 ## [0.10.7] - 2026-11-08 —— Gitee ack 打标签修复
 
 - 修复 `addGiteeLabel` 的请求体：Gitee 规范（swagger `POST /v5/repos/{owner}/{repo}/issues/{number}/labels`）要求
