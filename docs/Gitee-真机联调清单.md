@@ -516,7 +516,7 @@ watch_ack({ repo: "owner/name", numbers: "IKSQJH" })
 acked owner/name #IKSQJH with label "主理鱼:已处理"
 ```
 
-Gitee 网页上该 issue 出现这个标签；`/state` 里 `lastAcked = { numbers: ["IKSQJH"], label: "主理鱼:已处理", at: … }`、`cursor` 推到当下。请求形状就是 `POST /repos/{owner}/{repo}/issues/{number}/labels`，body `{"labels":["主理鱼:已处理"]}`，头 `authorization: token …`（`lib/gitee.js:138-140`，离线用例第 8 条已断言）。
+Gitee 网页上该 issue 出现这个标签；`/state` 里 `lastAcked = { numbers: ["IKSQJH"], label: "主理鱼:已处理", at: … }`、`cursor` 推到当下。请求形状就是 `POST /repos/{owner}/{repo}/issues/{number}/labels`，body 是**裸字符串数组** `["主理鱼:已处理"]`，头 `authorization: token …`（`lib/gitee.js · addGiteeLabel`，0.10.7 起；离线用例断言裸数组）。注意：包成 `{"labels":[…]}` 会被 Gitee 回 `400 {"message":"Problems parsing JSON"}` —— 0.10.6 在项目看板式仓库真机复现过，这也是本函数以前必失败的原因。
 
 **看到别的说明什么**：
 - `[error: #IKSQJH 需要你处理] （没归类的错误：已按退避自动重试；持续出现就跑 watch_doctor 看检查清单，或把这行贴给对方）` → **这就是「标签不存在」的表现**（0.11 复刻原文）。根因：Gitee 回的是 HTML 404 页，`classifyGhError` 只认 GitHub 的措辞，归到 `other`。**别去查网络**，先确认标签名与仓库里的一字不差。
