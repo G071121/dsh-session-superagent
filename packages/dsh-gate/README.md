@@ -105,6 +105,26 @@ if (!result.ok) return
 | `destructive` | 禁止破坏性操作建议 | regex | 强推、`rm -rf /`、删分支、关他人 PR |
 | `empty` | 不能是空回复 | nonEmpty | 空串 / 纯空白（仅回复类触发器） |
 
+### 规则启停（`enabled`）
+
+每条规则可选 `enabled`，**缺省 `true`**：
+
+| 写法 | 行为 |
+|---|---|
+| 不写 / `true` | 规则生效 |
+| `false` | **本层明确停用**同 id 规则：不参与判定，连 `warn` 都不出 |
+
+```json
+{ "id": "secret", "type": "regex", "pattern": "ghp_[A-Za-z0-9]{20,}", "enabled": false }
+```
+
+- 同 id 后层**完整覆盖**前层（含 `enabled`）：停用不会被更前层复活；后层写 `enabled: true` 即恢复。
+- 复启必须写**同 id 完整规则**：只写 `{ "id": "secret", "enabled": true }` 缺 `type` 判非法，
+  `validateConfig` 返回「规则缺少 type」，面板保存会报错 —— 不会静默变回停用。
+- 写盘保留 `enabled: false`（JSON 往返仍是 `false`）；没写 `enabled` 的旧配置写回不凭空加字段。
+- 非布尔 `enabled`（例如字符串 `"false"`）判非法；读配置时按「规则仍生效」处理（fail-closed）。
+- 默认配置 `gates/default.json` 不写 `enabled`，10 条规则全开。
+
 ## API
 
 ### 确定性门禁
@@ -114,9 +134,9 @@ if (!result.ok) return
 | `createGate(options?)` | `GateProvider` | 稳定接口；`options.repo` / `options.config` / `options.semantic` / `options.semanticOptions` |
 | `loadGateConfig(options?)` | `{ config, sources, errors }` | 四层合并；`repo` / `home` / `env` / `defaultPath` 可注入 |
 | `mergeConfig(base, override)` | `config` | 同 id 覆盖、不同 id 追加 |
-| `normalizeConfig(input)` | `config` | 非法规则静默丢弃（写盘前请用 `validateConfig`） |
-| `lintText(text, config, options?)` | `{ ok, hits }` | `options.trigger` / `options.current` |
-| `validateConfig(input)` | `{ ok: true, config }` 或 `{ ok: false, error }` | 写盘 / 面板保存前校验 |
+| `normalizeConfig(input)` | `config` | 非法规则静默丢弃（写盘前请用 `validateConfig`）；保留规则的 `enabled` |
+| `lintText(text, config, options?)` | `{ ok, hits }` | `options.trigger` / `options.current`；跳过 `enabled: false` 的规则 |
+| `validateConfig(input)` | `{ ok: true, config }` 或 `{ ok: false, error }` | 写盘 / 面板保存前校验；`enabled` 必须是布尔、复启必须写完整规则 |
 | `readGateScope(scope, options?)` | `{ path, config, error? }` | `scope` = `default` / `user` / `project` / `local` |
 | `writeGateConfig(scope, config, options?)` | `{ path, config }` | 只允许 `user` / `project` / `local`；先 `.bak` 再原子替换 |
 | `userGatePath` / `projectGatePath` / `localGatePath` | `string` | 路径派生 |
@@ -151,7 +171,8 @@ interface GateProvider {
 ```
 
 `check()` 先跑确定性规则；只有触发器是 `merge` / `release` **且**配置里
-`semantic.enabled === true` 时才追加语义复审。
+`semantic.enabled === true` 时才追加语义复审。**硬门禁已经不过时不再请求模型**
+（此时 `semantic` 为 `{ skipped: true, reason: '硬门禁未通过，未请求模型' }`）。
 
 ### 语义复审（`@mycf711/dsh-gate/semantic`）
 
@@ -210,11 +231,12 @@ printf '正文' | node bin/gate.mjs --trigger pr.reply --body-file - --current 1
 | `--current` | 当前 issue/PR 编号；缺省时 `foreign-ref` 跳过 |
 | `--repo` | 仓库目录（默认当前目录） |
 | `--config` | 直接用一份配置，不读四层（调试 / CI） |
-| `--semantic` | 在 `merge` / `release` 上强制跑语义复审 |
+| `--semantic` | 在 `merge` / `release` 上强制跑语义复审（硬门禁已失败时不会请求模型） |
 | `--json` | 输出 JSON |
 | `--help` | 帮助 |
 
-退出码：`0` 通过（warn 不阻断）· `1` 有 `error` 命中 · `2` 用法 / 配置 / IO 错误。
+退出码：`0` 通过（warn 不阻断）· `1` 有 `error` 命中 · `2` 用法 / 配置 / IO 错误
+（未知参数、缺 `--body-file`、未知 trigger、`--current` 非数字、配置文件不存在或非法 JSON）。
 
 ## 安全边界
 
@@ -234,7 +256,8 @@ node --test
 ```
 
 覆盖：四层合并与同 id 覆盖、`extends`（替换 / 相对路径 / 循环）、脱敏 / 路径 / 无关引用、
-规则类型与触发器过滤、语义复审只 merge/release 与 fail-open、CLI 的 PASS/FAIL 退出码、
+规则类型与触发器过滤、规则启停（`enabled` 缺省 / 停用 / 后层复启 / 写盘往返 / 非法形状）、
+语义复审只 merge/release 与 fail-open、硬门禁失败不请求模型、CLI 的 PASS/FAIL 退出码、
 默认 JSON 可解析且 10 条规则都真的能命中。
 
 ## 未验项
