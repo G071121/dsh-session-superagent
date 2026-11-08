@@ -13,6 +13,9 @@ import { createHash } from 'node:crypto'
 import { cpSync, existsSync, linkSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+// preflight 的 profile 行解析（纯函数）：第四段「门禁子包漂移」的 clean / drift 文案由本文件钉住。
+// 本文件是 CLI 也是模块：import 时只导出纯函数，不会真的跑整轮门禁（主体包在 IS_MAIN 里）。
+import { summarizeProfileCheck } from '../scripts/preflight.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const SCRIPT = join(ROOT, 'scripts', 'sync-profile.mjs')
@@ -29,25 +32,26 @@ function scriptTargets() {
   return [...block.slice(0, block.indexOf(']')).matchAll(/'([^']+)'/g)].map((match) => match[1])
 }
 
-function buildDest({ staleGate = false } = {}) {
-  rmSync(DEST, { recursive: true, force: true })
+function buildDest({ staleGate = false, root = ROOT, dest = DEST } = {}) {
+  rmSync(dest, { recursive: true, force: true })
   for (const rel of scriptTargets()) {
-    const dst = join(DEST, rel)
+    const dst = join(dest, rel)
     mkdirSync(dirname(dst), { recursive: true })
-    linkSync(join(ROOT, rel), dst)
+    linkSync(join(root, rel), dst)
   }
-  const gateDst = join(DEST, GATE_REL)
+  const gateDst = join(dest, GATE_REL)
   mkdirSync(dirname(gateDst), { recursive: true })
-  cpSync(GATE_SRC, gateDst, { recursive: true })
+  cpSync(join(root, 'packages', 'dsh-gate'), gateDst, { recursive: true })
   if (staleGate) {
     const lib = join(gateDst, 'lib', 'index.js')
     writeFileSync(lib, readFileSync(lib, 'utf8') + '\n// stale profile copy（模拟 profile 里还是旧实现）\n')
   }
 }
 
-function runSync(...args) {
+/** 跑任意一份 sync-profile（仓库里的或副本里的），失败也把 stdout/stderr 带回来。 */
+function runScript(script, ...args) {
   try {
-    return { code: 0, out: execFileSync(process.execPath, [SCRIPT, ...args], { cwd: ROOT, encoding: 'utf8' }) }
+    return { code: 0, out: execFileSync(process.execPath, [script, ...args], { cwd: ROOT, encoding: 'utf8' }) }
   } catch (error) {
     return {
       code: typeof error.status === 'number' ? error.status : 1,
@@ -55,6 +59,8 @@ function runSync(...args) {
     }
   }
 }
+
+const runSync = (...args) => runScript(SCRIPT, ...args)
 
 const sha256 = (file) => createHash('sha256').update(readFileSync(file)).digest('hex')
 
@@ -124,14 +130,14 @@ const walkFiles = (root, rel, out) => {
 }
 
 /** 从 package.json 派生运行时文件：lib 递归 + 随包发布的非文档件 + exports / bin / cordis patch。 */
-function derivedRuntimeFiles() {
-  const pkg = JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8'))
+function derivedRuntimeFiles(root = ROOT) {
+  const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'))
   const out = new Set(['package.json'])
   const addTree = (rel) => {
-    if (!existsSync(join(ROOT, rel))) return
-    if (!statSync(join(ROOT, rel)).isDirectory()) { out.add(rel); return }
+    if (!existsSync(join(root, rel))) return
+    if (!statSync(join(root, rel)).isDirectory()) { out.add(rel); return }
     const found = []
-    walkFiles(ROOT, rel, found)
+    walkFiles(root, rel, found)
     for (const file of found) out.add(file)
   }
   // lib/ 递归：新增一个 .js 就算运行时文件，哪怕还没进 package.json.files（那是另一条门禁在管）
@@ -165,4 +171,98 @@ test('TARGETS 必须覆盖全部运行时文件，且不把 test/ docs/ 塞进�
   const notPublished = scriptTargets().filter((rel) => rel !== 'package.json'
     && !published.some((entry) => entry.endsWith('/') ? rel.startsWith(entry) : entry === rel))
   assert.deepEqual(notPublished, [], '这些文件没随包发布，npm 装出来的 profile 会没有它们：' + notPublished.join(', '))
+})
+
+// ── TARGETS 反向守卫（S1）───────────────────────────────────────────────────
+// 事故 1 的另一种复发形态：清单条目还在、**文件被删了**。
+// 旧实现在循环里 `if (!existsSync(src)) continue` 静默跳过 —— `--check` 照样「缺失 0 / 断链 0 / 陈旧 0」
+// exit 0（假绿），派生用例（仓库 → 清单方向）也全绿。2026-11-08 在仓库副本里删掉 bin/check.mjs 实测过。
+
+test('TARGETS 每一条都必须真的在仓库里（清单条目和文件对不上就点名）', () => {
+  const absent = scriptTargets().filter((rel) => !existsSync(join(ROOT, rel)))
+  assert.deepEqual(absent, [],
+    '这些 TARGETS 条目在仓库里不存在：--check 拿不到源文件（旧实现静默跳过 → 假绿）；恢复文件，或把它们从 TARGETS 删掉：' + absent.join(', '))
+})
+
+test('仓库副本里删掉一条 TARGETS：--check 红（退出码 2）并点名，旧实现这里是 exit 0', () => {
+  const copy = join(ROOT, '.tmp-s1-targets-copy-' + process.pid)
+  const copyDest = join(copy, '.tmp-dest')
+  const script = join(copy, 'scripts', 'sync-profile.mjs')
+  try {
+    rmSync(copy, { recursive: true, force: true })
+    // 最小可运行副本：脚本 + 清单里的文件 + 门禁子包（**不**复制 test/docs，免得被 node --test 再扫一遍）
+    mkdirSync(join(copy, 'scripts'), { recursive: true })
+    cpSync(SCRIPT, script)
+    for (const rel of scriptTargets()) {
+      mkdirSync(dirname(join(copy, rel)), { recursive: true })
+      cpSync(join(ROOT, rel), join(copy, rel))
+    }
+    cpSync(GATE_SRC, join(copy, 'packages', 'dsh-gate'), { recursive: true })
+
+    mkdirSync(copyDest, { recursive: true })
+    assert.equal(runScript(script, '--repair', '--dir', copyDest).code, 0, '副本先要能建出干净 profile')
+
+    // 删掉一条清单条目指向的文件：dest 里的硬链接还在（inode 还活着），所以「缺失」仍然是 0
+    rmSync(join(copy, 'bin', 'check.mjs'))
+    const res = runScript(script, '--check', '--dir', copyDest)
+    assert.equal(res.code, 2, '清单条目在仓库里不存在必须红（2 = 仓库侧问题，--repair 修不了）：' + res.out)
+    assert.match(res.out, /缺源\s+bin\/check\.mjs/, '必须点名是哪一条：' + res.out)
+    assert.match(res.out, /缺失 0 \/ 断链 0 \/ 陈旧 0 \/ 门禁子包漂移 0 \/ TARGETS 缺源 1（bin\/check\.mjs）/)
+
+    // 旧假绿的另一半：派生规则只看「仓库 → 清单」，这时**仍然成立** —— 所以必须有上面的存在性守卫
+    const listed = new Set(scriptTargets())
+    assert.deepEqual(derivedRuntimeFiles(copy).filter((rel) => !listed.has(rel)), [],
+      '派生方向在缺文件时不会报，这就是旧实现的全绿形状')
+
+    // --repair 也不许假装修好（文件不会自己回来）
+    const repaired = runScript(script, '--repair', '--dir', copyDest)
+    assert.equal(repaired.code, 2, '--repair 也不行：' + repaired.out)
+    assert.match(repaired.out, /TARGETS 有 1 条在仓库里不存在/)
+  } finally {
+    rmSync(copy, { recursive: true, force: true })
+  }
+})
+
+// ── preflight 第四段（门禁子包漂移）：clean / drift 两类仓库内用例 ────────────────
+// v3 审查 R4：这一行一直只有人工实跑与 V1 复核 —— 把第四段解析删掉（0.10.8 假绿的形状）测试也全绿。
+// 现在把 preflight 的解析（scripts/preflight.mjs 的 summarizeProfileCheck，单一事实来源）钉在
+// clean / drift 两份**真跑输出** + 一份老格式上：clean 不许加第四段噪音，drift 必须点名。
+
+test('preflight 第四段 clean：真跑 --check 的解析结果是「干净且不加第四段噪音」', () => {
+  buildDest()
+  const res = runSync('--check', '--dir', DEST)
+  assert.equal(res.code, 0, '干净 profile 必须 exit 0：' + res.out)
+  const summary = summarizeProfileCheck(res.out)
+  assert.equal(summary.clean, true)
+  assert.equal(summary.drifted, 0)
+  assert.equal(summary.gateDrift, 0)
+  assert.equal(summary.detail, '缺失 0 / 断链 0 / 陈旧 0', '全绿时只该看到三个数（第四段只在漂移时出现）')
+})
+
+test('preflight 第四段 drift：真跑 --check 的解析结果必须 FAIL 并点名不一致的文件', () => {
+  buildDest({ staleGate: true })
+  const res = runSync('--check', '--dir', DEST)
+  assert.equal(res.code, 1, '有漂移必须 exit 1：' + res.out)
+  const summary = summarizeProfileCheck(res.out)
+  assert.equal(summary.clean, false, '第四段非零不能算干净（这正是 0.10.8 假绿）')
+  assert.equal(summary.gateDrift, 1)
+  assert.match(String(summary.changed), /^lib\/index\.js$/, '必须点名到文件：' + summary.changed)
+  assert.equal(summary.detail,
+    '缺失 0 / 断链 0 / 陈旧 0 / 门禁子包漂移 1（lib/index.js），跑 node scripts/sync-profile.mjs --repair')
+})
+
+test('preflight 第四段：老格式（只有三段）读不出漂移，必须按不干净处理', () => {
+  const summary = summarizeProfileCheck('缺失 0 / 断链 2 / 陈旧 0' + String.fromCharCode(10) + '相对 import 全部可解析 ✓')
+  assert.equal(summary.clean, false, '看不到第四段就证明不了门禁子包不漂移')
+  assert.equal(summary.detail, '缺失 0 / 断链 2 / 陈旧 0')
+})
+
+test('preflight 第五段 TARGETS 缺源：必须解析、点名，且不算干净', () => {
+  const out = '缺源     bin/check.mjs（仓库里没有这个文件：恢复它，或把这一行从 TARGETS 删掉）'
+    + String.fromCharCode(10) + '缺失 0 / 断链 0 / 陈旧 0 / 门禁子包漂移 0 / TARGETS 缺源 1（bin/check.mjs）'
+  const summary = summarizeProfileCheck(out)
+  assert.equal(summary.clean, false)
+  assert.equal(summary.manifest, 1)
+  assert.equal(summary.detail,
+    '缺失 0 / 断链 0 / 陈旧 0 / TARGETS 缺源 1（bin/check.mjs），清单条目不成立（--repair 修不了）')
 })

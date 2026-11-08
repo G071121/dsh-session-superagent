@@ -8,7 +8,7 @@
 - 零运行时依赖，纯 ESM，Node `>= 22.19.0`
 - 默认不联网：语义复审默认关闭，打开也只在 `merge` / `release` 上生效
 - 发往模型前先脱敏；模型不可用时**放行并给 warning**，不阻断硬门禁
-- 配置写盘带 `.bak` 备份与原子替换
+- 配置写盘带 `.bak` 备份、跨进程写锁与原子替换（Windows EPERM/EBUSY 有界重试）
 
 ## 安装
 
@@ -157,7 +157,8 @@ if (!result.ok) return
 | `lintText(text, config, options?)` | `{ ok, hits }` | `options.trigger` / `options.current`；跳过 `enabled: false` 的规则 |
 | `validateConfig(input)` | `{ ok: true, config }` 或 `{ ok: false, error }` | 写盘 / 面板保存前校验；`enabled` 必须是布尔、复启必须写完整规则；`extends` 只校验形状并原样带回 |
 | `readGateScope(scope, options?)` | `{ path, config, error? }` | `scope` = `default` / `user` / `project` / `local` |
-| `writeGateConfig(scope, config, options?)` | `{ path, config }` | 只允许 `user` / `project` / `local`；先 `.bak` 再原子替换；共享 `extends` 抛错（`code: 'extends_not_preservable'`） |
+| `writeGateConfig(scope, config, options?)` | `{ path, config, lock }` | 只允许 `user` / `project` / `local`；同一路径**跨进程写锁**内「读旧文件 → 校验 → `.bak` → 临时写入 → rename」；共享 `extends` 抛错（`code: 'extends_not_preservable'`），锁超时抛错（`code: 'gate_lock_timeout'`）；`options` 支持 `lockTimeoutMs` / `lockPollMs` / `lockStaleMs` / `lockGuardStaleMs` / `renameAttempts` / `renameBackoffMs`；`lock.broken` 是本次接管的 stale 锁证据（年龄 + 所有者） |
+| `acquireGateConfigLock(path, options?)` / `renameWithRetry(from, to, options?)` | 锁句柄 / `{ attempts }` | 写盘用的两个原语：跨进程写锁（`gateLockPath(path)` = `<配置>.lock`，接管段另有 `gateGuardPath(path)` = `<配置>.lock.guard` 守护锁）与 EPERM/EBUSY 有界退避重命名；锁句柄带 `release()` / `isOwner()` / `assertOwner()` |
 | `userGatePath` / `projectGatePath` / `localGatePath` | `string` | 路径派生 |
 | `DEFAULT_GATE_PATH` / `TRIGGERS` / `RULE_TYPES` | 常量 | 默认规则路径与枚举 |
 
@@ -264,7 +265,18 @@ printf '正文' | node bin/gate.mjs --trigger pr.reply --body-file - --current 1
 - **默认不联网**：语义复审默认关闭；开启后也只连配置里的 `baseURL`。
 - **先脱敏再出网**：`redact()` 覆盖 GitHub / GitLab / Slack / Stripe / npm / AWS / Google /
   JWT / PEM / URL 密码 / 查询参数 / Gitee 令牌等形状。
-- **写盘可回滚**：`writeGateConfig` 先写 `.bak`，临时文件 `0o600`，`rename` 原子替换。
+- **写盘可回滚**：`writeGateConfig` 先写 `.bak`，临时文件 `0o600`，`rename` 原子替换
+  （Windows 上目标文件被占用时 EPERM/EBUSY 有界退避重试；最终失败保留原文件、清理临时文件）。
+- **写盘串行**：同一配置路径用锁文件（`<gates.json>.lock`，`O_EXCL` 原子创建）把
+  「读旧文件 → 校验 → 备份 → 临时写入 → rename」整段串起来，跨进程也不会互相覆盖。
+  拿不到锁**显式失败**（`code: 'gate_lock_timeout'`，错误里带持有者 pid/host/开始时间与锁年龄），
+  绝不退回无锁写；只有超龄或所有者已死的锁才会被接管，接管证据在返回值 `lock.broken` 里。
+  Windows 上并发创建同一锁文件拿到的是 `EPERM` / `EBUSY`（不是 `EEXIST`），按竞争等待重试。
+- **接管不误伤**：创建 / 接管 / 释放全部串行在 `<lock>.guard` 守护锁里；搬走 stale 锁之后**再核对**
+  token（内容不可解析时比对原文），发现搬错了别人刚建的新锁就原样放回去；释放则是**先核对再从原位删**，
+  token 不匹配（例如自己被判定 stale 接管过）时一个字节都不碰 —— 不先 rename，就不存在「把当前持有者的锁
+  搬走 → `lockPath` 空窗 → 第三写者趁虚而入」的窗口；拿不到守护锁也宁可留着自己的锁。写盘前还有一道
+  `assertOwner()`：锁一旦不在自己手里，宁可失败（`code: 'gate_lock_lost'`）也不覆盖别人的写盘。
 - **写盘不丢 `extends`**：整层重写只写 `version/name/rules/semantic`；`false` / `"none"` 原样保留，
   共享形式（`true` / `"default"` / 路径 / 对象）显式报错并点名配置路径 —— 宁可保存失败，也不悄悄冲掉共享规则。
 - **坏配置 fail-open（仅语义复审）**：语义层不可用时放行并给 warning；确定性规则仍逐条执行。
@@ -280,7 +292,12 @@ node --test
 `false` / `"none"` 原样保留、读回仍是替换、坏 JSON 先进 `.bak`）、脱敏 / 路径 / 无关引用、
 规则类型与触发器过滤、规则启停（`enabled` 缺省 / 停用 / 后层复启 / 写盘往返 / 非法形状）、
 语义复审只 merge/release 与 fail-open、硬门禁失败不请求模型、CLI 的 PASS/FAIL 退出码、
-默认 JSON 可解析且 10 条规则都真的能命中。
+默认 JSON 可解析且 10 条规则都真的能命中、**跨进程写锁**（真实子进程：并发「读-改-写」计数一次不少、
+两个写者同层写入不丢 `extends` / 不产生损坏文件 / 不留临时文件）、锁被占用时显式超时失败且不写盘、
+stale 锁的年龄与所有者证据、rename 的 EPERM/EBUSY 退避重试与最终失败清理、
+**stale 接管的并发安全**（12 写者栅栏同时抢同一把 stale 锁 × 多轮，临界区不重叠、无 DUP_READS，
+无 stale 正对照；stale 守护锁接管；**release 窗口**：旧持有者被挂起、锁被接管、恢复后释放时，
+第三写者不得进临界区）。
 
 ## 未验项
 
@@ -289,8 +306,16 @@ node --test
 - 面板 UI（G3）与主插件路由（G2）不在本包范围。
 - 超大配置文件（数千条规则）的性能未压测。
 - `extends` 跨盘符 / UNC 路径未单独验证。
-- 两个进程同时写同一层配置（读 extends → `.bak` → rename 之间的 TOCTOU）未压测：本包没有文件锁，
-  只靠 `.bak` + 原子 `rename` 兜底。
+- 写锁是**同机**互斥：锁判定依赖 `mtime` 与 `process.kill(pid, 0)`，跨主机共享盘（NFS / SMB）
+  上的时钟与 pid 语义未验证；跨主机并发写同一层不在保证范围。
+- 真实并发 `rename` 竞争在 Windows 上已复现 EPERM（旧实现 12 轮里 11 轮失败）；
+  「另一个进程长期持有目标文件句柄」造成的 EPERM 用替身验证退避重试，未做真实句柄占用压测。
+- 守护锁的接管阈值是 10s：持有者被**挂起**（不是崩溃，pid 还活着）超过 10s 时会被当作 stale 接管。
+  守护区内的二次校验 + `O_EXCL` 创建保证不会搬走别人的锁，但这种「双持」窗口没有专门压测。
+- 与**不经过本锁**的外部写者（例如旧版本进程直接改 `gates.json`）并发时，只能靠 `assertOwner()` 兜底；
+  这一点不在测试覆盖范围内。
+- 释放时若 2s 内拿不到守护锁（例如守护锁持有者被挂起），`release()` 返回 false 且**不碰**锁文件：
+  自己的锁会留到超龄（默认 30s）才被下一次写入接管。这条「不碰」路径没有专门压测。
 
 ## License
 

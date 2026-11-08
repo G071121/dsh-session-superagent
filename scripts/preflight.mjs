@@ -15,6 +15,60 @@ import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 
+// 本文件既是 CLI，也是「profile 行怎么记」的**单一事实来源**。
+// v3 审查 R4：第四段「门禁子包漂移」的解析一直只有人工实跑，没有仓库内用例 ——
+// 于是 `test/sync-profile-drift.test.mjs` 需要 import 下面的纯函数来钉住 clean / drift 两种文案。
+// 被 import 时不能跑整轮门禁（node --test 会 import 本文件），所以主体包在 IS_MAIN 里。
+// 判据用 import.meta.main（Node 22.18+/24）—— 它按「是不是入口模块」判，不受调用路径影响；
+// 老 Node 没有这个字段时退回 argv[1] 比对，比对不出来就**当 CLI 跑**（宁可多跑，不许静默不跑）。
+const IS_MAIN = (() => {
+  if (typeof import.meta.main === 'boolean') return import.meta.main
+  try {
+    return fileURLToPath(import.meta.url) === process.argv[1]
+  } catch {
+    return true
+  }
+})()
+
+/**
+ * 解析 `node scripts/sync-profile.mjs --check` 的输出 → 这一行怎么记、详情怎么写。
+ *
+ * 为什么要在 preflight 里解析第四段：只认前三段时，子包内容不一致会被静默丢掉 ——
+ * 「缺失 0 / 断链 0 / 陈旧 0」看着全绿，实际 profile 里跑的是旧门禁（0.10.8 假绿的形状）。
+ * S1 新增第五段「TARGETS 缺源」（清单条目在仓库里不存在）：出现就点名，且不能算干净。
+ *
+ * 返回 { clean, drifted, gateDrift, changed, manifest, detail }：
+ *   clean    = 四段全零且没有 TARGETS 缺源（看不到四段时也算不干净：证明不了就没资格算过）
+ *   detail   = 给人看的文案；没有漂移时不加第四段（别给全绿加噪音）
+ */
+export function summarizeProfileCheck(out) {
+  const text = String(out || '')
+  const four = text.match(/缺失 (\d+) \/ 断链 (\d+) \/ 陈旧 (\d+) \/ 门禁子包漂移 (\d+)/)
+  const manifest = text.match(/TARGETS 缺源 (\d+)(?:（([^）\n]*)）)?/)
+  const manifestCount = manifest ? Number(manifest[1]) : 0
+  if (!four) {
+    // 老格式（只有三段）：读不出第四段就没法证明子包不漂移，按不干净处理（preflight 与 sync-profile 同版发布）
+    return {
+      clean: false, drifted: 0, gateDrift: 0, changed: null, manifest: manifestCount,
+      detail: (text.match(/缺失 \d+ \/ 断链 \d+ \/ 陈旧 \d+/) || ['(无输出)'])[0],
+    }
+  }
+  const gateDrift = Number(four[4])
+  const drifted = Number(four[1]) + Number(four[2]) + Number(four[3]) + gateDrift
+  const changed = gateDrift > 0 ? (text.match(/内容与 packages\/dsh-gate 不一致：([^；\n]+)/) || [])[1] || null : null
+  let detail = `缺失 ${four[1]} / 断链 ${four[2]} / 陈旧 ${four[3]}`
+  if (gateDrift > 0) detail += ` / 门禁子包漂移 ${four[4]}` + (changed ? `（${changed}）` : '')
+  if (manifestCount > 0) {
+    detail += ` / TARGETS 缺源 ${manifestCount}` + (manifest[2] ? `（${manifest[2]}）` : '') + '，清单条目不成立（--repair 修不了）'
+  } else if (drifted > 0) {
+    detail += '，跑 node scripts/sync-profile.mjs --repair'
+  }
+  return { clean: drifted === 0 && manifestCount === 0, drifted, gateDrift, changed, manifest: manifestCount, detail }
+}
+
+// 下面整段是 CLI 主体。为了不让 500 行的缩进变化淹掉真改动，这里只外包一层条件、不重排缩进。
+if (IS_MAIN) {
+
 // 审核 T18 M2：整轮门禁**只持一把锁**。
 // 以前只有 2/39 项（audit-pack / regression-cases）自己抢锁，而 verify-gates 在 14 个路径上注入写入 ——
 // 两个会话同时跑门禁就是双向假红（「改坏后 code=1 / 还原后 code=1」）。
@@ -160,19 +214,13 @@ if (!FAST) {
   } else {
     const res = tryRun('node', ['scripts/sync-profile.mjs', '--check'])
     const out = String(res.stdout || '')
-    // 第四段「门禁子包漂移」必须解析：只认前三段时（S1 之前），子包内容不一致会被静默丢掉 ——
-    // 「缺失 0 / 断链 0 / 陈旧 0」看着全绿，实际 profile 里跑的是旧门禁。这正是 0.10.8 假绿的形状。
-    // 没有漂移时不加这一段：正常状态只该看到三个数（别给全绿加噪音）。
-    const four = out.match(/缺失 (\d+) \/ 断链 (\d+) \/ 陈旧 (\d+) \/ 门禁子包漂移 (\d+)/)
-    const gateDrift = four ? Number(four[4]) : 0
-    const drifted = four ? Number(four[1]) + Number(four[2]) + Number(four[3]) + gateDrift : 0
-    const changed = gateDrift > 0 ? (out.match(/内容与 packages\/dsh-gate 不一致：([^；\n]+)/) || [])[1] : null
-    const detail = four
-      ? `缺失 ${four[1]} / 断链 ${four[2]} / 陈旧 ${four[3]}`
-        + (gateDrift > 0 ? ` / 门禁子包漂移 ${four[4]}` + (changed ? `（${changed}）` : '') : '')
-        + (drifted > 0 ? '，跑 node scripts/sync-profile.mjs --repair' : '')
-      : (out.match(/缺失 \d+ \/ 断链 \d+ \/ 陈旧 \d+/) || ['(无输出)'])[0]
-    record('profile 一致性 --check', res.status === 0, detail)
+    // 解析逻辑在文件顶部的 summarizeProfileCheck（纯函数）：第四段「门禁子包漂移」必须解析 ——
+    // 只认前三段时（S1 之前），子包内容不一致会被静默丢掉，「缺失 0 / 断链 0 / 陈旧 0」看着全绿，
+    // 实际 profile 里跑的是旧门禁（0.10.8 假绿）；S1 新增的第五段「TARGETS 缺源」同理必须点名。
+    // 没有漂移时不加第四段：正常状态只该看到三个数（别给全绿加噪音）。
+    // 判定要**两个都成立**：sync-profile 退出码 0，且解析结果 clean（计数非零却 exit 0 也算假绿）。
+    const summary = summarizeProfileCheck(out)
+    record('profile 一致性 --check', res.status === 0 && summary.clean, summary.detail)
   }
 }
 
@@ -517,3 +565,4 @@ console.log(
       : `全部通过（${rows.length} 项检查）`,
 )
 if (failures.length > 0) process.exit(1)
+} // IS_MAIN 结束：import 本文件（test/sync-profile-drift.test.mjs 只用 summarizeProfileCheck）不跑门禁

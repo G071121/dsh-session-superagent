@@ -1,6 +1,6 @@
 {
   "name": "@mycf711/dsh-gate",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "内容层门禁：四层配置、确定性规则与可选语义复审，可作为 DSH 插件依赖独立安装。",
   "type": "module",
   "main": "lib/index.js",
@@ -9,6 +9,7 @@
     "./semantic": "./lib/semantic.js",
     "./redact": "./lib/redact.js",
     "./lib/index.js": "./lib/index.js",
+    "./lib/config-lock.js": "./lib/config-lock.js",
     "./lib/semantic.js": "./lib/semantic.js",
     "./lib/redact.js": "./lib/redact.js",
     "./gates/default.json": "./gates/default.json",
@@ -29,7 +30,7 @@
   },
   "scripts": {
     "test": "node --test",
-    "check": "node --check lib/index.js && node --check lib/semantic.js && node --check lib/redact.js && node --check bin/gate.mjs"
+    "check": "node --check lib/index.js && node --check lib/config-lock.js && node --check lib/semantic.js && node --check lib/redact.js && node --check bin/gate.mjs"
   },
   "keywords": [
     "dsh",

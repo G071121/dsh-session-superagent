@@ -422,7 +422,7 @@ window.__ModuleLoader__.load({
     }
 
     // 客户端版本探针：每次模块加载写一次，用来确认浏览器里跑的是哪一版
-    const CLIENT_VERSION = '0.10.9'
+    const CLIENT_VERSION = '0.10.10'
     // SEMVER_COMPARATOR_SOURCE_START
     // This block is duplicated verbatim in client.js because the browser UMD cannot import ESM.
     // test/update-semver.test.mjs audits both copies and exercises their behavior.
@@ -2288,6 +2288,16 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /** GET /gates 回显的仓库（服务端没回显时返回 ''）。 */
+    const gateDataRepo = (data) => (data && typeof data.repo === 'string' && data.repo) || ''
+
+    /**
+     * 草稿显式记着它来自哪个仓库（U2）。
+     * data.repo 之后可能被新仓库的响应改写；保存/预览/优化和确认条都只认草稿自己的来源，
+     * 否则「切仓库在途时改的草稿」会被写进新仓库（项目层 / 全局 user 层都复现过）。
+     */
+    const gateDraftRepo = (draft) => (draft && typeof draft.repo === 'string' && draft.repo) || ''
+
     /**
      * 落盘形状：完整规则 + 布尔 `enabled`。
      * 复启也必须写完整规则 —— 只写 `{ id, enabled:true }` 缺 type，validateConfig 会判非法。
@@ -2367,6 +2377,13 @@ window.__ModuleLoader__.load({
       return config
     }
 
+    /** 草稿相对「它自己那个仓库的数据」是不是真有未保存改动（只比落盘形状，来源字段不参与）。 */
+    const gateDraftDirty = (candidate, source, layerScope) => {
+      const derived = gateDraftOf(source, layerScope)
+      return JSON.stringify(gateConfigOf(layerScope, candidate, source))
+        !== JSON.stringify(gateConfigOf(layerScope, derived, source))
+    }
+
     /** 模型下拉：当前值一定在列表里，取不到列表时也要有个能显示的项。 */
     const gateModelOptions = (value, models) => {
       const list = (models && Array.isArray(models.list) ? models.list : [])
@@ -2405,29 +2422,95 @@ window.__ModuleLoader__.load({
       // 形状：{ type: 'scope', next }（作用域确认，可带 repoHeld）或 { repoHeld: true }（换仓库已选择保留草稿）。
       // 只能在末尾追加（位置化队列），同步 test/client.test.mjs 的 gateQueue。
       const [pendingSwitch, setPendingSwitch] = useState(null)
-      const scopeQuery = repo ? '?repo=' + encodeURIComponent(String(repo)) : ''
+      const repoQuery = (value) => (value ? '?repo=' + encodeURIComponent(String(value)) : '')
+      const scopeQuery = repoQuery(repo)
+      // U1：load 的代际与取消。切仓库 / 保存后重读 / 点「重新读取」都可能并发：
+      // 没有序号时后到的旧响应会覆盖新仓库的数据；没有取消时卸载后还会继续 setState。
+      const loadSeqRef = useRef(0)
+      const aliveRef = useRef(true)
+      // 响应回来时用它判断「仓库还是发起这次请求的那个」：/state 后到时仓库已经换了，
+      // 旧仓库的响应不能再提交（否则面板显示旧配置，保存却按新仓库写）。
+      const repoRef = useRef(repo)
+      repoRef.current = repo
+      // 草稿脏不脏要按「提交那一刻的作用域」算 —— 请求在途时用户可能已经切过作用域。
+      const scopeRef = useRef(scope)
+      scopeRef.current = scope
+      // load 的闭包停在请求发起那一刻；提交时要拿「现在」的草稿和数据判断能不能落地。
+      const draftRef = useRef(draft)
+      draftRef.current = draft
+      const dataRef = useRef(data)
+      dataRef.current = data
+      const modelsSeqRef = useRef(0)
+      useEffect(() => {
+        // StrictMode（开发态）会 mount → cleanup → 再 mount：effect 体里必须复位 alive，
+        // 否则第一次 cleanup 把它置 false 之后就永远拦掉响应（门禁页停在「正在读取…」，Q2 F3）。
+        aliveRef.current = true
+        return () => { aliveRef.current = false }
+      }, [])
 
       async function load() {
+        const seq = ++loadSeqRef.current
+        const requestedRepo = repo
         setLoadError('')
         try {
           const value = await call('/gates' + scopeQuery)
+          // 卸载了，或者已经有更新的一次 load：这份响应作废（不许再 setState）。
+          if (!aliveRef.current || seq !== loadSeqRef.current) return
+          // 仓库已经换过：旧仓库的响应不能提交（新仓库的读取由 effect 或确认流程负责）。
+          if (repoRef.current !== requestedRepo) return
           if (!value || value.ok === false) throw new Error((value && value.error) || '服务端没有返回门禁配置')
+          // 草稿来自旧仓库、这次响应的却是新仓库：先不动 data（Q2 F1）。
+          // 提交会让 repoMismatch 变 false、确认条消失，保存/预览/优化随后就会把旧仓库的
+          // 规则状态和提示词写进新仓库（项目层和全局 user 层都复现过）。
+          // 只有草稿其实「和它自己那份配置一致」（改回原样）才放行新数据 —— 它没有要保留的内容。
+          const replyRepo = gateDataRepo(value) || requestedRepo
+          const pendingDraft = draftRef.current
+          const pendingSource = gateDraftRepo(pendingDraft)
+          if (pendingSource && pendingSource !== replyRepo) {
+            const sourceData = gateDataRepo(dataRef.current) === pendingSource ? dataRef.current : null
+            const stillDirty = sourceData ? gateDraftDirty(pendingDraft, sourceData, scopeRef.current) : true
+            if (stillDirty) return
+            setGateDraft(null)
+          }
           setData(value)
-          setGateDraft(null)
+          // 请求在途时用户可能已经改出草稿：只放下「和新数据一致」的草稿，
+          // dirty 的一律留着 —— 旧实现无条件 setGateDraft(null)，切仓库在途的草稿会被静默清掉。
+          setGateDraft((prev) => {
+            if (!prev) return null
+            try {
+              return gateDraftDirty(prev, value, scopeRef.current) ? prev : null
+            } catch {
+              // 算不清就保留：宁可多留一份草稿，也不能替用户丢掉改动。
+              return prev
+            }
+          })
         } catch (error) {
+          if (!aliveRef.current || seq !== loadSeqRef.current) return
+          if (repoRef.current !== requestedRepo) return
           setLoadError(String((error && error.message) || error))
         }
       }
 
-      async function loadModels() {
+      async function loadModels(forRepo = repo) {
+        // 模型列表同样是「按仓库读」的请求：乱序/卸载时旧响应不能盖新列表。
+        const seq = ++modelsSeqRef.current
+        const requestedRepo = forRepo
         setModels((prev) => ({ ...prev, loading: true, error: '' }))
         try {
-          const value = await call('/gates/models' + scopeQuery)
+          const value = await call('/gates/models' + repoQuery(forRepo))
+          if (!aliveRef.current || seq !== modelsSeqRef.current) return
+          // 只认「面板当前那份配置的仓库」：当前 repo prop，或者面板数据回显的仓库。
+          // 取消换仓库后面板数据还在旧仓库，旧仓库的模型列表要能重新读回来（Q2 F2）。
+          const currentData = dataRef.current
+          if (requestedRepo !== repoRef.current && requestedRepo !== gateDataRepo(currentData)) return
           const list = value && Array.isArray(value.models)
             ? value.models.map((item) => ({ id: String((item && item.id) || ''), label: String((item && (item.label || item.id)) || '') })).filter((item) => item.id)
             : []
           setModels({ list, loading: false, error: value && value.ok === false ? String(value.error || '') : '' })
         } catch (error) {
+          if (!aliveRef.current || seq !== modelsSeqRef.current) return
+          const currentData = dataRef.current
+          if (requestedRepo !== repoRef.current && requestedRepo !== gateDataRepo(currentData)) return
           setModels({ list: [], loading: false, error: String((error && error.message) || error) })
         }
       }
@@ -2437,7 +2520,7 @@ window.__ModuleLoader__.load({
       const readOnly = scope === 'default'
       // 项目层只允许「关闭语义复审」，模型与提示词在项目层不可编辑。
       const semanticLocked = readOnly || scope === 'project'
-      const dirty = !readOnly && JSON.stringify(gateConfigOf(scope, current, data)) !== JSON.stringify(gateConfigOf(scope, derived, data))
+      const dirty = !readOnly && gateDraftDirty(current, data, scope)
       const scopePath = data && data.scopes && data.scopes[scope] ? data.scopes[scope].path : ''
       // 本层的 `extends` 分两种（v3 冻结行为）：
       // - 共享规则（字符串 / 对象 / true）：面板整层重写会把共享规则冲掉 → 明确拒绝保存，让人去改文件；
@@ -2448,24 +2531,34 @@ window.__ModuleLoader__.load({
       const layerExtends = rawExtends !== undefined && !extendsDetached
       // 面板里这份配置属于哪个仓库（GET /gates 会回显 repo）：写盘与预览都认它，
       // 否则「/state 换了 workdir 但用户还没确认」时会把旧配置写到新仓库去。
-      const dataRepo = (data && typeof data.repo === 'string' && data.repo) || ''
-      const targetRepo = dataRepo || repo
-      const repoMismatch = Boolean(dataRepo && repo && dataRepo !== repo)
+      const dataRepo = gateDataRepo(data)
+      // dirty 草稿认**自己的来源仓库**：data.repo 可能已经（或即将）换成新仓库，
+      // 保存/预览/优化和确认条都必须跟草稿走 —— 跟 data.repo 走就会把旧仓库的草稿写进新仓库（Q2 F1）。
+      const draftRepo = gateDraftRepo(draft)
+      const panelRepo = dirty && draftRepo ? draftRepo : dataRepo
+      const targetRepo = panelRepo || repo
+      const repoMismatch = Boolean(panelRepo && repo && panelRepo !== repo)
+      // 创建/修改草稿时记下来源仓库；之后 data 怎么变，这份草稿都只写回它自己的仓库。
+      const draftSourceRepo = () => draftRepo || dataRepo || repo
+      const setDraftConfig = (next) => setGateDraft({ ...next, repo: draftSourceRepo() })
       // 切仓库遇到草稿：确认（取消 → 保留草稿并显示提示；确认 → 放弃后才去读新仓库）。
       const repoHeld = Boolean(pendingSwitch && pendingSwitch.repoHeld === true && repoMismatch && dirty)
       const repoConfirm = repoMismatch && dirty && !repoHeld
       const scopeConfirm = Boolean(pendingSwitch && pendingSwitch.type === 'scope' && pendingSwitch.next)
 
       // 依赖 repo：面板先挂载、/state 后到的顺序下，仓库路径变了要重读一次（否则项目层会写到服务端 cwd）。
-      // 有草稿时**一律不重读**：load() 会 setGateDraft(null)，草稿就被静默丢掉了 ——
-      // 换仓库这件事交给页面上的确认条（确认 / 保存 / 放弃 都会各自 load）。
+      // 有草稿时**不发新请求**：换仓库这件事交给页面上的确认条（确认 / 保存 / 放弃 都会各自 load）；
+      // 已经在途的响应由 load() 里的「草稿来源仓库」闸门挡住，不会把面板数据翻到新仓库去。
       useEffect(() => {
         if (dirty) return
         load()
       }, [repo])
       // 草稿变干净之后（保存 / 放弃 / 手工改回）如果仓库已经换过，补一次重读，别一直停在旧仓库上。
+      // 模型列表跟着面板仓库走：取消换仓库后可能在途响应被作废，这里要把它补回来。
       useEffect(() => {
-        if (!dirty && repoMismatch) load()
+        if (dirty || !repoMismatch) return
+        load()
+        loadModels()
       }, [dirty])
       useEffect(() => { loadModels() }, [repo])
 
@@ -2533,7 +2626,7 @@ window.__ModuleLoader__.load({
           if (!value || value.ok === false) throw new Error((value && value.error) || '服务端没有返回提示词')
           const text = String(value.text || '').trim()
           if (!text) throw new Error('模型返回空内容')
-          setGateDraft({ ...current, semantic: { ...current.semantic, prompt: text } })
+          setDraftConfig({ ...current, semantic: { ...current.semantic, prompt: text } })
           setStatus({ tone: 'ok', text: '提示词已更新，确认后点保存' })
         } catch (error) {
           setStatus({ tone: 'error', text: '优化提示词失败：' + String((error && error.message) || error) })
@@ -2542,8 +2635,9 @@ window.__ModuleLoader__.load({
         }
       }
 
-      const setSemantic = (next) => setGateDraft({ ...current, semantic: { ...current.semantic, ...next } })
-      const toggleRule = (id, next) => setGateDraft({
+      // 改草稿一律走 setDraftConfig：顺手记下来源仓库，后面 data.repo 怎么变都不影响保存目标。
+      const setSemantic = (next) => setDraftConfig({ ...current, semantic: { ...current.semantic, ...next } })
+      const toggleRule = (id, next) => setDraftConfig({
         ...current,
         rules: current.rules.map((rule) => (rule.id === id ? { ...rule, enabled: next } : rule)),
       })
@@ -2570,6 +2664,18 @@ window.__ModuleLoader__.load({
         const next = scopeConfirm ? pendingSwitch.next : ''
         setPendingSwitch(null)
         if (next) applyScope(next)
+      }
+      // 取消换仓库：把已经发出去的新仓库读取一并作废。否则它晚到时代码会把数据切到新仓库，
+      // 和「已保留草稿：面板仍是旧仓库」的承诺相反（草稿还在，数据却换了仓库）。
+      const cancelRepoSwitch = () => {
+        loadSeqRef.current += 1
+        // 模型列表也属于面板这份配置（baseURL 来自它）：新仓库的 /gates/models 不能落地，
+        // 再把面板仓库（草稿来源）的模型列表重新读一次，别让下拉里留着新仓库的模型（Q2 F2）。
+        modelsSeqRef.current += 1
+        setModels((prev) => (prev.loading ? { ...prev, loading: false } : prev))
+        const panelRepoNow = gateDraftRepo(draftRef.current) || gateDataRepo(dataRef.current)
+        if (panelRepoNow) loadModels(panelRepoNow)
+        setPendingSwitch({ repoHeld: true })
       }
       // 切仓库由父面板的 workdir 驱动，没法拦在「点击」上：草稿还在时不去读新仓库，
       // 只有这里（明确放弃）才 reset + load，且 load 用的是新的 repo prop。
@@ -2611,14 +2717,14 @@ window.__ModuleLoader__.load({
           : null,
         repoConfirm
           ? h('div', { className: 'dt-banner', role: 'group', 'aria-label': '切换仓库确认' },
-            h('p', null, '仓库已切换到 ' + repo + '：当前面板还是 ' + dataRepo + ' 的配置，这份草稿还没保存。'),
+            h('p', null, '仓库已切换到 ' + repo + '：当前面板还是 ' + panelRepo + ' 的配置，这份草稿还没保存。'),
             h('div', { className: 'dt-actions dt-banner-actions' },
-              h(Btn, { size: 'sm', variant: 'ghost', onClick: () => setPendingSwitch({ repoHeld: true }) }, '取消'),
+              h(Btn, { size: 'sm', variant: 'ghost', onClick: cancelRepoSwitch }, '取消'),
               h(Btn, { size: 'sm', variant: 'primary', onClick: confirmRepoSwitch }, '放弃草稿并切换')))
           : null,
         repoHeld
           ? h('div', { className: 'dt-banner' },
-            h('p', null, '已保留草稿：面板仍是 ' + dataRepo + '，保存或放弃这份草稿后才会切到 ' + repo + '。'),
+            h('p', null, '已保留草稿：面板仍是 ' + panelRepo + '，保存或放弃这份草稿后才会切到 ' + repo + '。'),
             h('div', { className: 'dt-actions dt-banner-actions' },
               h(Btn, { size: 'sm', variant: 'primary', onClick: confirmRepoSwitch }, '放弃草稿并切换')))
           : null,
