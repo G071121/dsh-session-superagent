@@ -157,8 +157,10 @@ if (!result.ok) return
 | `lintText(text, config, options?)` | `{ ok, hits }` | `options.trigger` / `options.current`；跳过 `enabled: false` 的规则 |
 | `validateConfig(input)` | `{ ok: true, config }` 或 `{ ok: false, error }` | 写盘 / 面板保存前校验；`enabled` 必须是布尔、复启必须写完整规则；`extends` 只校验形状并原样带回 |
 | `readGateScope(scope, options?)` | `{ path, config, error? }` | `scope` = `default` / `user` / `project` / `local` |
-| `writeGateConfig(scope, config, options?)` | `{ path, config, lock }` | 只允许 `user` / `project` / `local`；同一路径**跨进程写锁**内「读旧文件 → 校验 → `.bak` → 临时写入 → rename」；共享 `extends` 抛错（`code: 'extends_not_preservable'`），锁超时抛错（`code: 'gate_lock_timeout'`）；`options` 支持 `lockTimeoutMs` / `lockPollMs` / `lockStaleMs` / `lockGuardStaleMs` / `renameAttempts` / `renameBackoffMs`；`lock.broken` 是本次接管的 stale 锁证据（年龄 + 所有者） |
+| `writeGateConfig(scope, config, options?)` | `{ path, config, lock }` | 只允许 `user` / `project` / `local`；同一路径**跨进程写锁**内「读旧文件 → 校验 → `.bak` → 临时写入 → rename」；共享 `extends` 抛错（`code: 'extends_not_preservable'`），锁超时抛错（`code: 'gate_lock_timeout'`）；`options` 支持 `lockTimeoutMs` / `lockPollMs` / `lockStaleMs` / `lockGuardStaleMs` / `renameAttempts` / `renameBackoffMs`；`lock.broken` 是本次接管的 stale 锁证据（年龄 + 所有者 + 清理失败时的 `leftover` 残留路径） |
 | `acquireGateConfigLock(path, options?)` / `renameWithRetry(from, to, options?)` | 锁句柄 / `{ attempts }` | 写盘用的两个原语：跨进程写锁（`gateLockPath(path)` = `<配置>.lock`，接管段另有 `gateGuardPath(path)` = `<配置>.lock.guard` 守护锁）与 EPERM/EBUSY 有界退避重命名；锁句柄带 `release()` / `isOwner()` / `assertOwner()` |
+| `pruneLockArtifacts(lockPath, options?)` | `{ kept, removed }` | 回收接管 / 释放残留（`<lock>.stale-*` / 旧版 `<lock>.release-*`）：只删「最新 `keep` 份之外且 mtime 超过 `minAgeMs`」的文件，新鲜的（可能正在接管）与无关文件一个都不碰；每次 `acquireGateConfigLock` 前自动调用 |
+| `DEFAULT_GATE_ARTIFACT_KEEP` / `DEFAULT_GATE_ARTIFACT_MIN_AGE_MS` | `number` | 残留证据的保留份额（默认 3）与回收年龄阈值（默认 60s） |
 | `userGatePath` / `projectGatePath` / `localGatePath` | `string` | 路径派生 |
 | `DEFAULT_GATE_PATH` / `TRIGGERS` / `RULE_TYPES` | 常量 | 默认规则路径与枚举 |
 
@@ -277,6 +279,16 @@ printf '正文' | node bin/gate.mjs --trigger pr.reply --body-file - --current 1
   token 不匹配（例如自己被判定 stale 接管过）时一个字节都不碰 —— 不先 rename，就不存在「把当前持有者的锁
   搬走 → `lockPath` 空窗 → 第三写者趁虚而入」的窗口；拿不到守护锁也宁可留着自己的锁。写盘前还有一道
   `assertOwner()`：锁一旦不在自己手里，宁可失败（`code: 'gate_lock_lost'`）也不覆盖别人的写盘。
+- **旧版无 token 锁的身份策略**：有非空 `token` 时 token 就是身份；没有 token 时用**原文逐字节**比对
+  （旧版锁的 `pid` / `hostname` / `startedAt` 就在原文里，字节相同才等于同一把）—— 绝不退化成
+  `String(owner.token)`（那会得到字面量 `"undefined"`，任意两把旧锁都「相等」）。锁内容**读不出来**
+  （`EACCES` / `EBUSY` / `EISDIR`）时没有任何身份证据，**fail closed**：不搬走、不删除，等到超时显式失败
+  （错误里写明「锁内容不可读」，确认没有写者后手工删除锁文件即可恢复）。解析失败（坏 JSON / 空文件）
+  **不等于**「可删除」：接管理由只有超龄或所有者已死，且仍要过身份核对。
+- **残留有界留证**：接管把锁搬成 `<lock>.stale-<ts>-<uuid>`，旧版本释放还会留下 `<lock>.release-*`；
+  这些只是证据、不是锁。成功路径必须删干净（`EPERM` / `EBUSY` 有界退避重试）；清理失败时路径写进
+  接管证据 `lock.broken[].leftover`（诊断用），并由下一次写盘按「每个锁路径最多保留最新 3 份、
+  只回收 mtime 超过 60s 的」回收 —— 留得下证据，也不会无限堆积（`pruneLockArtifacts`）。
 - **写盘不丢 `extends`**：整层重写只写 `version/name/rules/semantic`；`false` / `"none"` 原样保留，
   共享形式（`true` / `"default"` / 路径 / 对象）显式报错并点名配置路径 —— 宁可保存失败，也不悄悄冲掉共享规则。
 - **坏配置 fail-open（仅语义复审）**：语义层不可用时放行并给 warning；确定性规则仍逐条执行。
@@ -297,7 +309,9 @@ node --test
 stale 锁的年龄与所有者证据、rename 的 EPERM/EBUSY 退避重试与最终失败清理、
 **stale 接管的并发安全**（12 写者栅栏同时抢同一把 stale 锁 × 多轮，临界区不重叠、无 DUP_READS，
 无 stale 正对照；stale 守护锁接管；**release 窗口**：旧持有者被挂起、锁被接管、恢复后释放时，
-第三写者不得进临界区）。
+第三写者不得进临界区）、**锁残余与旧格式**（成功接管不留 `.stale-*` / `.release-*`；
+旧版无 token 锁：活锁不接管、死锁可接管；锁内容读不出来（`EISDIR`）时 fail closed 不搬不删；
+核对窗口内被换成活锁必须还原；残留证据只留最新 3 份、旧的按年龄回收，清理失败写进 `leftover`）。
 
 ## 未验项
 
@@ -316,6 +330,13 @@ stale 锁的年龄与所有者证据、rename 的 EPERM/EBUSY 退避重试与最
   这一点不在测试覆盖范围内。
 - 释放时若 2s 内拿不到守护锁（例如守护锁持有者被挂起），`release()` 返回 false 且**不碰**锁文件：
   自己的锁会留到超龄（默认 30s）才被下一次写入接管。这条「不碰」路径没有专门压测。
+- 锁内容**不可读**（`EACCES` / `EBUSY` / `EISDIR`）走 fail closed：不会自动接管，必须等持有者消失或
+  人工删除锁文件。真实 ACL / 独占句柄造成的不可读只用 `EISDIR`（目录占位）复现，未在真实 ACL 上验证。
+- 残留证据的回收只在**下一次拿锁时**发生：如果这个配置路径再也没有写盘，失败留下的 `.stale-*` /
+  `.release-*` 会一直留着（不会影响正确性，也不会被当成锁）。
+- 残留回收的年龄阈值（60s）远大于「搬走 → 核对 → 删除」的微秒窗口，但**不是**形式化保证：
+  如果接管者在 rename 之后被挂起超过 60s（不是崩溃），另一个写者理论上可能回收它正在核对的隔离文件
+  （窗口与「守护锁接管阈值 10s」同类，未专门压测）。
 
 ## License
 
