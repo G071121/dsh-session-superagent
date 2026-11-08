@@ -4318,15 +4318,24 @@ test('门禁：状态只留在 GateSettings（主面板 23 + 门禁 12 = 35 槽�
 // 通用桩的 useEffect 是空实现、hook 槽位也不持久 —— 量不出「在途 / 乱序 / 卸载」。
 // 这里用 fixtures/gate-panel.mjs：跑真实 client.js，但状态槽持久、effect 按依赖触发、
 // setState 真的重渲染；fetch 由用例决定什么时候 resolve，才能把响应排成乱序。
-const gateRaceFetch = () => {
+const gateRaceFetch = (options = {}) => {
   const requests = []
   const pending = []
+  const models = []
   const fetchStub = (url, init = {}) => {
     const text = String(url)
     requests.push({ url: text, init })
     // client.js 装载时会发 client-note 心跳：不是门禁请求，直接给成功。
     if (!text.includes('/gates')) return Promise.resolve(gateResponse({ ok: true }))
-    if (text.includes('/gates/models')) return Promise.resolve(gateResponse({ ok: true, models: [] }))
+    if (text.includes('/gates/models')) {
+      // 模型列表按需挂起：F2 要在「取消换仓库」后再让新仓库的响应回来。
+      if (options.deferModels) {
+        const deferred = gateDeferred()
+        models.push({ url: text, repo: gateUrlRepo(text), deferred })
+        return deferred.promise
+      }
+      return Promise.resolve(gateResponse({ ok: true, models: [] }))
+    }
     if (text.includes('/gates/preview')) return Promise.resolve(gateResponse({ ok: true, hits: [], semantic: { skipped: true } }))
     if (text.includes('/gates/optimize')) return Promise.resolve(gateResponse({ ok: true, text: '优化后的提示词' }))
     if (String(init.method || 'GET').toUpperCase() === 'POST') {
@@ -4340,7 +4349,16 @@ const gateRaceFetch = () => {
     fetch: fetchStub,
     requests,
     pending,
+    models,
   }
+}
+
+/** 保存请求体：只认 POST /gates 本身（/gates/preview、/gates/optimize 也是 POST，不能用 includes 找）。 */
+const gatePostBody = (api) => {
+  const post = api.requests.find((item) => String(item.init.method || '').toUpperCase() === 'POST'
+    && String(item.url).split('?')[0].endsWith('/gates'))
+  assert.ok(post, '保存要真的 POST /gates')
+  return JSON.parse(post.init.body)
 }
 
 test('门禁 load 乱序：后到的旧仓库响应不能覆盖新仓库（U1-G1）', async () => {
@@ -4483,9 +4501,7 @@ test('门禁保存/预览/优化：目标仓库用 GET 回显的 data.repo（U1-
 
   const saving = panel.button('保存').props.onClick()
   panel.flush()
-  const post = api.requests.find((item) => item.url.includes('/gates') && String(item.init.method || '').toUpperCase() === 'POST')
-  assert.ok(post, '保存要真的 POST /gates')
-  assert.equal(JSON.parse(post.init.body).repo, 'E:/work/demo', '保存要写面板数据所属仓库')
+  assert.equal(gatePostBody(api).repo, 'E:/work/demo', '保存要写面板数据所属仓库')
 
   // 保存成功后 load 按当前 repo（other）重读，才真正切过去。
   // 草稿清空后 [dirty] effect 还会补一次读取（旧行为），两条都回同一份数据，只有最后一条算数。
@@ -4506,6 +4522,243 @@ test('门禁 load 卸载后响应不再改状态（U1-G6）', async () => {
   api.pending[0].deferred.resolve(gateResponse(gatePayload('E:/work/demo', { prompt: '迟到的响应' })))
   await panel.settle()
   assert.deepEqual(panel.violations(), [], '卸载后不能再 setState（取消/序号要拦住）')
+})
+
+// ── U2：跨仓库草稿污染（Q2 F1）与生命周期（F2/F3） ─────────────────────────
+// Q2 的复现形状：demo 的 project 层把 secret 关掉；用户只动 abs-path。
+const gateClone = (value) => JSON.parse(JSON.stringify(value))
+const gateLayeredPayload = (repo, options = {}) => {
+  const base = gatePayload(repo)
+  const scopes = gateClone(base.scopes)
+  const merged = gateClone(base.config.rules)
+  if (options.projectRules) {
+    const rules = gateClone(options.projectRules)
+    for (const own of rules) {
+      const index = merged.findIndex((rule) => rule.id === own.id)
+      if (index >= 0) merged[index] = { ...merged[index], ...own }
+      else merged.push(own)
+    }
+    scopes.project = { path: repo + '/.superagent/gates.json', exists: true, config: { version: 1, name: 'project', rules } }
+  }
+  if (options.userConfig) {
+    scopes.user = { path: '/home/u/.dsh/state/session-superagent/gates.json', exists: true, config: gateClone(options.userConfig) }
+  }
+  return {
+    ...base,
+    config: { ...base.config, rules: merged, semantic: { ...base.config.semantic, ...(options.semantic || {}) } },
+    scopes,
+  }
+}
+const gateDemoProjectSecretOff = [{ ...GATE_SECRET_RULE, enabled: false }]
+
+test('门禁 contam2（user）：切仓库在途改草稿，保存必须写回草稿来源仓库（U2-C1）', async () => {
+  const api = gateRaceFetch()
+  const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+  api.pending[0].deferred.resolve(gateResponse(gateLayeredPayload('E:/work/demo', { projectRules: gateDemoProjectSecretOff })))
+  await panel.settle()
+  assert.equal(panel.control('gate-rule-secret-switch').props.checked, false, '前置：demo 的 project 层把 secret 关了')
+
+  // 干净时换仓库：新仓库的读取发出去了；往返窗口内用户只改了 abs-path。
+  panel.setRepo('E:/work/other')
+  assert.equal(api.pending.length, 2, '干净换仓库会先读新仓库')
+  panel.control('gate-rule-abs-path-switch').props.onChange(false)
+  panel.flush()
+  assert.ok(panel.text().includes('未保存'), '改过之后是未保存')
+
+  api.pending[1].deferred.resolve(gateResponse(gateLayeredPayload('E:/work/other')))
+  await panel.settle()
+  assert.ok(panel.text().includes('仓库已切换到 E:/work/other'), '确认条必须还在：' + panel.text().slice(0, 320))
+  assert.ok(panel.text().includes('E:/work/demo'), '要说清面板/草稿还是 demo 的')
+  assert.ok(panel.text().includes('未保存'))
+
+  // 预览钉在草稿来源仓库（不能因为新仓库数据已到就换成 other）。
+  await panel.button('预览').props.onClick()
+  panel.flush()
+  const preview = api.requests.find((item) => item.url.includes('/gates/preview'))
+  assert.equal(JSON.parse(preview.init.body).repo, 'E:/work/demo', '预览要用草稿来源仓库')
+
+  const pendingBeforeSave = api.pending.length
+  const saving = panel.button('保存').props.onClick()
+  panel.flush()
+  const body = gatePostBody(api)
+  assert.equal(body.repo, 'E:/work/demo', '保存必须写草稿来源仓库，不能写刚切过去的 other')
+  assert.equal(body.scope, 'user')
+  assert.deepEqual(body.config.rules.map((rule) => ({ id: rule.id, enabled: rule.enabled })),
+    [{ id: 'abs-path', enabled: false }], '只写用户动过的那条，不能把 demo 的 project 状态（secret:false）带过去')
+  assert.equal(body.config.semantic, undefined, '不能把 demo 的提示词/模型写进目标层')
+
+  // 保存成功后按当前 repo（other）重读：secret 恢复开启。
+  await panel.settle(1) // 让 POST 的后续微任务把重读请求发出来
+  const reloads = api.pending.slice(pendingBeforeSave)
+  assert.ok(reloads.length >= 1, '保存成功后要按当前 repo 重读')
+  assert.deepEqual(reloads.map((item) => gateUrlRepo(item.url)), reloads.map(() => 'E:/work/other'))
+  for (const item of reloads) item.deferred.resolve(gateResponse(gateLayeredPayload('E:/work/other')))
+  await panel.settle()
+  await saving
+  assert.equal(panel.control('gate-rule-secret-switch').props.checked, true, '保存后切到 other：secret 恢复开启')
+})
+
+test('门禁 contam2（project）：切仓库在途改草稿，保存不能把 demo 的 project 覆盖写进 other（U2-C2）', async () => {
+  const api = gateRaceFetch()
+  const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+  api.pending[0].deferred.resolve(gateResponse(gateLayeredPayload('E:/work/demo', { projectRules: gateDemoProjectSecretOff })))
+  await panel.settle()
+  panel.control('gate-scope').props.onChange('project')
+  panel.flush()
+  assert.ok(panel.text().includes('E:/work/demo/.superagent/gates.json'), '前置：项目层路径是 demo 的')
+
+  panel.setRepo('E:/work/other')
+  assert.equal(api.pending.length, 2, '干净换仓库会先读新仓库')
+  panel.control('gate-rule-abs-path-switch').props.onChange(false)
+  panel.flush()
+
+  api.pending[1].deferred.resolve(gateResponse(gateLayeredPayload('E:/work/other')))
+  await panel.settle()
+  assert.ok(panel.text().includes('仓库已切换到 E:/work/other'), '确认条必须还在')
+  assert.ok(panel.text().includes('E:/work/demo/.superagent/gates.json'), '面板仍然显示 demo 的项目层路径')
+  assert.equal(panel.text().includes('E:/work/other/.superagent/gates.json'), false, 'other 的项目层路径不能上屏')
+
+  const pendingBeforeSave = api.pending.length
+  const saving = panel.button('保存').props.onClick()
+  panel.flush()
+  const body = gatePostBody(api)
+  assert.equal(body.repo, 'E:/work/demo', '项目层保存要写回 demo')
+  assert.equal(body.scope, 'project')
+  // demo 自己的 project 层覆盖（secret:false）按「整层替换」原样保留；
+  // 关键是它落在 demo 的 project 层，而不是 other 的（Q2 复现里 body.repo 是 other）。
+  assert.equal(body.config.rules.find((rule) => rule.id === 'abs-path').enabled, false, '用户动过的规则落盘')
+  assert.equal(body.config.semantic, undefined)
+
+  await panel.settle(1)
+  const reloads = api.pending.slice(pendingBeforeSave)
+  assert.deepEqual(reloads.map((item) => gateUrlRepo(item.url)), reloads.map(() => 'E:/work/other'))
+  for (const item of reloads) item.deferred.resolve(gateResponse(gateLayeredPayload('E:/work/other')))
+  await panel.settle()
+  await saving
+  assert.ok(panel.text().includes('E:/work/other/.superagent/gates.json'), '保存后切到 other 的项目层')
+})
+
+test('门禁 contam2：取消保留草稿、确认放弃才切仓库（U2-C3）', async () => {
+  const api = gateRaceFetch()
+  const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+  api.pending[0].deferred.resolve(gateResponse(gateLayeredPayload('E:/work/demo', { projectRules: gateDemoProjectSecretOff })))
+  await panel.settle()
+  panel.setRepo('E:/work/other')
+  panel.control('gate-rule-abs-path-switch').props.onChange(false)
+  panel.flush()
+  api.pending[1].deferred.resolve(gateResponse(gateLayeredPayload('E:/work/other')))
+  await panel.settle()
+  assert.ok(panel.text().includes('仓库已切换到 E:/work/other'), '前置：确认条在')
+
+  panel.button('取消').props.onClick()
+  panel.flush()
+  assert.ok(panel.text().includes('已保留草稿'), '取消后草稿还在、数据仍是 demo')
+  assert.equal(panel.control('gate-rule-abs-path-switch').props.checked, false, '草稿原样保留')
+  assert.equal(api.pending.length, 2, '取消不发请求')
+
+  panel.button('放弃草稿并切换').props.onClick()
+  panel.flush()
+  const switched = api.pending.slice(2)
+  assert.ok(switched.length >= 1, '确认后才去读新仓库')
+  assert.deepEqual(switched.map((item) => gateUrlRepo(item.url)), switched.map(() => 'E:/work/other'))
+  for (const item of switched) item.deferred.resolve(gateResponse(gateLayeredPayload('E:/work/other')))
+  await panel.settle()
+  assert.equal(panel.text().includes('已保留草稿'), false, '确认切过去后不再挂保留草稿的提示')
+  assert.equal(panel.control('gate-rule-secret-switch').props.checked, true, 'other 没有 project 覆盖：secret 恢复开启')
+})
+
+test('门禁 contam2：乱序响应里只有「草稿来源仓库」能改数据，保存仍钉回 demo（U2-C4）', async () => {
+  const api = gateRaceFetch()
+  const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+  api.pending[0].deferred.resolve(gateResponse(gateLayeredPayload('E:/work/demo', { projectRules: gateDemoProjectSecretOff })))
+  await panel.settle()
+
+  panel.setRepo('E:/work/other')
+  panel.setRepo('E:/work/third')
+  assert.equal(api.pending.length, 3, '两次换仓库各发一条读取')
+  panel.control('gate-rule-abs-path-switch').props.onChange(false)
+  panel.flush()
+
+  // 最新（third）先回：草稿来自 demo，不能提交；旧（other）后回：序号已过期。
+  api.pending[2].deferred.resolve(gateResponse(gateLayeredPayload('E:/work/third')))
+  await panel.settle()
+  api.pending[1].deferred.resolve(gateResponse(gateLayeredPayload('E:/work/other')))
+  await panel.settle()
+  assert.ok(panel.text().includes('仓库已切换到 E:/work/third'), '确认条要指向当前仓库：' + panel.text().slice(0, 320))
+  assert.ok(panel.text().includes('未保存'))
+
+  const pendingBeforeSave = api.pending.length
+  const saving = panel.button('保存').props.onClick()
+  panel.flush()
+  assert.equal(gatePostBody(api).repo, 'E:/work/demo', '乱序之后保存仍写草稿来源仓库')
+  await panel.settle(1)
+  const reloads = api.pending.slice(pendingBeforeSave)
+  assert.deepEqual(reloads.map((item) => gateUrlRepo(item.url)), reloads.map(() => 'E:/work/third'))
+  for (const item of reloads) item.deferred.resolve(gateResponse(gateLayeredPayload('E:/work/third')))
+  await panel.settle()
+  await saving
+})
+
+test('门禁 contam2：改回原样的 clean 草稿不能挡住新仓库数据（U2-C5）', async () => {
+  const api = gateRaceFetch()
+  const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+  api.pending[0].deferred.resolve(gateResponse(gatePayload('E:/work/demo', { prompt: 'demo 提示词' })))
+  await panel.settle()
+
+  // 改一下又改回来：草稿存在，但不 dirty（没有要保留的用户改动）。
+  panel.control('gate-rule-abs-path-switch').props.onChange(false)
+  panel.flush()
+  panel.control('gate-rule-abs-path-switch').props.onChange(true)
+  panel.flush()
+  assert.equal(panel.text().includes('未保存'), false, '前置：改回原样后不 dirty')
+
+  panel.setRepo('E:/work/other')
+  assert.equal(api.pending.length, 2, '不 dirty 时换仓库直接读新仓库')
+  api.pending[1].deferred.resolve(gateResponse(gatePayload('E:/work/other', { prompt: 'other 提示词' })))
+  await panel.settle()
+  assert.equal(panel.control('gate-semantic-prompt').props.value, 'other 提示词', 'clean 草稿要放下，新仓库数据直接生效')
+})
+
+test('门禁取消换仓库后 models 不换成新仓库（U2-F2）', async () => {
+  const api = gateRaceFetch({ deferModels: true })
+  const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+  api.pending[0].deferred.resolve(gateResponse(gatePayload('E:/work/demo')))
+  assert.equal(api.models.length, 1, '挂载时读模型列表')
+  assert.equal(api.models[0].repo, 'E:/work/demo')
+  api.models[0].deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-demo', label: 'demo 模型' }] }))
+  await panel.settle()
+  const options = () => (panel.control('gate-semantic-model').props.children || [])
+    .map((node) => node.props && node.props.value).filter(Boolean)
+  assert.ok(options().includes('m-demo'), '前置：demo 的模型在列表里')
+
+  panel.setRepo('E:/work/other')
+  const otherModels = api.models[api.models.length - 1]
+  assert.equal(otherModels.repo, 'E:/work/other', '换仓库会读新仓库的模型列表')
+  panel.control('gate-semantic-prompt').props.onChange({ target: { value: '在途手改' } })
+  panel.flush()
+  panel.button('取消').props.onClick()
+  panel.flush()
+  assert.ok(panel.text().includes('已保留草稿'))
+
+  // 取消后：新仓库的模型响应不能落地，读取状态也要收尾。
+  otherModels.deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-other', label: 'other 模型' }] }))
+  const refetch = api.models.find((item, index) => index > 1 && item.repo === 'E:/work/demo')
+  assert.ok(refetch, '取消后要把面板仓库（demo）的模型列表重新读一次')
+  refetch.deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-demo', label: 'demo 模型' }] }))
+  await panel.settle()
+  assert.equal(options().includes('m-other'), false, '取消后模型下拉不能出现新仓库的模型')
+  assert.ok(options().includes('m-demo'), '旧仓库的模型列表要留着')
+  assert.equal(panel.text().includes('读取中…'), false, '取消后不能一直停在读取中')
+})
+
+test('门禁 StrictMode 双挂载：cleanup 后 effect 重跑要复位 alive（U2-F3）', async () => {
+  const api = gateRaceFetch()
+  const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch, strictEffects: true })
+  assert.ok(api.pending.length >= 1, '双挂载也要发起读取')
+  for (const item of api.pending) item.deferred.resolve(gateResponse(gatePayload('E:/work/demo', { prompt: 'strict 提示词' })))
+  await panel.settle()
+  assert.equal(panel.control('gate-semantic-prompt').props.value, 'strict 提示词', 'StrictMode 下响应不能被 alive 闸门永久拦掉')
+  assert.deepEqual(panel.violations(), [])
 })
 
 test('门禁作用域：接官方 SegmentedControl，缺导出回退也有方向键/Home/End/跳过 disabled（Q2-F4）', () => {
