@@ -8,11 +8,13 @@
  */
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { spawnSync } from 'node:child_process'
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import vm from 'node:vm'
 import { createGate, loadGateConfig, readGateScope, validateConfig, writeGateConfig } from '@mycf711/dsh-gate'
+import { GATE_MODEL_SCENARIO_IDS, GATE_MODEL_SCENARIOS, GATE_MODEL_REGISTRAR } from '../scripts/gate-model-scenarios.mjs'
 import { deskForm, deskQueue, loadClient, walk, watcher } from './fixtures/panel-harness.mjs'
 import { gateDeferred, gatePayload, gateResponse, gateUrlRepo, loadGatePanel } from './fixtures/gate-panel.mjs'
 import { tempDir } from './fixtures/tmpdir.mjs'
@@ -4930,6 +4932,78 @@ test('门禁 models：确认放弃草稿并切换后，模型列表跟着切到�
   assert.deepEqual(gateModelValues(panel), ['group/deepseek-v4.1-flash-1017', 'm-other'], '模型列表切到新仓库，旧仓库的不能留着')
 })
 
+// ── Q2 修复（v6）：modelsSeqRef 的独立判据 ──────────────────────────────────
+// Q2 审查实测：拆掉 client.js:2520/2529 的 `seq !== modelsSeqRef.current` 两处闸门，
+// **浏览器层 64/64 绿、单测层 46 条门禁/模型用例 0 条转红** —— 即这道「作废在途模型列表」
+// 的闸门全仓库没有任何判据。
+// 根因是浏览器套件里两次同 URL 的 /gates/models 根本不会同时在途（Chromium 请求折叠），
+// 只有单测桩能真的把两条响应排成乱序。下面这条就是那道闸门的判据。
+test('门禁 models 序号：同一仓库两次读取乱序，先发的后到不能覆盖最新列表（Q2-1）', async () => {
+  const api = gateRaceFetch({ deferModels: true })
+  const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch })
+  api.pending[0].deferred.resolve(gateResponse(gatePayload('E:/work/demo', { prompt: 'demo 提示词' })))
+  await panel.settle()
+  api.models[0].deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-first', label: '第一次' }] }))
+  await panel.settle()
+  assert.deepEqual(gateModelValues(panel), ['group/deepseek-v4.1-flash-1017', 'm-first'], '前置：第一份列表已落地')
+
+  // 同一个仓库连点两次「读取模型列表」：两条请求在飞，仓库没变，只能靠 modelsSeqRef 分辨新旧。
+  const before = api.models.length
+  gateModelsButton(panel).props.onClick()
+  panel.flush()
+  gateModelsButton(panel).props.onClick()
+  panel.flush()
+  const inFlight = api.models.slice(before)
+  assert.equal(inFlight.length, 2, '两次点击 = 两条 models 请求')
+  assert.deepEqual(inFlight.map((item) => item.repo), ['E:/work/demo', 'E:/work/demo'],
+    '两次都读同一个仓库（否则走的是「跨仓库」那道闸门，测不到序号）')
+
+  // 后发的那条先回：它是最新一次读取，必须落地。
+  inFlight[1].deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-second', label: '第二次' }] }))
+  await panel.settle()
+  assert.deepEqual(gateModelValues(panel), ['group/deepseek-v4.1-flash-1017', 'm-second'], '最新一次读取要落地')
+
+  // 先发的那条后回：序号已经过期，**必须整体丢弃** —— 列表不能被换回旧的那份。
+  inFlight[0].deferred.resolve(gateResponse({ ok: true, models: [{ id: 'm-first-late', label: '第一次迟到' }] }))
+  await panel.settle()
+  assert.deepEqual(gateModelValues(panel), ['group/deepseek-v4.1-flash-1017', 'm-second'],
+    '同一仓库的旧 models 响应后到时不能覆盖最新列表（拆掉 modelsSeqRef 闸门这条必红）')
+  assert.equal(panel.text().includes('读取中…'), false, '两条都回来了，不能一直停在读取中')
+})
+
+// ── Q2 修复（v6）：第二道闸门（requestedRepo !== panelRepoOf()）的**不可达**不变式 ──
+// Q2 审查的 M3 变异：把 client.js:2523/2530 的 `if (requestedRepo !== panelRepoOf()) return`
+// 两处都拆成 `if (false) return`，浏览器层 64/64 绿、单测层 47/47 绿 —— 一条都不红。
+// 结论：这道闸门在当前实现下**不可达**，不是漏测。证明：
+//   panelRepoOf()        = panelRepoRef.current || gateDataRepo(dataRef.current) || repoRef.current
+//   modelsPanelRepo      = panelRepo || repo
+//   panelRepoRef.current = panelRepo                       （每次渲染同步写入）
+//   ① panelRepo 真值 ⇒ 两个表达式都等于 panelRepo；
+//   ② panelRepo 假值（只可能是 dataRepo 为空）⇒ 两个表达式都等于 repo prop。
+//   即 panelRepoOf() === modelsPanelRepo 恒成立。于是 panelRepoOf() 一旦变化，[modelsPanelRepo]
+//   effect 就会调 loadModels() 把 modelsSeqRef 推高一格，「序号闸门」总是先 return ——
+//   第二道永远轮不到。
+// 本用例把这个**派生关系**钉住：将来有人把两个来源拆开（例如让 panelRepoOf 改读别的 ref），
+// 这里会红，提示「第二道闸门现在可达了，请给它补一条独立判据，或直接删掉这段死代码」。
+test('门禁 models：panelRepoOf 与 modelsPanelRepo 同源（第二道闸门不可达的前提）（Q2-3）', () => {
+  const source = readFileSync(join(ROOT, 'client.js'), 'utf8')
+  const derived = [
+    'const modelsPanelRepo = panelRepo || repo',
+    'const panelRepoOf = () => panelRepoRef.current || gateDataRepo(dataRef.current) || repoRef.current',
+    'panelRepoRef.current = panelRepo',
+    'useEffect(() => { loadModels(modelsPanelRepo) }, [modelsPanelRepo])',
+  ]
+  for (const line of derived) {
+    assert.ok(source.includes(line),
+      'client.js 的「面板仓库」派生变了，第二道闸门（requestedRepo !== panelRepoOf()）可能已经可达：\n'
+      + '  期望仍包含：' + line + '\n'
+      + '  请给它补一条独立单测（让序号保持最新、只 resolve 迟到的那条，断言响应被丢弃），或直接删掉这段死代码')
+  }
+  // 第二道闸门本身还在（没被误删）。它目前是纯防御性死代码：行为正确、但没有任何判据。
+  assert.ok(source.includes('if (requestedRepo !== panelRepoOf()) return'),
+    '第二道闸门不见了：如果是有意删除，请同步删掉本用例并在 CHANGELOG 里记一句')
+})
+
 test('门禁 StrictMode 双挂载：cleanup 后 effect 重跑要复位 alive（U2-F3）', async () => {
   const api = gateRaceFetch()
   const panel = loadGatePanel({ repo: 'E:/work/demo', fetch: api.fetch, strictEffects: true })
@@ -5006,35 +5080,227 @@ test('门禁作用域：接官方 SegmentedControl，缺导出回退也有方向
   assert.deepEqual(clicked.changes, [], '点击 disabled 项不回调')
 })
 
-// ── 浏览器证据入库护栏（v6 B1）──────────────────────────────────────────────────
+// ── 浏览器证据入库护栏（v6 B1；v6 Q2-2 结构化重写；v6 Q2R R1/R2 收尾）──────────────
 // v5 的门禁/模型场景只活在 /tmp 临时 harness 里：删掉、搬走、或退回到「钉精确请求数」，
-// 门禁都不会红（见 docs/报告-gate-v5面板审查.md 的 Q2-L2/L3）。这里守两件事：
-//   ① 正式 Chromium 套件仍带 /gates、/gates/models 两个 fixture 与任务书点名的场景；
-//   ② 套件代码里不许出现仓库外的临时探针路径，注释里必须写明 loopback fixture 不是真实 WebView。
+// 门禁都不会红（见 docs/报告-gate-v5面板审查.md 的 Q2-L2/L3）。
+// v6 B1 的第一版护栏只做 `source.includes(场景名)`，Q2 审查实测三种改法都绿：
+//   ① 掏空断言 `check('<名字>', true)`；② 把场景包进 `if (false)`；③ 整段删掉（17 条里只点名 8 条）。
+// 现在改成**结构化**三道闸：
+//   A. 声明 → `scripts/gate-model-scenarios.mjs` 是唯一真源，必须正好 17 条且不重复；
+//   B. 注册 → spawn 套件的 `--list-scenarios` dry-run（不启动浏览器），把「源码里实际注册了哪些
+//      场景」跟声明对集合：少一条（被删）、多一条/重复（漏登记）都红；
+//   C. 判据 → 每条场景的注册点不许是字面量 `true`（掏空），套件里也不许出现 `if (false)`
+//      （死代码）；套件运行期还有 `assertAllGateScenariosRan()` 兜底。
 // 真正跑浏览器的是 scripts/verify-panel-chromium.mjs（真实 Chromium + 安装版 React 18）。
-test('浏览器证据入库：门禁/模型场景留在正式 Chromium 套件里，且不依赖 /tmp 探针', () => {
-  const source = readFileSync(join(ROOT, 'scripts', 'verify-panel-chromium.mjs'), 'utf8')
-  const scenarios = [
-    'U1-V1 乱序（跨仓库）',
-    'U1-V5 targetRepo',
-    'U5-V1（M1 user）',
-    'U5-V2（M2）',
-    'U5-V3b',
-    'U5-V4（M4）',
-    'U5-V5（U2-F2）',
-    'U5-V6b（M1 project）',
-  ]
-  for (const scenario of scenarios) {
-    assert.ok(source.includes(scenario), '正式 Chromium 套件缺场景：' + scenario)
+
+/**
+ * 剥掉 JS 源码里的注释（`//` 行注释 + 块注释），**保留**字符串、模板与正则里的内容。
+ *
+ * 为什么不能只按「行首 `//`」筛（Q2R R2）：把一条场景的注册点整段包进块注释后，行首不是 `//`，
+ * 三道静态闸会全部放过 —— 那是**假绿**，方向比如实红危险得多。
+ * 为什么不能上正则硬剥：套件里全是字符串与模板（`'/__fixture/gate-delays'`、
+ * `` `http://127.0.0.1:${address.port}` ``、`/\/tmp\//`），还有模板里的 `${ … }` 嵌套；
+ * 一律按「代码 / 行注释 / 块注释 / 单引号 / 双引号 / 模板 / 模板插值 / 正则」八态扫，
+ * 注释位换成空格（换行保留），这样行号与 `\s` 语义都不变。
+ *
+ * 正则字面量的起止用标准的「看前一个有效字符」启发式：上一个有效字符是运算符 / 标点 /
+ * 关键字时，`/` 才是正则开头；否则是除号。**两个方向都有自检用例**——把除号当正则开头会
+ * 一路吃到下一个 `/`（吃掉真代码 → 假绿），所以这条必须钉住。
+ */
+function stripComments(text) {
+  const out = []
+  // 模板插值层：'template' 表示这一层的 `}` 之后要回到模板字符串。
+  const stack = []
+  // 正则字面量的「上一个有效字符」白名单；`)/]` 与标识符/数字之后一律当除号。
+  const REGEX_PRECEDERS = '(,=:[!&|?{};+-*%^~<>'
+  const REGEX_KEYWORDS = /(?:^|[^\w$])(?:return|typeof|instanceof|in|of|new|delete|void|throw|case|do|else|yield|await)$/
+  let mode = 'code'
+  let inClass = false
+  let i = 0
+  const regexAllowed = () => {
+    let k = out.length - 1
+    while (k >= 0 && /\s/.test(out[k])) k -= 1
+    if (k < 0) return true
+    const last = out[k]
+    if (REGEX_PRECEDERS.includes(last)) return true
+    if (!/[\w$]/.test(last)) return false
+    return REGEX_KEYWORDS.test(out.slice(Math.max(0, k - 12), k + 1).join(''))
   }
+  while (i < text.length) {
+    const ch = text[i]
+    const next = text[i + 1]
+    if (mode === 'code') {
+      if (ch === '/' && next === '/') { mode = 'line'; i += 2; continue }
+      if (ch === '/' && next === '*') { mode = 'block'; i += 2; continue }
+      if (ch === '/' && regexAllowed()) { mode = 'regex'; inClass = false; out.push(ch); i += 1; continue }
+      if (ch === "'" || ch === '"' || ch === '`') {
+        mode = ch === "'" ? 'single' : ch === '"' ? 'double' : 'template'
+        out.push(ch)
+        i += 1
+        continue
+      }
+      if (ch === '{') { stack.push('brace'); out.push(ch); i += 1; continue }
+      if (ch === '}') {
+        if (stack.pop() === 'template') { mode = 'template'; out.push(ch); i += 1; continue }
+        out.push(ch)
+        i += 1
+        continue
+      }
+      out.push(ch)
+      i += 1
+      continue
+    }
+    if (mode === 'line') {
+      if (ch === '\n') { mode = 'code'; out.push('\n'); i += 1; continue }
+      out.push(' ')
+      i += 1
+      continue
+    }
+    if (mode === 'block') {
+      if (ch === '*' && next === '/') { mode = 'code'; out.push(' '); i += 2; continue }
+      out.push(ch === '\n' ? '\n' : ' ')
+      i += 1
+      continue
+    }
+    if (mode === 'regex') {
+      // 正则体里注释不是注释：转义、字符类（`[/]` 里的 `/` 不收尾）都原样照抄。
+      if (ch === '\\') { out.push(ch, next === undefined ? '' : next); i += 2; continue }
+      if (ch === '[') { inClass = true; out.push(ch); i += 1; continue }
+      if (ch === ']') { inClass = false; out.push(ch); i += 1; continue }
+      if (ch === '/' && !inClass) {
+        out.push(ch)
+        i += 1
+        while (i < text.length && /[a-z]/i.test(text[i])) { out.push(text[i]); i += 1 }
+        mode = 'code'
+        continue
+      }
+      out.push(ch)
+      i += 1
+      continue
+    }
+    // 字符串 / 模板：转义整段照抄，别的原样复制。
+    if (ch === '\\') { out.push(ch, next === undefined ? '' : next); i += 2; continue }
+    if ((mode === 'single' && ch === "'") || (mode === 'double' && ch === '"') || (mode === 'template' && ch === '`')) {
+      mode = 'code'
+      out.push(ch)
+      i += 1
+      continue
+    }
+    if (mode === 'template' && ch === '$' && next === '{') {
+      stack.push('template')
+      mode = 'code'
+      out.push('${')
+      i += 2
+      continue
+    }
+    out.push(ch)
+    i += 1
+  }
+  return out.join('')
+}
+
+test('护栏自检：stripComments 只剥注释，不吞字符串/模板/正则里的内容（Q2R R2）', () => {
+  // ① 三种注释真的没了。
+  assert.equal(stripComments('a // b\nc').includes('b'), false, '行注释要消失')
+  assert.equal(stripComments('a /* b */ c').includes('b'), false, '块注释要消失')
+  assert.equal(stripComments('a /* b\nc */ d').includes('b'), false, '跨行块注释要消失')
+  assert.equal(stripComments('a /* b\nc */ d').includes('c'), false, '跨行块注释要消失')
+  assert.equal(stripComments('/**\n * 带 /tmp/ 与 // 的注释\n */\nreal()').includes('/tmp/'), false,
+    'JSDoc 里的 /tmp/ 不算代码')
+  assert.ok(stripComments('/** doc */\nreal()').includes('real()'), '块注释后面的代码要留着')
+
+  // ② 字符串 / 模板 / 正则里的东西一个字都不许少（否则就是「剥过头」的假绿）。
+  const untouched = [
+    "const u = 'http://x//y'",
+    'const u = "a/*b*/c"',
+    'const t = `a//b`',
+    'const r = /\\/tmp\\//',
+    'const r = /a[/]b/g',
+    "const s = 'a\\'b//c'",
+  ]
+  for (const raw of untouched) {
+    assert.equal(stripComments(raw), raw, '字符串/模板/正则内容被误剥：' + JSON.stringify(raw))
+  }
+
+  // ②b 反过来：**除号**不能被当成正则开头（那会一路吃到下一个 `/`，把真代码吃掉 → 假绿）。
+  for (const raw of ['const x = a / b // c', 'const x = (a) / 2 // c', 'const x = n[0] / 2 // c', 'const x = 10 / 2 // c']) {
+    const stripped = stripComments(raw)
+    assert.equal(stripped.trimEnd(), raw.slice(0, raw.indexOf('//')).trimEnd(),
+      '除号要留住、行注释要剥掉：' + JSON.stringify(raw) + ' → ' + JSON.stringify(stripped))
+  }
+
+  // ③ 模板插值里的注释要剥，但模板本身（含 ${} 嵌套）要留住。
+  for (const raw of ['const t = `x${a // c\n}b`', 'const t = `x${ { k: 1 } // c\n}b`']) {
+    const stripped = stripComments(raw)
+    assert.equal(stripped.includes('// c'), false, '模板插值里的注释也要剥：' + JSON.stringify(raw))
+    assert.ok(stripped.includes('`x${a') || stripped.includes('`x${ { k: 1 }'), '模板开头要留住')
+    assert.ok(stripped.includes('}b`'), '模板收尾要留住：' + JSON.stringify(stripped))
+  }
+
+  // ④ 行号不变（注释位换成空格，换行保留），且幂等。
+  const multi = 'a // x\nb /* y\nz */ c\n'
+  assert.equal(stripComments(multi).split('\n').length, multi.split('\n').length, '行号不能变')
+  assert.equal(stripComments(stripComments(multi)), stripComments(multi), 'stripComments 必须幂等')
+})
+
+test('浏览器证据入库：门禁/模型场景留在正式 Chromium 套件里，且不依赖 /tmp 探针', () => {
+  const suitePath = join(ROOT, 'scripts', 'verify-panel-chromium.mjs')
+  const source = readFileSync(suitePath, 'utf8')
+
+  // A. 声明：17 条、不重复、id 与文案都在唯一真源里。
+  assert.equal(GATE_MODEL_SCENARIO_IDS.length, 17,
+    '门禁/模型场景必须正好 17 条（U1-V0…V6 共 7 + U5-V0…V6b 共 10），实际 ' + GATE_MODEL_SCENARIO_IDS.length)
+  assert.equal(new Set(GATE_MODEL_SCENARIO_IDS).size, 17, '场景 id 不能重复')
+  for (const id of GATE_MODEL_SCENARIO_IDS) {
+    // 可读名以 id 开头（后面可以跟「（M1 user）」这类限定词），SUMMARY 里要能一眼对上。
+    // 用负向断言排除「U5-V2b 被 U5-V2 前缀吃掉」。
+    assert.match(GATE_MODEL_SCENARIOS[id] || '', new RegExp('^' + id + '(?![A-Za-z0-9])'),
+      '场景 ' + id + ' 的可读名必须以 id 开头')
+  }
+
+  // B. 注册：spawn dry-run，拿「源码里实际注册了哪些场景」。
+  const dry = spawnSync(process.execPath, [suitePath, '--list-scenarios'], {
+    cwd: ROOT, encoding: 'utf8', timeout: 60000,
+    // dry-run 只解析仓库根，不启动浏览器、不连 DSH 安装。
+    env: { ...process.env, DSH_SUPERAGENT_REPO: ROOT },
+  })
+  assert.equal(dry.status, 0, 'dry-run --list-scenarios 必须 exit 0：' + (dry.stderr || dry.stdout))
+  const listed = JSON.parse(dry.stdout)
+  assert.deepEqual(listed.declared, GATE_MODEL_SCENARIO_IDS, 'dry-run 的 declared 必须来自 scripts/gate-model-scenarios.mjs')
+  assert.equal(listed.total, 17, 'dry-run 报的注册条数必须是 17')
+  assert.deepEqual([...listed.registered].sort(), [...GATE_MODEL_SCENARIO_IDS].sort(),
+    '套件里实际注册的场景必须和声明完全一致：少一条 = 场景被整段删掉；多一条/重复 = 漏登记或重复注册')
+
+  // C. 判据：每条场景的注册点都要带真判据，且不许有死代码。
+  // 所有结构性检查都跑在**剥掉注释**的代码上 —— 把注册点整段包进 `/* … */` 必须变红（Q2R R2）。
+  const code = stripComments(source)
+  for (const id of GATE_MODEL_SCENARIO_IDS) {
+    const call = new RegExp(GATE_MODEL_REGISTRAR + "\\(\\s*'" + id + "'\\s*,")
+    assert.equal(call.test(code), true, '场景 ' + id + ' 没有通过 ' + GATE_MODEL_REGISTRAR + ' 注册')
+    const gutted = new RegExp(GATE_MODEL_REGISTRAR + "\\(\\s*'" + id + "'\\s*,\\s*true\\b")
+    assert.equal(gutted.test(code), false, '场景 ' + id + ' 的判据是字面量 true（掏空断言）')
+  }
+  assert.equal(/if\s*\(\s*false\s*\)/.test(code), false,
+    '正式套件里不许出现 if (false)：那会把场景变成永不执行的死代码')
+
+  // D. 第三道闸本身也要有判据（Q2R R1）：`assertAllGateScenariosRan()` 是运行期兜底，
+  //    但静态护栏原来**没有引用它** —— 删掉那一行调用，`npm test` 仍全绿，闸门被静默移除。
+  //    这里把「定义还在」+「调用还在」都钉住（同样跑在剥注释后的代码上）。
+  assert.match(code, /function\s+assertAllGateScenariosRan\s*\(/,
+    '正式套件缺 assertAllGateScenariosRan 的定义（第三道闸被删了？）')
+  assert.match(code, /^[ \t]*assertAllGateScenariosRan\(\)[ \t]*$/m,
+    '正式套件没有调用 assertAllGateScenariosRan()：运行期完整性断言被静默移除，第三条闸失效')
+
   assert.ok(source.includes("url.pathname === '/session-superagent/gates' && method === 'GET'"),
     '正式套件缺 GET /gates fixture')
   assert.ok(source.includes("url.pathname === '/session-superagent/gates/models' && method === 'GET'"),
     '正式套件缺 GET /gates/models fixture')
   assert.ok(source.includes("'/__fixture/gate-delays'") && source.includes("'/__fixture/model-delays'"),
     '正式套件缺按请求注入延迟的 fixture 开关（迟到/乱序就没法复现）')
-  // 只在**代码行**里查探针路径：文件头注释写着「不依赖 /tmp 探针」，那正是要保留的说明。
-  const code = source.split('\n').filter((line) => !line.trim().startsWith('//')).join('\n')
+  // 请求折叠：不带 cache:'no-store' 时同 URL 的两次 GET 不会同时在途，U1-V3 / U5-V2b 会空转。
+  assert.ok(/nativeFetch\(input,\s*\{\s*\.\.\.\(init \|\| \{\}\),\s*cache:\s*'no-store'\s*\}\)/.test(code),
+    'harness 的 window.fetch 包装必须带 cache:no-store（否则同 URL 请求被折叠，乱序场景空转）')
+  // 探针路径只在代码里查：文件头注释里写着「不依赖 /tmp 探针」，那正是要保留的说明。
   assert.equal(/\/tmp\//.test(code), false, '正式套件代码不许依赖 /tmp 探针')
   assert.ok(source.includes('不是真实 WebView'), '必须写明 loopback fixture 不是真实 WebView')
 })

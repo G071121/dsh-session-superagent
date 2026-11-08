@@ -29,7 +29,7 @@ import { createHash } from 'node:crypto'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import http from 'node:http'
 import { delimiter, dirname, join, resolve } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const ELECTRON_EXE = 'DeepSeek Harness.exe'
 
@@ -104,6 +104,21 @@ const REPO = resolveRepo(process.env, import.meta.url, process.cwd())
 if (!REPO || !existsSync(join(REPO, 'client.js')) || !existsSync(join(REPO, 'package.json'))) {
   fail('仓库根无效（' + (REPO || '未解析到') + '）：请设 DSH_SUPERAGENT_REPO 指向含 client.js 的仓库根')
 }
+// 门禁 / 模型 17 条场景的唯一真源（scripts/gate-model-scenarios.mjs）。
+// 本文件常经 stdin 注入（`cat … | ego-browser nodejs`），静态 import 的相对说明符会按 ego 的
+// cwd 解析而找不到，所以只能按「仓库根的绝对 file URL」动态 import。
+const { GATE_MODEL_SCENARIOS, GATE_MODEL_SCENARIO_IDS } = await import(
+  pathToFileURL(join(REPO, 'scripts', 'gate-model-scenarios.mjs')).href)
+
+// dry-run 出口（Q2-2）：不启动浏览器、不连 DSH 安装，只报「源码里实际注册了哪些门禁/模型场景」。
+// 静态护栏（test/client.test.mjs）spawn 它，再把 registered 与 GATE_MODEL_SCENARIO_IDS 对集合 ——
+// 少一条（场景被整段删掉）、多一条（漏登记）、重复、或掏空成字面量 true，都会红。
+if (process.argv.includes('--list-scenarios')) {
+  const suiteSource = readFileSync(join(REPO, 'scripts', 'verify-panel-chromium.mjs'), 'utf8')
+  const registered = [...suiteSource.matchAll(/gateScenarioCheck\(\s*'([A-Za-z0-9-]+)'/g)].map((match) => match[1])
+  console.log(JSON.stringify({ declared: GATE_MODEL_SCENARIO_IDS, registered, total: registered.length }, null, 2))
+  process.exit(0)
+}
 const install = resolveInstall(process.env)
 const ASAR = install.asar
 const ELECTRON = install.electron
@@ -152,6 +167,32 @@ function check(name, pass, detail) {
   debug(line)
   console.log(line)
   return row.pass
+}
+
+// ── 门禁 / 模型场景注册（Q2-2）──────────────────────────────────────────────
+// 17 条 U1-V* / U5-V* 场景一律走这里，不再直接写 check('U1-V1 …', …)：
+//   ① 场景名只有一份（scripts/gate-model-scenarios.mjs），改文案不用同步两处；
+//   ② id 必须已声明，重复注册直接抛；
+//   ③ 收尾用 registeredGateScenarios 做完整性硬断言 —— 有场景被 if (false) 包住时，
+//      这里会抛错而不是静默少一条覆盖。
+const registeredGateScenarios = []
+function gateScenarioCheck(id, pass, detail) {
+  const name = GATE_MODEL_SCENARIOS[id]
+  if (!name) throw new Error('未声明或拼错的门禁/模型场景 id：' + id)
+  if (registeredGateScenarios.includes(id)) throw new Error('门禁/模型场景重复注册：' + id)
+  registeredGateScenarios.push(id)
+  return check(name, pass, detail)
+}
+
+/** 收尾硬断言：17 条必须条条真的跑到。少一条就抛（=> 脚本执行完成 FAIL + exit 1）。 */
+function assertAllGateScenariosRan() {
+  const missing = GATE_MODEL_SCENARIO_IDS.filter((id) => !registeredGateScenarios.includes(id))
+  const extra = registeredGateScenarios.filter((id) => !GATE_MODEL_SCENARIO_IDS.includes(id))
+  if (missing.length === 0 && extra.length === 0 && registeredGateScenarios.length === GATE_MODEL_SCENARIO_IDS.length) return
+  throw new Error('门禁/模型场景没有全部执行：实跑 ' + registeredGateScenarios.length
+    + '/' + GATE_MODEL_SCENARIO_IDS.length
+    + (missing.length ? '，缺 ' + missing.join(',') : '')
+    + (extra.length ? '，多 ' + extra.join(',') : ''))
 }
 
 function observe(name, detail) {
@@ -250,7 +291,12 @@ window.fetch = (input, init) => {
     window.__networkViolations.push(detail);
     return Promise.reject(new Error('harness 禁止外部请求：' + url.href));
   }
-  return nativeFetch(input, init);
+  // Q2 修复（v6）：同 URL 的在途 GET 会被 Chromium「请求折叠」（第二次要等第一次响应结束才发出），
+  // 于是「同仓库两次读取乱序」（U1-V3 / U5-V2b）根本构造不出来 —— 服务端看到两次请求间隔
+  // 恒等于首条注入延迟（实测 2006ms / 3003ms），拆掉 client.js 的序号闸门也照样全绿。
+  // 响应头 cache-control: no-store 挡不住折叠，必须在 fetch init 里显式 cache: 'no-store'。
+  // 只改 harness，不碰产品代码（client.js 的 call() 保持原样）。
+  return nativeFetch(input, { ...(init || {}), cache: 'no-store' });
 };
 `
 
@@ -1196,8 +1242,12 @@ try {
   await openSettings('门禁')
   await page.waitForFunction(() => [...document.querySelectorAll('.dt-settings-body .dt-section-name')]
     .some((node) => node.textContent === '门禁'), undefined, { timeout: 20000 })
-  check('U1-V0 门禁分区真实渲染且第一次读取由真实 effect 发出',
-    gateGets('D:/fixture/work/apple').length === 1, { requests: gateRace.requests })
+  // Q2-4：语义下界（挂载后至少发一条读取）+ 此刻所有 /gates 读取都属于 apple，
+  // 不钉「当前实现恰好一条」的精确次数。
+  gateScenarioCheck('U1-V0',
+    gateGets('D:/fixture/work/apple').length >= 1
+      && gateGets().every((row) => row.repo === 'D:/fixture/work/apple'),
+    { requests: gateRace.requests })
 
   // 场景 V1（U1-G1）：跨仓库乱序。apple 的响应迟到，banana 先回；旧仓库的响应不能把数据切回去。
   await fixturePost('/__fixture/workdir', { repo: 'D:/fixture/work/banana' })
@@ -1205,7 +1255,7 @@ try {
   await waitGateValue('仓库 D:/fixture/work/banana 的提示词 #1')
   await sleep(2300)
   const lateApple = { value: await gateValue(), body: await gateBodyText() }
-  check('U1-V1 乱序（跨仓库）：迟到的旧仓库响应不覆盖新仓库数据',
+  gateScenarioCheck('U1-V1',
     lateApple.value === '仓库 D:/fixture/work/banana 的提示词 #1' && !lateApple.body.includes('apple 的提示词'),
     { value: lateApple.value, requests: gateRace.requests })
 
@@ -1218,7 +1268,7 @@ try {
   const dirtyAfterFill = await page.evaluate(() => document.querySelector('.dt-settings-body .dt-savebar')?.textContent || '')
   await sleep(2400)
   const inFlightDirty = { value: await gateValue(), savebar: await page.evaluate(() => document.querySelector('.dt-settings-body .dt-savebar')?.textContent || '') }
-  check('U1-V2 在途 dirty：响应回来时不清掉新草稿',
+  gateScenarioCheck('U1-V2',
     inFlightDirty.value === '手工草稿-未保存' && inFlightDirty.savebar.includes('未保存') && dirtyAfterFill.includes('未保存'),
     { ...inFlightDirty, dirtyAfterFill })
 
@@ -1253,7 +1303,7 @@ try {
   // 语义断言：面板必须落在「最后一次发出的 damson 读取」上；不钉「点了两次就一定是 #3」
   // （将来把同帧两次读取合并成一次是合理优化，那时 lastDamson.seq 会变小，断言仍然成立）。
   const lastDamson = gateGets('D:/fixture/work/damson').at(-1)
-  check('U1-V3 乱序（同仓库）：先发的后到不能覆盖最新一次读取',
+  gateScenarioCheck('U1-V3',
     Boolean(lastDamson) && sameRepo.value === '仓库 D:/fixture/work/damson 的提示词 #' + lastDamson.seq
       && !sameRepo.body.includes('damson 的提示词 #2'),
     { value: sameRepo.value, last: lastDamson, requests: gateRace.requests })
@@ -1269,7 +1319,7 @@ try {
   await clickButton(".dt-settings-body [aria-label='切换仓库确认']", '取消')
   await page.waitForFunction(() => (document.querySelector('.dt-settings-body')?.innerText || '').includes('已保留草稿'), undefined, { timeout: 20000 })
   const elderAfterCancel = gateGets('D:/fixture/work/elder').length
-  check('U1-V4 取消换仓库：保留草稿且不去读新仓库',
+  gateScenarioCheck('U1-V4',
     confirmText.includes('仓库已切换到 D:/fixture/work/elder') && elderBefore === 0 && elderAfterCancel === 0
       && (await gateValue()) === '保存前草稿-保留',
     { confirmText, elderBefore, elderAfterCancel, value: await gateValue() })
@@ -1281,7 +1331,7 @@ try {
   await clickButton('.dt-settings-body .dt-savebar', '保存')
   await sleep(500)
   const saveRequest = gateRace.requests.find((row) => row.method === 'POST' && row.path === '/session-superagent/gates')
-  check('U1-V5 targetRepo：保存/预览写的是 GET 回显的 data.repo（不是刚切过去的仓库）',
+  gateScenarioCheck('U1-V5',
     Boolean(previewRequest && saveRequest)
       && JSON.parse(previewRequest.body).repo === 'D:/fixture/work/damson'
       && JSON.parse(saveRequest.body).repo === 'D:/fixture/work/damson',
@@ -1297,7 +1347,7 @@ try {
     document.querySelector('#gate-semantic-prompt')?.value || ''), undefined, { timeout: 25000 })
   await sleep(400)
   const afterSave = { value: await gateValue(), body: await gateBodyText() }
-  check('U1-V6 保存成功后按当前仓库重读并清掉保留草稿提示',
+  gateScenarioCheck('U1-V6',
     /^仓库 D:\/fixture\/work\/elder 的提示词 #\d+$/.test(afterSave.value || '') && !afterSave.body.includes('已保留草稿'),
     afterSave)
 
@@ -1371,7 +1421,7 @@ try {
   await waitGateRepo('D:/fixture/work/alpha')
   await waitModelRepo('D:/fixture/work/alpha')
   const alphaRequests = modelGets('D:/fixture/work/alpha')
-  check('U5-V0 切仓库后模型列表跟随面板仓库读取（alpha）',
+  gateScenarioCheck('U5-V0',
     alphaRequests.length >= 1 && (await modelValues()).some((value) => value.startsWith('group/model-alpha-')),
     { requests: alphaRequests, values: await modelValues() })
 
@@ -1387,8 +1437,10 @@ try {
   const m1Fresh = modelGets().slice(beforeM1)
   const m1Values = await modelValues()
   const m1Banner = await bannerText()
-  check('U5-V1（M1 user）保留草稿：按钮只读草稿来源 alpha，不读新仓库 bravo，下拉不含 bravo 模型',
-    m1Fresh.length === 1 && m1Fresh[0].repo === 'D:/fixture/work/alpha'
+  // Q2-4：语义下界（>=1 条 + 每条 repo 全等）—— 将来把重复 load 合并或加一条重试不会假红；
+  // 「下拉不含 bravo 模型」「不读 bravo」是负面断言，原样保留。
+  gateScenarioCheck('U5-V1',
+    m1Fresh.length >= 1 && m1Fresh.every((row) => row.repo === 'D:/fixture/work/alpha')
       && modelGets('D:/fixture/work/bravo').length === 0
       && m1Values.some((value) => value.startsWith('group/model-alpha-'))
       && !m1Values.some((value) => value.startsWith('group/model-bravo-'))
@@ -1417,13 +1469,13 @@ try {
   const m2RestoredRows = modelGets().slice(beforeGateSwitch)
   const m2Restored = m2RestoredRows.at(-1)
   // 语义下界：闸门挡住后至少重读一条 bravo（不钉当前实现重复 load 的精确次数），且绝不读 charlie。
-  check('U5-V2（M2）闸门挡住 charlie 时：重读 bravo models（>=1 条）、没有 charlie models 请求',
+  gateScenarioCheck('U5-V2',
     m2RestoredRows.length >= 1 && m2RestoredRows.every((row) => row.repo === 'D:/fixture/work/bravo')
       && m2Restored !== r1 && modelGets('D:/fixture/work/charlie').length === 0,
     { restoredRows: m2RestoredRows, r1, charlie: modelGets('D:/fixture/work/charlie') })
   await sleep(3400)
   const m2Late = await modelValues()
-  check('U5-V2b 被作废的在途 bravo 列表（seq 更小）迟到后不能覆盖最新列表',
+  gateScenarioCheck('U5-V2b',
     Boolean(r1) && !m2Late.includes(modelIdFor('D:/fixture/work/bravo', r1.seq))
       && Boolean(m2Restored) && m2Late.includes(modelIdFor('D:/fixture/work/bravo', m2Restored.seq)),
     { lateValues: m2Late, r1, restored: m2Restored })
@@ -1457,14 +1509,14 @@ try {
     values: await modelValues(),
     disabled: await modelSelectDisabled(),
   }
-  check('U5-V3a 渲染护栏：面板已切 delta、列表还是 charlie 时提示忽略，下拉只剩当前值',
+  gateScenarioCheck('U5-V3a',
     guard.visible && guard.options === 1 && guard.values.length === 1
       && Boolean(rDelta) && rDelta.repo === 'D:/fixture/work/delta',
     { guard, rDelta, charlie: rCharlie })
   await waitModelRepo('D:/fixture/work/delta')
   await sleep(2600)
   const late = { values: await modelValues(), stale: await modelStaleVisible() }
-  check('U5-V3b 迟到的 charlie 列表不能覆盖 delta（跨仓库响应丢弃），护栏消失',
+  gateScenarioCheck('U5-V3b',
     Boolean(rCharlie) && !late.values.includes(modelIdFor('D:/fixture/work/charlie', rCharlie.seq))
       && late.values.some((value) => value.startsWith('group/model-delta-'))
       && Boolean(rDelta) && late.values.includes(modelIdFor('D:/fixture/work/delta', rDelta.seq))
@@ -1484,7 +1536,7 @@ try {
   const m4 = { values: await modelValues(), requests: modelGets('D:/fixture/work/echo') }
   // 语义下界：确认后至少一条读 echo 的 models（当前实现还会有一条草稿清空后的补读；
   // 合并重复 load 是合理优化，所以这里不钉精确次数）。
-  check('U5-V4（M4）确认放弃草稿并切换：模型列表跟着切到 echo（>=1 条），不含 delta 模型',
+  gateScenarioCheck('U5-V4',
     echoBefore === 0 && m4.requests.length >= 1
       && m4.requests.every((row) => row.repo === 'D:/fixture/work/echo')
       && m4.values.some((value) => value.startsWith('group/model-echo-'))
@@ -1504,7 +1556,7 @@ try {
   await sleep(700)
   const cancelFresh = modelGets().slice(beforeCancel)
   const m5 = { values: await modelValues(), fresh: cancelFresh, foxtrot: modelGets('D:/fixture/work/foxtrot') }
-  check('U5-V5（U2-F2）取消换仓库：保留草稿、重读 echo 模型（>=1 条），不读 foxtrot',
+  gateScenarioCheck('U5-V5',
     cancelFresh.length >= 1 && cancelFresh.every((row) => row.repo === 'D:/fixture/work/echo')
       && m5.foxtrot.length === 0
       && (await gateValue()) === 'U5 取消切换草稿'
@@ -1529,7 +1581,7 @@ try {
       undefined, { timeout: 4000 })
     dirty = true
   } catch {}
-  check('U5-V6a 项目层前提：作用域可切「项目」、模型下拉禁用、草稿能变脏',
+  gateScenarioCheck('U5-V6a',
     scopeSwitch.ok === true && projectDisabled === true && dirty === true,
     { scopeSwitch, projectDisabled, dirtied, dirty })
   await switchRepoOnly('D:/fixture/work/golf')
@@ -1543,11 +1595,16 @@ try {
     values: await modelValues(), fresh: freshProject, golf: modelGets('D:/fixture/work/golf'),
     projectDisabled, dirty, dirtied, bannerShown, seq: modelRace.seq.get('D:/fixture/work/foxtrot'),
   }
-  check('U5-V6b（M1 project）项目层保留草稿：确认条在、按钮读草稿来源 foxtrot，不读 golf',
-    bannerShown && projectDisabled === true && freshProject.length === 1
-      && freshProject[0].repo === 'D:/fixture/work/foxtrot' && m6.golf.length === 0
+  // Q2-4：语义下界（>=1 条 + 每条 repo 全等），不钉「当前实现恰好发一条」的精确次数；
+  // 「不读 golf」是负面断言，原样保留。
+  gateScenarioCheck('U5-V6b',
+    bannerShown && projectDisabled === true && freshProject.length >= 1
+      && freshProject.every((row) => row.repo === 'D:/fixture/work/foxtrot') && m6.golf.length === 0
       && m6.values.includes(modelIdFor('D:/fixture/work/foxtrot', m6.seq)),
     m6)
+  // Q2-2 收尾硬断言：17 条门禁/模型场景必须条条真的跑到（有场景被 if (false) 包住时，
+  // 这里抛错 => 「脚本执行完成」FAIL => exit 1，而不是静默少一条覆盖）。
+  assertAllGateScenariosRan()
   // 收尾：清掉草稿切到 golf，避免后续 orbit 段落在确认条上。
   if (bannerShown) {
     await clickButton(".dt-settings-body [aria-label='切换仓库确认']", '放弃草稿并切换')

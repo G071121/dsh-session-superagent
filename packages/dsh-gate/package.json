@@ -1,6 +1,6 @@
 {
   "name": "@mycf711/dsh-gate",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "内容层门禁：四层配置、确定性规则与可选语义复审，可作为 DSH 插件依赖独立安装。",
   "type": "module",
   "main": "lib/index.js",
