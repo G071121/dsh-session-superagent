@@ -8,9 +8,9 @@
 import { execFileSync, spawnSync } from 'node:child_process'
 import { FAST_SKIPS } from './preflight-modes.mjs'
 import { acquireGate } from './gate-lock.mjs'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve as resolvePath } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
@@ -19,16 +19,51 @@ const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 // v3 审查 R4：第四段「门禁子包漂移」的解析一直只有人工实跑，没有仓库内用例 ——
 // 于是 `test/sync-profile-drift.test.mjs` 需要 import 下面的纯函数来钉住 clean / drift 两种文案。
 // 被 import 时不能跑整轮门禁（node --test 会 import 本文件），所以主体包在 IS_MAIN 里。
-// 判据用 import.meta.main（Node 22.18+/24）—— 它按「是不是入口模块」判，不受调用路径影响；
-// 老 Node 没有这个字段时退回 argv[1] 比对，比对不出来就**当 CLI 跑**（宁可多跑，不许静默不跑）。
-const IS_MAIN = (() => {
-  if (typeof import.meta.main === 'boolean') return import.meta.main
+//
+// 主入口判定（S1 v5 / v4 审查 F8）：直接执行与 import 必须走**同一套**判断。
+// Node 22.18+/24 有 `import.meta.main`（按「是不是入口模块」判，不受路径写法影响），以它为准。
+// 老 Node 没有这个字段，只能拿 `import.meta.url` 和 `process.argv[1]` 比路径 ——
+// 以前是**逐字符**比较：相对路径、`..`、symlink、Windows 大小写，任意一种都能让「直接执行」
+// 被误判成 import，于是整轮门禁**静默 exit 0**（无输出、无锁、CI 绿）。这比少跑一项更坏：它是假绿。
+// 所以兜底只允许两种落点，都不许静默成功：
+//   - 比得上（规范化 + realpath 后相同，Windows 忽略大小写）→ 当 CLI 跑；
+//   - 比不了（没有 argv[1] / realpath 抛错）→ 也当 CLI 跑（宁可多跑，不许静默不跑）。
+// 只有「两边都是确定的真实路径且确实不同」才判 false（= 被 import，只导出纯函数）。
+/**
+ * 纯函数：根据 `import.meta.main` 与 `argv[1]` 判断「本模块是不是进程入口」。
+ *
+ * 抽成纯函数是为了让回退分支（老 Node）能在仓库内用用例钉住 —— 它正是静默 exit 0 的来源。
+ *
+ * @param {{ mainFlag?: unknown, moduleUrl: string, argv1?: string, realpath?: (path: string) => string }} input
+ * @returns {boolean}
+ */
+export function resolveIsMain({
+  mainFlag,
+  moduleUrl,
+  argv1,
+  realpath = (path) => realpathSync.native(path),
+}) {
+  if (typeof mainFlag === 'boolean') return mainFlag
+  if (!argv1) return true
+  const toPath = (value) => {
+    const text = String(value)
+    return /^file:\/\//i.test(text) ? fileURLToPath(text) : resolvePath(text)
+  }
   try {
-    return fileURLToPath(import.meta.url) === process.argv[1]
+    const self = realpath(toPath(moduleUrl))
+    const entry = realpath(toPath(argv1))
+    // Windows 文件系统大小写不敏感：大小写不同仍是同一个入口（否则又静默不跑）
+    return process.platform === 'win32' ? self.toLowerCase() === entry.toLowerCase() : self === entry
   } catch {
     return true
   }
-})()
+}
+
+export const IS_MAIN = resolveIsMain({
+  mainFlag: import.meta.main,
+  moduleUrl: import.meta.url,
+  argv1: process.argv[1],
+})
 
 /**
  * 解析 `node scripts/sync-profile.mjs --check` 的输出 → 这一行怎么记、详情怎么写。
