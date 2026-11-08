@@ -29,10 +29,32 @@ import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
+  DEFAULT_GATE_LOCK_POLL_MS,
+  DEFAULT_GATE_LOCK_STALE_MS,
+  DEFAULT_GATE_LOCK_TIMEOUT_MS,
+  DEFAULT_GATE_RENAME_ATTEMPTS,
+  DEFAULT_GATE_RENAME_BACKOFF_MS,
+  acquireGateConfigLock,
+  renameWithRetry,
+  sleepSync,
+} from './config-lock.js'
+import {
   SEMANTIC_TRIGGERS,
   normalizeSemanticConfig,
   semanticReview,
 } from './semantic.js'
+
+export {
+  DEFAULT_GATE_LOCK_POLL_MS,
+  DEFAULT_GATE_LOCK_STALE_MS,
+  DEFAULT_GATE_LOCK_TIMEOUT_MS,
+  DEFAULT_GATE_RENAME_ATTEMPTS,
+  DEFAULT_GATE_RENAME_BACKOFF_MS,
+  GATE_LOCK_SUFFIX,
+  acquireGateConfigLock,
+  gateLockPath,
+  renameWithRetry,
+} from './config-lock.js'
 
 export {
   SEMANTIC_TRIGGERS,
@@ -536,55 +558,80 @@ export function readGateScope(scope, { repo = process.cwd(), home = homedir(), e
  * - 入参 `extends: true | 'default' | '<路径>' | {…}`：抛错（含配置路径与解决方式）；
  * - 文件里已有这类共享 `extends`：不管入参写什么（包括 `false`）都抛错，绝不静默冲掉基规则；
  * - 文件里已有 `false | 'none'` 而入参没写：原样保留，避免「替换」悄悄退化成「合并」。
+ *
+ * 并发（C1）：整段「读旧文件 → 校验 → 备份 → 临时写入 → rename」在同一路径的跨进程写锁内串行，
+ * 两个写者不会拿着旧快照互相覆盖；拿不到锁显式失败（`code: 'gate_lock_timeout'`），**不**退回无锁写。
+ * Windows 上目标文件被占用时 rename 会 EPERM / EBUSY：`renameAttempts` 次有界退避重试，
+ * 最终失败保留原文件、清理临时文件。
+ *
+ * @returns {{ path: string, config: object, lock: { path: string, waitedMs: number, broken: Array<object> } }}
+ * `lock.broken` 是本次接管过的 stale 锁证据（年龄 + 所有者），没有接管就是空数组。
  */
-export function writeGateConfig(scope, config, { repo = process.cwd(), home = homedir(), env = process.env } = {}) {
+export function writeGateConfig(scope, config, {
+  repo = process.cwd(),
+  home = homedir(),
+  env = process.env,
+  lockTimeoutMs = DEFAULT_GATE_LOCK_TIMEOUT_MS,
+  lockPollMs = DEFAULT_GATE_LOCK_POLL_MS,
+  lockStaleMs = DEFAULT_GATE_LOCK_STALE_MS,
+  renameAttempts = DEFAULT_GATE_RENAME_ATTEMPTS,
+  renameBackoffMs = DEFAULT_GATE_RENAME_BACKOFF_MS,
+  // 测试注入点：Windows 上真实的 EPERM 无法稳定制造，用替身证明退避重试与失败清理。
+  rename = renameSync,
+  sleep = sleepSync,
+} = {}) {
   if (scope !== 'user' && scope !== 'project' && scope !== 'local') {
     throw new Error('scope 只能是 user / project / local')
   }
   const path = configPathFor(scope, { repo, home, env })
-  const input = config && typeof config === 'object' && !Array.isArray(config) ? config : {}
-  // 1) 调用方传入的 extends：能原样保留的写回，其余显式报错。
-  const incoming = hasOwn(input, 'extends') ? classifyExtends(input.extends) : EXTENDS_ABSENT
-  if (incoming === EXTENDS_SHARED || incoming === EXTENDS_INVALID) {
-    throw extendsWriteError('incoming', path, input.extends)
-  }
-  // 2) 磁盘上已有的 extends：整层重写会把它冲掉，同样不能无提示改写。
-  const existing = existingExtends(path)
-  if (existing.kind === EXTENDS_SHARED || existing.kind === EXTENDS_INVALID) {
-    throw extendsWriteError('existing', path, existing.value)
-  }
-  // 3) 可安全保留的值：入参优先；入参没写就用文件里已有的（否则等于悄悄改了语义）。
-  const keepExtends = incoming === EXTENDS_KEEP
-    ? { value: input.extends }
-    : existing.kind === EXTENDS_KEEP
-      ? { value: existing.value }
-      : null
-  const checked = validateConfig(config)
-  if (!checked.ok) throw new Error(checked.error)
-  const normalized = checked.config
-  // 明确的字段顺序：extends 跟在 name 后面，读文件的人一眼能看到这一层挂在哪。
-  const output = {
-    version: normalized.version,
-    name: normalized.name,
-    ...(keepExtends ? { extends: keepExtends.value } : {}),
-    rules: normalized.rules,
-    semantic: normalized.semantic,
-  }
   mkdirSync(dirname(path), { recursive: true })
-  const tmp = path + '.tmp-' + process.pid + '-' + Date.now()
+  const lock = acquireGateConfigLock(path, { timeoutMs: lockTimeoutMs, pollMs: lockPollMs, staleMs: lockStaleMs, sleep })
   try {
-    if (existsSync(path)) copyFileSync(path, path + '.bak')
-    writeFileSync(tmp, JSON.stringify(output, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
-    renameSync(tmp, path)
-  } catch (error) {
-    try {
-      if (existsSync(tmp)) unlinkSync(tmp)
-    } catch {
-      // 清理失败不覆盖原始错误
+    const input = config && typeof config === 'object' && !Array.isArray(config) ? config : {}
+    // 1) 调用方传入的 extends：能原样保留的写回，其余显式报错。
+    const incoming = hasOwn(input, 'extends') ? classifyExtends(input.extends) : EXTENDS_ABSENT
+    if (incoming === EXTENDS_SHARED || incoming === EXTENDS_INVALID) {
+      throw extendsWriteError('incoming', path, input.extends)
     }
-    throw error
+    // 2) 磁盘上已有的 extends：整层重写会把它冲掉，同样不能无提示改写。
+    const existing = existingExtends(path)
+    if (existing.kind === EXTENDS_SHARED || existing.kind === EXTENDS_INVALID) {
+      throw extendsWriteError('existing', path, existing.value)
+    }
+    // 3) 可安全保留的值：入参优先；入参没写就用文件里已有的（否则等于悄悄改了语义）。
+    const keepExtends = incoming === EXTENDS_KEEP
+      ? { value: input.extends }
+      : existing.kind === EXTENDS_KEEP
+        ? { value: existing.value }
+        : null
+    const checked = validateConfig(config)
+    if (!checked.ok) throw new Error(checked.error)
+    const normalized = checked.config
+    // 明确的字段顺序：extends 跟在 name 后面，读文件的人一眼能看到这一层挂在哪。
+    const output = {
+      version: normalized.version,
+      name: normalized.name,
+      ...(keepExtends ? { extends: keepExtends.value } : {}),
+      rules: normalized.rules,
+      semantic: normalized.semantic,
+    }
+    const tmp = path + '.tmp-' + process.pid + '-' + Date.now()
+    try {
+      if (existsSync(path)) copyFileSync(path, path + '.bak')
+      writeFileSync(tmp, JSON.stringify(output, null, 2) + '\n', { encoding: 'utf8', mode: 0o600 })
+      renameWithRetry(tmp, path, { attempts: renameAttempts, backoffMs: renameBackoffMs, rename, sleep })
+    } catch (error) {
+      try {
+        if (existsSync(tmp)) unlinkSync(tmp)
+      } catch {
+        // 清理失败不覆盖原始错误
+      }
+      throw error
+    }
+    return { path, config: output, lock: { path: lock.path, waitedMs: lock.waitedMs, broken: lock.broken } }
+  } finally {
+    lock.release()
   }
-  return { path, config: output }
 }
 
 /**
