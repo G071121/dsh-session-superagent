@@ -18,7 +18,8 @@
 ## 二、当前状态（2026-11-09）
 
 ```text
-分支        main（以 origin/main 为准，2026-11-09 为 2ba7ada = PR #33 交接刷新 merge；发布 commit ec36ddec = PR #31）
+分支        main（主仓 D:\主工作区\projects\dsh-session-superagent；HEAD 以 origin/main 为准，2026-11-09 为 9df0fe2；发布 commit ec36ddec = PR #31）
+仓库结构    主仓 + 5 个 worktree（v6-integration / gate-adapter / gate-core / deep-ui / 主仓 main）；旧的 .tmp-issue9-push 已迁移，51 棵历史 worktree 已清理，本地 tag 已与远端对齐
 版本        0.10.12 / gate 0.1.5；tag v0.10.12 / gate-v0.1.5（远端已推、可达 main）；Release v0.10.12 = Latest
 npm         dist-tags.latest = 0.10.12 / 0.1.5（双包已发布）
 工作区      clean；安装副本 %DSH_HOME%\profiles\desktop\node_modules\... 已 --repair 到四段全零（只声明磁盘一致）
