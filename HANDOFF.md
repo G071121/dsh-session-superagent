@@ -5,19 +5,20 @@
 
 ## 1. 一句话现状
 
-**v6 已发布：主包 `0.10.12` / `@mycf711/dsh-gate@0.1.5`。** PR **#31** 以 merge commit **`ec36ddec`** 合并进 main，
-tag `v0.10.12` / `gate-v0.1.5` 都指向它且可达 main，npm 双包已发布、GitHub Release `v0.10.12` = Latest、
-main CI（Node 22/24）绿、profile 已 `--repair` 到四段全零（只声明磁盘一致）。**没有遗留开发分支待合并。**
+**v6 已发布：主包 `0.10.12` / `@mycf711/dsh-gate@0.1.5`。** PR **#31** 以 merge commit **`ec36ddec`** 发布，
+回填 PR **#32** 合并后 **main HEAD = `d8359e5`**。tag `v0.10.12` / `gate-v0.1.5` 都指向 `ec36ddec` 且可达 main，
+npm 双包已发布、GitHub Release `v0.10.12` = Latest、main CI（Node 22/24）绿、
+profile 已 `--repair` 到四段全零（只声明磁盘一致）。**没有遗留开发分支待合并。**
 
 ## 2. 仓库与版本基线
 
 - GitHub：`MYCF711/dsh-session-superagent`
-- 正式 main：**`ec36ddec`**（`Merge pull request #31 from MYCF711/task/gate-v6-integration`）
+- 正式 main：**`d8359e5`**（`Merge pull request #32` docs 回填）；发布 commit = **`ec36ddec`**（PR #31 的 merge，两个 tag 指向它）
 - npm 实测：主包 **`0.10.12`**、gate **`0.1.5`**（`dist-tags.latest` 两者都是新版本）
 - tag：`v0.10.12` / `gate-v0.1.5`（annotated，解引用都是 `ec36ddec`）
 - GitHub Release：`v0.10.12`（Latest，标题只写版本号）+ `gate-v0.1.5`
 - v6 任务书：`docs/任务书-dsh-gate-v6.md`，提交 `c3753a1`
-- 当前工作树：`D:\主工作区\projects\dsh-gate-v6-integration`，分支 `task/gate-v6-backfill`（docs 回填 PR，从 `ec36ddec` 起）
+- 当前工作树：`D:\主工作区\projects\dsh-gate-v6-integration`，分支 `task/gate-v6-handoff-refresh`（本次交接刷新，从 `d8359e5` 起）；本地 `main` 引用被另一 worktree 占用且落后，**一律以 `origin/main` 为准**
 - 另一棵只含任务书的树：`D:\主工作区\projects\dsh-gate-v5-integration`，`feat/gate-v6` @ `c3753a1`
 
 **不要把旧 `.tmp-issue9-push-20261106-1244` 或其它历史 worktree 当成最新代码。**
@@ -38,7 +39,8 @@ f5dc66d  merge S1
 628a32a  merge B1
 b580681  docs: gate v6 独立验收报告（V1）
 33b107c  release: 0.10.12（门禁 v6 锁回收、profile 原子性与模型证据）
-ec36ddec Merge pull request #31  ← 当前 main
+ec36ddec Merge pull request #31  ← 发布 merge（两个 tag 指向它）
+d8359e5  Merge pull request #32  ← 当前 main（docs 回填）
 ```
 
 ## 4. 交付链路（全部已完成）
@@ -53,6 +55,7 @@ ec36ddec Merge pull request #31  ← 当前 main
 | 收尾修复（t5） | R1/R2 已修（存在性护栏 + 八态去注释状态机），两向变异验证 | `docs/报告-gate-v6收尾修复.md` |
 | I1-prep（t6） | 版本 bump + 文档计数 + `check-maintenance` 范围 + 本地提交 `33b107c` | `docs/报告-gate-v6I1-prep.md` |
 | 发布（t7） | PR #31 → merge `ec36ddec`；tag / Release / npm / main CI / profile 全绿 | 见 §5 |
+| 回填（t8） | PR #32 → merge `d8359e5`（仅 4 份文档）；回填后 main CI `42553248097` success | PR #32 |
 
 ## 5. 发布后实测计数（跑过才算）
 
@@ -63,7 +66,7 @@ ec36ddec Merge pull request #31  ← 当前 main
 - 正式 Chromium：**64/64**（安装版前端 `0.2.2-rc.1`、Chromium 156、loopback fixture，**不是**真实 WebView；14 条截图通道 SKIP）
 - `check-maintenance`：**6/6**（③ `v0.10.12`、④ `ec36ddec`、⑤ 四处版本一致、⑥ 干净）
 - `sync-profile --check`：**缺失 0 / 断链 0 / 陈旧 0 / 门禁子包漂移 0**（只声明磁盘副本一致）
-- main CI run `42551155750`：Node 22 / 24 均 success（首次红在「维护一致性」，原因见下）
+- main CI：发布 run `42551155750`（首次红在「维护一致性」，原因见下，rerun 后绿）；回填后 run `42553248097` 一次 success
 
 ## 6. 发布期踩到的一次竞态（已记录，别再踩）
 
@@ -101,7 +104,7 @@ REPO_W=$(pwd -W)
 ## 9. 硬约束
 
 - 禁止重启/关闭 DSH；禁止动 magpie proxy；禁止直接写 `cordis.patch.yml`。
-- 团队 `dsh-gate-v6`：子代理固定 `group/deepseek-v4.1-flash-1017`、`reasoning_effort=max`；automatic 审批。
+- 团队 `dsh-gate-v6` 已归档（2026-11-09 发布后）；如重建：子代理固定 `group/deepseek-v4.1-flash-1017`、`reasoning_effort=max`、automatic 审批。
 - 每个实现分支独立 worktree、同文件单写者；**禁止 `git add -A`**、禁止强推、禁止改别人 PR 分支。
 - main 受保护，必须 PR + Node 22/24 两个检查；tag 必须可达 main，不能 squash 脱钩。
 - 不向外部仓库发 PR；凭证与本机路径不外泄。
@@ -112,5 +115,6 @@ REPO_W=$(pwd -W)
 
 - PR #27/#28：v4 已发布并 ack。
 - PR #29/#30：v5 已发布并 ack（main `7846678`）。
-- PR #31：**v6 已发布并 ack**（main `ec36ddec`，0.10.12 / gate 0.1.5）。
+- PR #31：**v6 已发布并 ack**（发布 merge `ec36ddec`，0.10.12 / gate 0.1.5）。
+- PR #32：v6 发布回填已合并并 ack（main `d8359e5`，仅 4 份文档）。
 - issue #19（awesome-ai-plugins 邀请）：**不处理、不关闭、不回复**。
