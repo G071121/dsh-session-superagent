@@ -10,7 +10,8 @@
  *   3. 当前版本有本地 git tag `vX.Y.Z`
  *   4. 该 tag 指向已提交的 commit（不是悬空）
  *   5. README 徽章 / lib/index.js / client.js 的版本与 package.json 一致
- *   6. 自上个 tag 以来动过 lib/ 或 client.js，但版本没 bump —— 提示（不判失败）
+ *   6. 自上个 tag 以来动过运行时 / 工装代码（`lib/`、`client.js`、`packages/dsh-gate/{lib,bin,gates}`、
+ *      `scripts/`），但版本没 bump —— 提示（不判失败）
  *
  * 用法：node scripts/check-maintenance.mjs [--json]
  */
@@ -68,9 +69,28 @@ const consistent = [badge, serverV, clientV].every((v) => v === version)
 check('README 徽章 / lib / client 版本一致', consistent, 'package=' + version + ' badge=' + (badge || '?') + ' server=' + (serverV || '?') + ' client=' + (clientV || '?'))
 
 // ⑥ 改了代码但没 bump（提示，不失败）
-const since = tags.has(tag) ? run('git', ['diff', '--name-only', tag + '..HEAD', '--', 'lib/', 'client.js']) : ''
-const dirty = since.split('\n').filter(Boolean).length
-check('自上个 tag 起未改动运行时代码（未 bump 不算错，只提示）', dirty === 0, dirty === 0 ? '干净' : dirty + ' 个文件已改，尚未 bump 版本')
+//
+// 扫描范围（V1 R1 / Q1-7）：只扫根 `lib/` + `client.js` 会漏掉 v6 起真正在变的那一半 ——
+// 门禁子包的锁 / 配置实现（`packages/dsh-gate/lib`）、它的 bin 与默认规则，以及 `scripts/` 里的工装。
+// 后果很具体：子包改了、根没改，这条会对着已改的子包报「干净」，让人以为不用 bump 子包版本。
+const CODE_PATHS = [
+  'lib/',
+  'client.js',
+  'packages/dsh-gate/lib/',
+  'packages/dsh-gate/bin/',
+  'packages/dsh-gate/gates/',
+  'scripts/',
+]
+const since = tags.has(tag) ? run('git', ['diff', '--name-only', tag + '..HEAD', '--', ...CODE_PATHS]) : ''
+const dirtyFiles = since.split('\n').filter(Boolean)
+const dirty = dirtyFiles.length
+check(
+  '自上个 tag 起未改动运行时代码（未 bump 不算错，只提示）',
+  dirty === 0,
+  dirty === 0
+    ? '干净（已扫 lib/ client.js packages/dsh-gate/{lib,bin,gates} scripts/）'
+    : dirty + ' 个文件已改，尚未 bump 版本：' + dirtyFiles.slice(0, 5).join(' / ') + (dirty > 5 ? ' …' : ''),
+)
 
 const failed = results.filter((r) => !r.ok)
 if (JSON_OUT) {

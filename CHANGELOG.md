@@ -2,6 +2,61 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.10.12] - 2026-11-09 —— 门禁 v6（锁回收计龄、profile 真原子、模型证据入库）
+
+- 门禁子包 `@mycf711/dsh-gate` `0.1.4` → **`0.1.5`**：残留证据按「搬走时间」计龄，不再继承源锁 mtime。
+  `takeOverStale` 用**同一个** `movedAt` 生成 `.stale-<ts>-*` / `.release-<ts>-*` 的名字并 `utimes` 刷 mtime
+  （`rename` 原子落地 ⇒ 连「rename → 刷 mtime」的微秒窗口都盖住；`utimes` 失败时名字仍是权威兜底）；
+  `artifactTimeMs` 优先读名字里的时间戳（`\d{10,16}`、不早于 2001-09-09、不超前 24h），取不到才退回 mtime
+  —— 旧格式残留（`.stale-old-*` / `.release-<uuid>`）行为与 v5 一致。回收时基名与后缀一起按 `flags` 匹配，
+  `caseInsensitive` 跟随文件系统（Windows 默认开）；`.bak` / `-notes.txt` / 前缀相似名 / 守护锁残留都不匹配。
+  实测（独立探针）：5 分钟前搬走的证据不再「生下来就够旧」（`mtimeAge=31ms`，基线 `300047ms`）、
+  并发 prune 不再删掉正在核对的文件、30 轮 `acquire → release` 后目录为空、11 份残留 `keep=3` 稳定在 3 份、
+  8 写者 × 5 轮真实子进程计数 40/40 且临界区重叠 0。
+- `sync-profile` 真原子（`scripts/sync-profile.mjs`）：`absentTargets` / `libDirMissing` / `gateDirMissing` /
+  `scanMissingImports` 四类仓库侧问题在**任何写盘之前**算完（合成 `REPO_BLOCKED`），所有 link / relink /
+  copy / prune 写盘点逐处带守卫 —— `--check` 与 `--repair` 都 `exit 2`，且文件 `inode + sha256` 快照零变化
+  （基线同场景**先改 24 个文件**再 exit 2）。整个 `lib/` 目录缺失不再抛 `ENOENT` 栈，改为点名
+  `lib 目录缺失 1（lib）`；`packages/dsh-gate` 整目录缺失单独成段「门禁子包源缺失」，不再冒充
+  「TARGETS 缺源」并错误建议 `--repair`。退出码契约固定 `0 = 干净 / 1 = profile 漂移 / 2 = 仓库侧问题`；
+  `preflight` 的 `summarizeProfileCheck` 同步解析五段，仓库侧问题不给「跑 --repair」的错误建议；
+  主入口判定收口成纯函数 `resolveIsMain`（import 本文件不再跑整轮门禁）。
+- 模型 / 门禁浏览器证据入库（`scripts/verify-panel-chromium.mjs`；产品 `client.js` 一个字节没动，
+  sha256 `c6fe935d…`）：17 条 `U1-V*` / `U5-V*` 场景（`/gates` 7 条、`/gates/models` 10 条）进正式 Chromium 套件，
+  47 → **64** 条。场景名收进 `scripts/gate-model-scenarios.mjs` 当唯一真源；套件改走
+  `gateScenarioCheck(id, …)` 注册 + `--list-scenarios` dry-run + 运行期完整性硬断言 —— 删一条 / 多一条 /
+  重复 / 掏空成 `true` / 被 `if (false)` 包住都会红。静态护栏从「文本 `includes`」升级成三道闸
+  （声明 / 实际注册 / 运行期真的执行过），比对前先做去注释（注释位换空格、换行保留），块注释与正则字面量
+  都不会再骗过它（Q2R R1 / R2）。
+- 审查（Q2）修掉的假绿：harness 的 `window.fetch` 包装加 `cache: 'no-store'`，打掉同 URL 请求折叠 ——
+  修前 U1-V3 / U5-V2b 两条场景**空转**（变异拆掉全部代际序号闸门仍 64/64 绿；服务端两条响应到达间隔
+  2006ms / 3003ms，等于首条注入延迟，两次请求根本没并发过）；修后同一变异 **62 PASS / 2 FAIL
+  （U1-V3、U5-V2b）exit 1**，而只加修复不变异仍是 64/64（修法本身不产生假红）。另补 `modelsSeqRef` 的单测判据
+  （Q2-1），并复核 U5-M4 的 `>= 2` 是**真语义下界**（确认前 `api.pending.length` 恒为 1，实现一条都不发就会红），
+  不是把 `3` 降成 `2`；U1-V0 / U5-V1 / U5-V6b 三条精确请求计数改成语义下界 `>= 1` + 每条 `repo` 全等，
+  负面断言（不读别的仓库）原样保留。
+- 文档 / 工装：`scripts/check-maintenance.mjs` 第⑥项的扫描范围从 `lib/ client.js` 扩到
+  `lib/ client.js packages/dsh-gate/{lib,bin,gates} scripts/`（V1 R1 / Q1-7：v6 只改子包运行时，旧范围仍报「干净」，
+  会让人以为不用 bump 子包版本）；README / AGENTS / MAINTENANCE 的计数回填到本轮实测。
+- 验证（集成树全量实测）：根 `npm test` **968/968**、gate 包 **180/180** + `npm run check`、
+  `test/client.test.mjs` **171/171**、`test/sync-profile-drift.test.mjs` **22/22**、
+  `PANEL_STRICT=1` 门禁组 **48/48**、UI 审计 **11/11（100 分）**、面板文案快照 PASS、
+  正式 Chromium **64/64**、`preflight` 全量 **42 项 = 41 PASS / 1 SKIP**（`smoke:observe` 需真机宿主）、
+  `check-maintenance` 的 ⑤（四处版本一致）与 ⑥（自上个 tag 起未改动运行时代码）通过 ——
+  ③④ 要 `v0.10.12` 这个 tag 存在才绿，**由发布步骤打 tag**，本次按「不打 tag」执行。
+- 未验项（**不能写成通过**）：真实 DSH WebView（本轮只声明 profile **磁盘副本**一致，未重载宿主，
+  `--repair` 留给发布之后）、真实读屏 / 触摸 / IME、跨主机共享盘（NFS/SMB）的锁与 mtime 语义、
+  真实长期句柄下的 `rename` `EPERM`、CI 矩阵 Node 22/24（本机只有 Node 24.20）、
+  真实 GitHub / Gitee 写操作与真实模型调用；`stripComments` 不是完整的 JS 词法分析
+  （`if (x) /re/.test(y)` 这种「`)` 后面跟正则」会按除号处理 —— 偏保守，**假红而非假绿**）；
+  把判据改成语义等价但更弱的东西（如 `=== 'x'` → `!== ''`）文本 / 结构断言仍挡不住（Q2R R3）。
+- 已知 low 残余（未修、不阻塞发布）：Q1-1 `scanMissingImports` 只认「行首 + 单引号 + 单行 + 静态 import」
+  （双引号 / `export … from` / 多行 import / 动态 `import()` 静默漏检）；Q1-2 `lib/` 里名字以 `.js` 结尾的
+  目录会抛 `EISDIR` 栈而非「exit 2 + 点名」；Q1-3 profile 侧**部分** TARGETS 缺失只给计数不点名；
+  Q1-4 macOS 默认 APFS 上大小写变体仍互不回收（本机 Windows 不可复现）；Q2-3 `client.js:2523` / `:2530`
+  的第二道闸门不可达（`panelRepoOf() === modelsPanelRepo` 恒成立，序号闸门总先 return），保留为不变式
+  tripwire，删除留给下一次动这块时处理。
+
 ## [0.10.11] - 2026-11-09 —— 门禁 v5（锁残余/旧格式、模型来源、profile 失败原子性）
 
 - 门禁子包 `@mycf711/dsh-gate` `0.1.3` → **`0.1.4`**：锁残余与旧版无 token 锁收尾。

@@ -70,21 +70,40 @@ export const IS_MAIN = resolveIsMain({
  *
  * 为什么要在 preflight 里解析第四段：只认前三段时，子包内容不一致会被静默丢掉 ——
  * 「缺失 0 / 断链 0 / 陈旧 0」看着全绿，实际 profile 里跑的是旧门禁（0.10.8 假绿的形状）。
- * S1 新增第五段「TARGETS 缺源」（清单条目在仓库里不存在）：出现就点名，且不能算干净。
+ * 第五段起是**仓库侧缺源**，S1 v6 起按类别分开（v5 Q1 L3 的措辞问题：`packages/dsh-gate`、
+ * `lib` 都不是 TARGETS 条目，不能算进「TARGETS 缺源」）：
+ *   TARGETS 缺源 N（...）      —— 清单条目在仓库里不存在
+ *   lib 目录缺失 1（lib）       —— 整个 lib/ 目录不存在（v5 Q1 L2：旧实现抛 ENOENT 栈，这里只能读到 (无输出)）
+ *   门禁子包源缺失 1（...）      —— packages/dsh-gate 整个目录不存在
+ *   相对 import 缺失 N（...）    —— lib/*.js 的相对 import 解析不到（v5 Q1 L1：旧实现先改盘再 exit 2）
+ * 任何一段非零都不算干净 —— 只打印「四个 0」再 exit 2 就是假绿/假红的形状。
  *
- * 返回 { clean, drifted, gateDrift, changed, manifest, detail }：
- *   clean    = 四段全零且没有 TARGETS 缺源（看不到四段时也算不干净：证明不了就没资格算过）
+ * 返回 { clean, drifted, gateDrift, changed, manifest, libDirMissing, gateSourceMissing, importMissing, detail }：
+ *   clean    = 四段全零且没有任何仓库侧缺源（看不到四段时也算不干净：证明不了就没资格算过）
+ *             四个「缺源」字段都是**计数**（0 / 1 / N），不是布尔：clean 由它们全零决定。
  *   detail   = 给人看的文案；没有漂移时不加第四段（别给全绿加噪音）
  */
 export function summarizeProfileCheck(out) {
   const text = String(out || '')
   const four = text.match(/缺失 (\d+) \/ 断链 (\d+) \/ 陈旧 (\d+) \/ 门禁子包漂移 (\d+)/)
-  const manifest = text.match(/TARGETS 缺源 (\d+)(?:（([^）\n]*)）)?/)
-  const manifestCount = manifest ? Number(manifest[1]) : 0
+  // 第五段起：每类仓库侧缺源独立成段，只在非零时出现（clean 无噪音）
+  const targets = text.match(/TARGETS 缺源 (\d+)(?:（([^）\n]*)）)?/)
+  const libDir = text.match(/lib 目录缺失 (\d+)(?:（([^）\n]*)）)?/)
+  const gateSource = text.match(/门禁子包源缺失 (\d+)(?:（([^）\n]*)）)?/)
+  const imports = text.match(/相对 import 缺失 (\d+)(?:（([^）\n]*)）)?/)
+  const countOf = (match) => (match ? Number(match[1]) : 0)
+  const manifest = countOf(targets)
+  const libDirMissing = countOf(libDir)
+  const gateSourceMissing = countOf(gateSource)
+  const importMissing = countOf(imports)
+  const repoSideIssues = manifest + libDirMissing + gateSourceMissing + importMissing
   if (!four) {
-    // 老格式（只有三段）：读不出第四段就没法证明子包不漂移，按不干净处理（preflight 与 sync-profile 同版发布）
+    // 老格式（只有三段 / 整段拿不到输出）：读不出第四段就没法证明子包不漂移，按不干净处理
+    // （preflight 与 sync-profile 同版发布）。整段拿不到输出时也走这里 —— v5 Q1 L2 的 ENOENT
+    // 栈就是这种形状：preflight 只能显示 (无输出)，绝不能当绿。
     return {
-      clean: false, drifted: 0, gateDrift: 0, changed: null, manifest: manifestCount,
+      clean: false, drifted: 0, gateDrift: 0, changed: null,
+      manifest, libDirMissing, gateSourceMissing, importMissing,
       detail: (text.match(/缺失 \d+ \/ 断链 \d+ \/ 陈旧 \d+/) || ['(无输出)'])[0],
     }
   }
@@ -93,12 +112,17 @@ export function summarizeProfileCheck(out) {
   const changed = gateDrift > 0 ? (text.match(/内容与 packages\/dsh-gate 不一致：([^；\n]+)/) || [])[1] || null : null
   let detail = `缺失 ${four[1]} / 断链 ${four[2]} / 陈旧 ${four[3]}`
   if (gateDrift > 0) detail += ` / 门禁子包漂移 ${four[4]}` + (changed ? `（${changed}）` : '')
-  if (manifestCount > 0) {
-    detail += ` / TARGETS 缺源 ${manifestCount}` + (manifest[2] ? `（${manifest[2]}）` : '') + '，清单条目不成立（--repair 修不了）'
-  } else if (drifted > 0) {
-    detail += '，跑 node scripts/sync-profile.mjs --repair'
+  if (manifest > 0) detail += ` / TARGETS 缺源 ${manifest}` + (targets[2] ? `（${targets[2]}）` : '')
+  if (libDirMissing > 0) detail += ` / lib 目录缺失 ${libDirMissing}` + (libDir[2] ? `（${libDir[2]}）` : '')
+  if (gateSourceMissing > 0) detail += ` / 门禁子包源缺失 ${gateSourceMissing}` + (gateSource[2] ? `（${gateSource[2]}）` : '')
+  if (importMissing > 0) detail += ` / 相对 import 缺失 ${importMissing}` + (imports[2] ? `（${imports[2]}）` : '')
+  // 仓库侧问题 --repair 修不了（别给「跑 --repair」的错误建议）；只有 profile 侧漂移才提示 --repair。
+  if (repoSideIssues > 0) detail += '，仓库侧问题（--repair 修不了）'
+  else if (drifted > 0) detail += '，跑 node scripts/sync-profile.mjs --repair'
+  return {
+    clean: drifted === 0 && repoSideIssues === 0,
+    drifted, gateDrift, changed, manifest, libDirMissing, gateSourceMissing, importMissing, detail,
   }
-  return { clean: drifted === 0 && manifestCount === 0, drifted, gateDrift, changed, manifest: manifestCount, detail }
 }
 
 // 下面整段是 CLI 主体。为了不让 500 行的缩进变化淹掉真改动，这里只外包一层条件、不重排缩进。
