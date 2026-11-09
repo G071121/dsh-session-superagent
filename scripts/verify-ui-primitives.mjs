@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import http from 'node:http'
 
-const REPO = 'D:/主工作区/projects/dsh-session-superagent'
+const REPO = process.env.DSH_SUPERAGENT_REPO || 'D:/DeepSeek Harness/大肥鱼工作区/dsh-session-superagent'
 const ASAR = 'D:/DeepSeek Harness/Desktop/resources/app.asar'
 const ELECTRON = 'D:/DeepSeek Harness/Desktop/DeepSeek Harness.exe'
 const FRONTEND = `${ASAR}/dsh/node_modules/@deepseek-ai/dsh-web-frontend`
