@@ -18,7 +18,7 @@
 ## 二、当前状态（2026-11-09）
 
 ```text
-分支        main（HEAD d8359e5 = PR #32 docs 回填合并；发布 commit ec36ddec = PR #31）
+分支        main（以 origin/main 为准，2026-11-09 为 2ba7ada = PR #33 交接刷新 merge；发布 commit ec36ddec = PR #31）
 版本        0.10.12 / gate 0.1.5；tag v0.10.12 / gate-v0.1.5（远端已推、可达 main）；Release v0.10.12 = Latest
 npm         dist-tags.latest = 0.10.12 / 0.1.5（双包已发布）
 工作区      clean；安装副本 %DSH_HOME%\profiles\desktop\node_modules\... 已 --repair 到四段全零（只声明磁盘一致）
@@ -46,7 +46,8 @@ npm         dist-tags.latest = 0.10.12 / 0.1.5（双包已发布）
   tag `v0.10.12` / `gate-v0.1.5` 可达 main；Release `v0.10.12`（Latest）+ `gate-v0.1.5`；
   发布时 main CI run `42551155750` 在两个 tag 上远端后重跑，Node 22/24 绿；
 - 回填：PR #32 merge commit `d8359e5`（仅 README / AGENTS / MAINTENANCE / HANDOFF），
-  回填后 main CI run `42553248097` 一次 success。
+  回填后 main CI run `42553248097` 一次 success；随后 PR #33（交接刷新，`2ba7ada`）只改
+  HANDOFF / MAINTENANCE 的 main 表述，不再写死 main HEAD。
 
 未验证（不能写成"通过"）：
 
