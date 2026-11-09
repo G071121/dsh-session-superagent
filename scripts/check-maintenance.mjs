@@ -71,15 +71,20 @@ check('README 徽章 / lib / client 版本一致', consistent, 'package=' + vers
 // ⑥ 改了代码但没 bump（提示，不失败）
 //
 // 扫描范围（V1 R1 / Q1-7）：只扫根 `lib/` + `client.js` 会漏掉 v6 起真正在变的那一半 ——
-// 门禁子包的锁 / 配置实现（`packages/dsh-gate/lib`）、它的 bin 与默认规则，以及 `scripts/` 里的工装。
-// 后果很具体：子包改了、根没改，这条会对着已改的子包报「干净」，让人以为不用 bump 子包版本。
+// 只扫**随包发布**的运行时代码（`package.json` 的 `files` 里列出的那些）：根 `lib/`、`bin/`、
+// `client.js`、两个 `ui-*.js`、`cordis.patch.yml`，以及门禁子包的 `lib` / `bin` / `gates`。
+// **不扫 `scripts/`** —— 那是仓库验收工装，不进 npm 包；把它算进来会让「只改验收脚本」也逼着 bump 版本
+// （2026-11-09 真实误报：PR #37 只改 `scripts/verify-ui-*.mjs` 的默认路径，main CI ⑥ 直接红）。
 const CODE_PATHS = [
   'lib/',
+  'bin/',
   'client.js',
+  'ui-host-primitives.js',
+  'ui-orbit-popover.js',
+  'cordis.patch.yml',
   'packages/dsh-gate/lib/',
   'packages/dsh-gate/bin/',
   'packages/dsh-gate/gates/',
-  'scripts/',
 ]
 const since = tags.has(tag) ? run('git', ['diff', '--name-only', tag + '..HEAD', '--', ...CODE_PATHS]) : ''
 const dirtyFiles = since.split('\n').filter(Boolean)
@@ -88,7 +93,7 @@ check(
   '自上个 tag 起未改动运行时代码（未 bump 不算错，只提示）',
   dirty === 0,
   dirty === 0
-    ? '干净（已扫 lib/ client.js packages/dsh-gate/{lib,bin,gates} scripts/）'
+    ? '干净（已扫 lib/ bin/ client.js ui-*.js cordis.patch.yml packages/dsh-gate/{lib,bin,gates}；scripts/ 是验收工装，不计）'
     : dirty + ' 个文件已改，尚未 bump 版本：' + dirtyFiles.slice(0, 5).join(' / ') + (dirty > 5 ? ' …' : ''),
 )
 
