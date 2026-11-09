@@ -129,8 +129,7 @@ node scripts/render-preview.mjs preview.html
 
 ## 十、当前基线
 
-0.10.12；全量 **968/968**、preflight **42 项**（发布前 39 PASS / 1 SKIP / 2 FAIL：缺 `v0.10.12` tag、profile 待 `--repair`）、
-UI **11/11**、真实 Chromium **64/64**。
+0.10.12；全量 **968/968**、preflight **42 项 = 41 PASS / 1 SKIP**、UI **11/11**、真实 Chromium **64/64**。
 未验：真实 DSH WebView 重载后的读屏 / 触摸 / IME、真实 GitHub/Gitee 写操作。没有实测不得写成通过。
 
 ## 十一、Issue/PR 回复边界
