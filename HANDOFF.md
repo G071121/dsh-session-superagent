@@ -19,10 +19,11 @@ profile 已 `--repair` 到四段全零（只声明磁盘一致）。**没有遗�
 - tag：`v0.10.12` / `gate-v0.1.5`（annotated，解引用都是 `ec36ddec`）
 - GitHub Release：`v0.10.12`（Latest，标题只写版本号）+ `gate-v0.1.5`
 - v6 任务书：`docs/任务书-dsh-gate-v6.md`，提交 `c3753a1`
-- 当前工作树：`D:\主工作区\projects\dsh-gate-v6-integration`，分支 `task/gate-v6-handoff-refresh`（本次交接刷新，从 `d8359e5` 起）；本地 `main` 引用被另一 worktree 占用且落后，**一律以 `origin/main` 为准**
-- 另一棵只含任务书的树：`D:\主工作区\projects\dsh-gate-v5-integration`，`feat/gate-v6` @ `c3753a1`
-
-**不要把旧 `.tmp-issue9-push-20261106-1244` 或其它历史 worktree 当成最新代码。**
+- **主仓 + 5 个工作树（2026-11-09 整理后）**：
+  - 主仓：`D:\主工作区\projects\dsh-session-superagent`（main；HEAD 以 `origin/main` 为准）
+  - 当前集成树：`D:\主工作区\projects\dsh-gate-v6-integration`，分支 `task/gate-v6-handoff-refresh-2`（已合并）
+  - 其余：`dsh-gate-adapter`（`task/gate-adapter`）、`dsh-gate-core`（`task/gate-core`）、`dsh-session-superagent-deep-ui`（`task/deep-ui-acceptance`，有未提交改动，已备份到 outbox）
+- 旧的 `.tmp-issue9-push-20261106-1244` 已迁移为 `dsh-session-superagent`；`dsh-session-superagent-legacy-20261107` 是 11-07 的历史副本（含未提交改动，已备份到 outbox），**不要当最新代码**。
 
 ## 3. v6 的三个实现分支（已合并、已发布，不要重做）
 
@@ -43,6 +44,7 @@ b580681  docs: gate v6 独立验收报告（V1）
 ec36ddec Merge pull request #31  ← 发布 merge（两个 tag 指向它）
 d8359e5  Merge pull request #32  ← docs 回填
 2ba7ada  Merge pull request #33  ← 交接刷新（main 以 origin/main 为准）
+9df0fe2  Merge pull request #34  ← main 表述改为 origin/main
 ```
 
 ## 4. 交付链路（全部已完成）
