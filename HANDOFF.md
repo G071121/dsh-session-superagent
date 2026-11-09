@@ -20,8 +20,8 @@ profile 已 `--repair` 到四段全零（只声明磁盘一致）。**没有遗�
 - GitHub Release：`v0.10.12`（Latest，标题只写版本号）+ `gate-v0.1.5`
 - v6 任务书：`docs/任务书-dsh-gate-v6.md`，提交 `c3753a1`
 - **主仓 + 5 个工作树（2026-11-09 整理后）**：
-  - 主仓：`D:\主工作区\projects\dsh-session-superagent`（main；HEAD 以 `origin/main` 为准）
-  - 当前集成树：`D:\主工作区\projects\dsh-gate-v6-integration`，分支 `task/gate-v6-handoff-refresh-2`（已合并）
+  - 主仓：`D:\DeepSeek Harness\大肥鱼工作区\dsh-session-superagent`（main；HEAD 以 `origin/main` 为准）
+  - 当前集成树：`D:\DeepSeek Harness\大肥鱼工作区\dsh-gate-v6-integration`，分支 `task/gate-v6-handoff-refresh-2`（已合并）
   - 其余：`dsh-gate-adapter`（`task/gate-adapter`）、`dsh-gate-core`（`task/gate-core`）、`dsh-session-superagent-deep-ui`（`task/deep-ui-acceptance`，有未提交改动，已备份到 outbox）
 - 旧的 `.tmp-issue9-push-20261106-1244` 已迁移为 `dsh-session-superagent`；`dsh-session-superagent-legacy-20261107` 是 11-07 的历史副本（含未提交改动，已备份到 outbox），**不要当最新代码**。
 
@@ -89,7 +89,7 @@ GUI：`http://127.0.0.1:51092`（**端口每次重启会变，不要写死**）�
 ## 8. 复跑命令（集成树内）
 
 ```bash
-cd /d/主工作区/projects/dsh-gate-v6-integration
+cd "/d/DeepSeek Harness/大肥鱼工作区/dsh-gate-v6-integration"
 npm test                                            # 968/968
 (cd packages/dsh-gate && npm test && npm run check)  # 180/180 + 语法
 node scripts/test.mjs test/client.test.mjs           # 171/171

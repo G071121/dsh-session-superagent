@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url'
 const REPO = process.env.DSH_SUPERAGENT_REPO
   || (import.meta.url.startsWith('file:') && !import.meta.url.includes('[eval')
     ? resolve(dirname(fileURLToPath(import.meta.url)), '..')
-    : 'D:/主工作区/projects/dsh-session-superagent')
+    : 'D:/DeepSeek Harness/大肥鱼工作区/dsh-session-superagent')
 const ASAR = 'D:/DeepSeek Harness/Desktop/resources/app.asar'
 const ELECTRON = 'D:/DeepSeek Harness/Desktop/DeepSeek Harness.exe'
 const FRONTEND = `${ASAR}/dsh/node_modules/@deepseek-ai/dsh-web-frontend`
