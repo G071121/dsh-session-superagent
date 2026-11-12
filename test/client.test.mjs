@@ -1568,6 +1568,50 @@ test('保存编辑只发改过的字段（M2：全量 PUT 会把别处刚改的�
   assert.ok(!/body: JSON\.stringify\(\{\s*\r?\n\s*repo: watcher\.repo/.test(src), '保存体又变回全量 PUT 了')
 })
 
+test('编辑 Gitee 守保存时必须把 `gitee:` 前缀补回 repo（0.10.12 真机：改 600 秒保存仍是 180 秒，还多出一条 gh 404 孪生）', async () => {
+  const requests = []
+  const { registrations, render } = loadClient({
+    fetch: async (url, options = {}) => {
+      requests.push({ url, options })
+      return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) }
+    },
+  })
+  const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
+  // 真 /state 的形状：repo 是**规范化后**的 owner/name，provider 单独一个字段，
+  // id 才是带前缀的那个（`gitee:owner/name#session-…`）。
+  const repo = 'iJetLi/deepseek-harness-codearts'
+  const sessionId = 'session-' + repo
+  const snap = {
+    loading: false, error: null,
+    body: {
+      credentials: { token: 'none', sshKeyPath: 'none', ghConfigDir: 'none', giteeToken: 'none' },
+      gh: { ok: true, version: '2.0' }, defaults: {},
+      watchers: [watcher(repo, { id: 'gitee:' + repo + '#' + sessionId, provider: 'gitee', sessionId, intervalSec: 180 })],
+    },
+  }
+  // 行内编辑的 key 是「repo#sessionId」（不含 provider 前缀，见 client.js 的行 key）。
+  // 草稿必须是脏的：SaveBar 在 `!dirty` 时整块不渲染，找不到保存按钮不代表组件坏了。
+  const queue = deskQueue(snap, repo + '#' + sessionId, { intervalSec: '600' })
+  const nodes = walk(render(desk, queue))
+  const labelOf = (node) => walk(node).filter((n) => typeof n.text === 'string').map((n) => n.text).join('')
+  const save = nodes.find((n) => n.type === 'button' && labelOf(n).includes('保存'))
+  assert.ok(save, '编辑器里要有保存按钮')
+  const interval = nodes.find((n) => n.type === 'input' && String(n.props.value) === '600')
+  assert.ok(interval, '编辑器里要有间隔输入框')
+  // 测试桩不重渲染：onChange 只负责把这个字段记进 touched（值必须与草稿不同才会记）。
+  interval.props.onChange({ target: { value: '900' } })
+  await save.props.onClick()
+  const saved = requests.find((r) => String(r.url).endsWith('/watch'))
+  assert.ok(saved, '保存必须真的发请求')
+  const body = JSON.parse(saved.options.body)
+  // 判定：服务端 parseRepoSpec 只认前缀/URL 定 provider。repo 一旦丢掉 `gitee:`，
+  // id 就从 `gitee:owner/name#s` 变成 `owner/name#s` —— 匹配不到已有守 ⇒ 静默新建
+  // 一条 provider=github 的孪生守（每轮 gh 404），原守的间隔分毫不动。
+  assert.equal(body.repo, 'gitee:' + repo, 'repo 丢了 gitee: 前缀 ⇒ 会新建一条 GitHub 孪生守，原守改不动')
+  assert.equal(body.sessionId, sessionId)
+  assert.equal(body.intervalSec, 600, '间隔要真的提交出去（touched 里的字段不能丢）')
+})
+
 test('行内编辑保存必须真的带上 filters / priority（T24 M1：控件名与字段名对不上，改了发不出去）', async () => {
   const { readFileSync } = await import('node:fs')
   const src = readFileSync(new URL('../client.js', import.meta.url), 'utf8')

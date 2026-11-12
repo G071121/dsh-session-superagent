@@ -2,6 +2,21 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Fixed
+
+- **面板里编辑 Gitee 守「保存」会静默新建一条 GitHub 孪生守**（0.10.12 真机）：`saveEdit` 提交的
+  `repo` 直接取 `/state` 的 `watcher.repo`，而那是**规范化后**的 `owner/name`（provider 单独一个字段），
+  没有 `gitee:` 前缀；服务端 `parseRepoSpec` 只认 `gitee:` 前缀 / `gitee.com` URL 定 provider，
+  其余一律判成 GitHub ⇒ id 从 `gitee:owner/name#session` 变成 `owner/name#session`，
+  匹配不到已有守 ⇒ 走**新建**分支（`created = !state.watchers[id]`），于是静默多出一条每轮
+  `gh: Not Found (HTTP 404)` 的孪生守，而原来那条的间隔/过滤分毫不动 —— 症状是「改 600 秒保存后
+  仍是 180 秒」；暂停的同样只是 Gitee 那条，孪生守仍 `enabled: true` 在跑 ⇒「暂停了改也没用」。
+  修法：提交前按 `watcher.provider` 把 `gitee:` 前缀补回去（`watcherId(w)` 本来就带前缀，
+  暂停 / 删除 / 立刻一直是对的）。补行为级用例：编辑 Gitee 守保存时 `body.repo` 必须等于
+  `'gitee:' + repo`。
+
 ## [0.10.12] - 2026-11-09 —— 门禁 v6（锁回收计龄、profile 真原子、模型证据入库）
 
 - 门禁子包 `@mycf711/dsh-gate` `0.1.4` → **`0.1.5`**：残留证据按「搬走时间」计龄，不再继承源锁 mtime。
