@@ -2021,7 +2021,7 @@ test('追溯结果进入判定页内联时间线，不再只发一条 Toast（�
   await button.props.onClick()
   assert.ok(stateCalls().some((call) => call.next && Array.isArray(call.next.traces)), '点击后必须把结构化 payload 写入状态')
 
-  queue[queue.length - 2] = payload
+  queue[queue.length - 3] = payload
   const traced = walk(render(desk, queue))
   const text = traced.filter((n) => typeof n.text === 'string').map((n) => n.text).join(' | ')
   assert.equal(traced.filter((n) => n.type === 'li' && n.props.className === 'dt-event').length, 5, '1 个标题 + 4 个事件，每个都必须是独立 li.dt-event')
@@ -2287,7 +2287,7 @@ function loadStatefulPanel({ fetch, queue }) {
   }).apply(ctx)
   const desk = registrations.find((item) => item.opts.id === 'session-superagent-desk')
   assert.ok(desk, '找不到主面板注册')
-  const traceIndex = deskQueue({ loading: true, error: null, body: null }).length - 2
+  const traceIndex = deskQueue({ loading: true, error: null, body: null }).length - 3
   const render = () => {
     stateCursor = 0
     refCursor = 0
@@ -3659,7 +3659,7 @@ const gateSnapshot = () => ({
 })
 
 /**
- * 门禁页的状态槽 = 主面板 23 个 + GateSettings 自己的 12 个。
+ * 门禁页的状态槽 = 主面板 24 个 + GateSettings 自己的 12 个。
  * 顺序必须与 client.js 里 GateSettings 的 useState 一致（位置化队列只能在末尾追加）：
  * data / loadError / scope / draft / advanced / sample / trigger / preview / models / busy / status / pendingSwitch
  *
@@ -3683,10 +3683,10 @@ const gateQueue = (over = {}) => {
     'pending' in over ? over.pending : null]
 }
 
-/** GateSettings 的状态槽下标（主面板 23 槽之后）。切作用域/仓库的确认是第 12 槽。 */
+/** GateSettings 的状态槽下标（主面板 24 槽之后）。切作用域/仓库的确认是第 12 槽。 */
 const GATE_SLOT = {
-  data: 23, loadError: 24, scope: 25, draft: 26, advanced: 27, sample: 28,
-  trigger: 29, preview: 30, models: 31, busy: 32, status: 33, pendingSwitch: 34,
+  data: 24, loadError: 25, scope: 26, draft: 27, advanced: 28, sample: 29,
+  trigger: 30, preview: 31, models: 32, busy: 33, status: 34, pendingSwitch: 35,
 }
 
 // a11yText 吃的是「树」，喂已经 walk 过的节点数组只会得到空串 —— 这里按节点取文案。
@@ -4611,13 +4611,13 @@ test('门禁 dirty 切仓库：不静默丢草稿；写盘仍落到面板数据�
   assert.equal(bothText.includes('仓库已切换到'), false, '已经选择保留草稿，就不该再挂一条仓库确认')
 })
 
-test('门禁：状态只留在 GateSettings（主面板 23 + 门禁 12 = 35 槽，多一个都要抛）（U1-F）', () => {
+test('门禁：状态只留在 GateSettings（主面板 24 + 门禁 12 = 36 槽，多一个都要抛）（U1-F）', () => {
   const { registrations, render } = loadClient()
   const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
-  assert.equal(deskQueue(gateSnapshot()).length, 23, '主面板仍然只有 23 个状态槽')
-  assert.equal(gateQueue().length, 35, '门禁页 fixture = 主面板 23 + GateSettings 12')
-  // 多传一个槽必须被抓出来：这条同时把「组件准确用了 35 个 hook」变成断言
-  assert.throws(() => walk(render(desk, [...gateQueue({ scope: 'user' }), null])), /组件用了 35 个/,
+  assert.equal(deskQueue(gateSnapshot()).length, 24, '主面板仍然只有 24 个状态槽')
+  assert.equal(gateQueue().length, 36, '门禁页 fixture = 主面板 24 + GateSettings 12')
+  // 多传一个槽必须被抓出来：这条同时把「组件准确用了 36 个 hook」变成断言
+  assert.throws(() => walk(render(desk, [...gateQueue({ scope: 'user' }), null])), /组件用了 36 个/,
     '多一个槽也要抛：位置化队列必须严格对齐（主面板不许悄悄加槽）')
   const nodes = walk(render(desk, gateQueue({ scope: 'user' })))
   assert.ok(gateText(nodes).includes('禁止凭证与密钥'), '槽位对齐下门禁页要完整渲染')
@@ -5607,4 +5607,321 @@ test('浏览器证据入库：门禁/模型场景留在正式 Chromium 套件里
   // 探针路径只在代码里查：文件头注释里写着「不依赖 /tmp 探针」，那正是要保留的说明。
   assert.equal(/\/tmp\//.test(code), false, '正式套件代码不许依赖 /tmp 探针')
   assert.ok(source.includes('不是真实 WebView'), '必须写明 loopback fixture 不是真实 WebView')
+})
+
+// ── 页签名称（conversation.view 的 label）────────────────────────────────────
+// 宿主只在 register()/dispose() 时重算页签文案：ui-conversation 的 viewTabs() 读
+// resolveSlotLabel(entry.options.label)，而刷新由 slots.subscribe('conversation.view') 驱动
+// （register/dispose → markDirty → flush）。所以改名必须「先释放、再按同 id/order/component
+// 重注册」，原地改 options.label 不会重画。名称来源只有一份品牌语义（issue #11 的 brandName）：
+//   本地显示覆盖（本浏览器 localStorage）> /state.brandName > 默认「主理鱼」。
+// 覆盖只改这一个页签，不动面板标题 / 唤醒抬头 / ack 标签。
+
+const TAB_NAME_KEY = 'dsh-session-superagent.tab-name'
+const TAB_NAME_MAX_POINTS = 24
+
+/** 内存版 localStorage：能断言写入/删除，也能按需抛异常（隐私模式、配额满）。 */
+const memoryStorage = (initial = {}, options = {}) => {
+  const map = new Map(Object.entries(initial))
+  const calls = { get: [], set: [], remove: [] }
+  return {
+    calls,
+    map,
+    getItem(key) {
+      calls.get.push(key)
+      if (options.readError) throw options.readError
+      return map.has(key) ? map.get(key) : null
+    },
+    setItem(key, value) {
+      calls.set.push([key, String(value)])
+      if (options.writeError) throw options.writeError
+      map.set(key, String(value))
+    },
+    removeItem(key) {
+      calls.remove.push(key)
+      if (options.removeError) throw options.removeError
+      if (options.writeError) throw options.writeError
+      map.delete(key)
+    },
+  }
+}
+
+const liveDesk = (client) => client.liveRegistrations().find((r) => r.opts.id === 'session-superagent-desk')
+const nodeTextOf = (node) => (node && node.props
+  ? (node.props.children || []).filter((child) => typeof child === 'string').join('')
+  : '')
+const buttonByText = (nodes, label) => nodes.find((n) => n.type === 'button' && nodeTextOf(n) === label)
+const tabNameInput = (nodes) => nodes.find((n) => n.type === 'input' && n.props['aria-label'] === '页签名称')
+
+const brandSnapshot = (brandName) => ({
+  loading: false, error: null,
+  body: {
+    credentials: { token: 'none', sshKeyPath: 'none', ghConfigDir: 'none', giteeToken: 'none' },
+    gh: { ok: true, version: '2.0' },
+    defaults: { sessionMaxWakes: 12, maxWakesPerHour: 6, isolateKeepDays: 3, batchLimit: 5 },
+    brandName,
+    watchers: [watcher('a/b')],
+  },
+})
+
+/** /state 的假响应：带 headers.get（call() 会读 etag）。 */
+const stateResponse = (body) => ({
+  ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(body),
+})
+
+test('页签名称默认仍是「主理鱼」：没有本地覆盖、也没有 /state 品牌名', () => {
+  const client = loadClient()
+  const desk = liveDesk(client)
+  assert.ok(desk, 'conversation.view 必须有一条注册')
+  assert.equal(desk.opts.label, '主理鱼', '默认值必须是「主理鱼」')
+  assert.equal(desk.opts.order, 30, '改名不能顺带动 order')
+})
+
+test('页签跟随 /state.brandName：响应一到就重画，且不留下第二条注册', async () => {
+  const client = loadClient({ fetch: async () => stateResponse({ brandName: '夜莺' }) })
+  assert.equal(liveDesk(client).opts.label, '主理鱼', '首帧只有默认值（/state 还没回来）')
+  const nodes = walk(client.render(liveDesk(client), deskQueue(brandSnapshot('夜莺'))))
+  const refresh = buttonByText(nodes, '刷新')
+  assert.ok(refresh, '面板要能触发一次 /state 读取')
+  await refresh.props.onClick()
+  assert.equal(liveDesk(client).opts.label, '夜莺', '/state 到了页签就要跟着变')
+  assert.equal(
+    client.liveRegistrations().filter((r) => r.opts.id === 'session-superagent-desk').length,
+    1, '重注册不能留下第二条同 id 的注册',
+  )
+})
+
+test('本地覆盖优先于 /state.brandName（优先级：本地覆盖 > brandName > 默认）', async () => {
+  const client = loadClient({
+    localStorage: memoryStorage({ [TAB_NAME_KEY]: '夜猫' }),
+    fetch: async () => stateResponse({ brandName: '夜莺' }),
+  })
+  assert.equal(liveDesk(client).opts.label, '夜猫', '刷新后要读回本地覆盖')
+  const nodes = walk(client.render(liveDesk(client), deskQueue(brandSnapshot('夜莺'))))
+  await buttonByText(nodes, '刷新').props.onClick()
+  assert.equal(liveDesk(client).opts.label, '夜猫', '品牌名到了也不能盖掉本地覆盖')
+})
+
+test('设置→来源改页签名称：保存后页签立刻更新，并写进本就地存储', () => {
+  const storage = memoryStorage()
+  const client = loadClient({ localStorage: storage })
+  const queue = deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings')
+  const input = tabNameInput(walk(client.render(liveDesk(client), queue)))
+  assert.ok(input, '设置→来源要有「页签名称」输入框')
+  assert.equal(input.props.value, '主理鱼', '输入框要带当前名称（不是空的）')
+  input.props.onChange({ target: { value: '夜猫' } })
+  queue[queue.length - 1] = '夜猫'
+  const save = buttonByText(walk(client.render(liveDesk(client), queue)), '保存名称')
+  assert.ok(save, '要有保存按钮')
+  save.props.onClick()
+  assert.equal(liveDesk(client).opts.label, '夜猫', '保存后当前 GUI 的页签要立刻变')
+  assert.deepEqual(storage.calls.set.at(-1), [TAB_NAME_KEY, '夜猫'], '要写进 localStorage')
+})
+
+test('页签名称留空保存 = 恢复默认：清掉本地覆盖（回到 brandName）', () => {
+  const storage = memoryStorage({ [TAB_NAME_KEY]: '夜猫' })
+  const client = loadClient({ localStorage: storage })
+  assert.equal(liveDesk(client).opts.label, '夜猫')
+  const queue = deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings')
+  const input = tabNameInput(walk(client.render(liveDesk(client), queue)))
+  input.props.onChange({ target: { value: '   ' } })
+  queue[queue.length - 1] = '   '
+  buttonByText(walk(client.render(liveDesk(client), queue)), '保存名称').props.onClick()
+  assert.equal(liveDesk(client).opts.label, '主理鱼', '空值（含全空格）要恢复默认')
+  assert.deepEqual(storage.calls.remove, [TAB_NAME_KEY], '要真的删掉这条覆盖，不能写空串')
+  assert.equal(storage.map.size, 0)
+})
+
+test('localStorage 读取抛异常时安全回退默认（不把插件 apply 弄挂）', () => {
+  const client = loadClient({
+    localStorage: memoryStorage({ [TAB_NAME_KEY]: '夜猫' }, { readError: new Error('SecurityError: 禁止访问') }),
+  })
+  assert.equal(liveDesk(client).opts.label, '主理鱼', '读不到就回落默认，不能抛')
+})
+
+test('localStorage 写不进去时：本次会话内照样生效，但要如实说「刷新后回到默认」', () => {
+  const storage = memoryStorage({}, { writeError: new Error('QuotaExceededError') })
+  const client = loadClient({ localStorage: storage })
+  const queue = deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings')
+  const input = tabNameInput(walk(client.render(liveDesk(client), queue)))
+  input.props.onChange({ target: { value: '夜猫' } })
+  queue[queue.length - 1] = '夜猫'
+  buttonByText(walk(client.render(liveDesk(client), queue)), '保存名称').props.onClick()
+  assert.equal(liveDesk(client).opts.label, '夜猫', '写盘失败也要在本次会话内生效')
+  const toast = client.stateCalls().map((call) => call.next)
+    .filter((next) => next && typeof next === 'object' && typeof next.text === 'string').pop()
+  assert.ok(toast, '保存要有 Toast 反馈')
+  assert.equal(toast.tone, 'error', '存不住是错误态，不能报成功')
+  assert.ok(toast.text.includes('刷新后会回到默认'), '必须说清作用域：' + toast.text)
+})
+
+test('页签名称按码点截断，不会劈开代理对（表情不会被截成半个）', () => {
+  const client = loadClient({ localStorage: memoryStorage() })
+  const queue = deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings')
+  const input = tabNameInput(walk(client.render(liveDesk(client), queue)))
+  input.props.onChange({ target: { value: '😀'.repeat(30) } })
+  const clamped = client.stateCalls().map((call) => call.next).filter((next) => typeof next === 'string').pop()
+  assert.equal([...clamped].length, TAB_NAME_MAX_POINTS, '输入时就要按码点截断：' + JSON.stringify(clamped))
+  assert.ok([...clamped].every((ch) => ch === '😀'), '截断后每个码点都必须是完整表情')
+  queue[queue.length - 1] = '😀'.repeat(30)
+  buttonByText(walk(client.render(liveDesk(client), queue)), '保存名称').props.onClick()
+  const label = liveDesk(client).opts.label
+  assert.equal([...label].length, TAB_NAME_MAX_POINTS, '保存也要按码点截断')
+  assert.equal(label, '😀'.repeat(TAB_NAME_MAX_POINTS))
+})
+
+test('页签名称复用 normalizeBrandName 的规则（trim / 压平换行 / 空值回落）', async () => {
+  const { normalizeBrandName } = await import('../lib/watch.js')
+  for (const raw of ['', '   ', '夜莺', ' a\nb ', '\n', 'x'.repeat(40)]) {
+    const client = loadClient({ fetch: async () => stateResponse({ brandName: raw }) })
+    const nodes = walk(client.render(liveDesk(client), deskQueue(brandSnapshot(raw))))
+    await buttonByText(nodes, '刷新').props.onClick()
+    const expected = [...normalizeBrandName(raw)].slice(0, TAB_NAME_MAX_POINTS).join('')
+    assert.equal(liveDesk(client).opts.label, expected, '与 lib/watch.js 的规则同源：' + JSON.stringify(raw))
+  }
+})
+
+test('改名只重注册一条：同 id / 同 order / 同 component，不重复也不换组件', () => {
+  const client = loadClient({ localStorage: memoryStorage() })
+  const first = liveDesk(client)
+  const queue = deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings')
+  tabNameInput(walk(client.render(first, queue))).props.onChange({ target: { value: '夜猫' } })
+  queue[queue.length - 1] = '夜猫'
+  buttonByText(walk(client.render(first, queue)), '保存名称').props.onClick()
+  const second = liveDesk(client)
+  assert.equal(second.opts.id, 'session-superagent-desk')
+  assert.equal(second.opts.order, 30, 'order 必须原样')
+  assert.equal(second.Component, first.Component, 'component 必须原样（换组件会重建面板）')
+  assert.equal(client.liveRegistrations().filter((r) => r.opts.id === 'session-superagent-desk').length, 1)
+  assert.equal(client.registrations.filter((r) => r.opts.id === 'session-superagent-desk').length, 2, '历史里正好两条：旧的已释放')
+})
+
+test('恢复默认删不掉覆盖时：页签立刻回默认，但不伪称已持久化（刷新后可能回到旧名）', async () => {
+  const storage = memoryStorage(
+    { [TAB_NAME_KEY]: '夜猫' },
+    { removeError: new Error('SecurityError: 禁止删除') },
+  )
+  const client = loadClient({ localStorage: storage, fetch: async () => stateResponse({ brandName: '夜莺' }) })
+  assert.equal(liveDesk(client).opts.label, '夜猫', '先读回旧覆盖')
+  const queue = deskQueue(brandSnapshot('夜莺'), null, {}, 'settings')
+  const input = tabNameInput(walk(client.render(liveDesk(client), queue)))
+  input.props.onChange({ target: { value: '' } })
+  queue[queue.length - 1] = ''
+  buttonByText(walk(client.render(liveDesk(client), queue)), '恢复默认').props.onClick()
+  assert.equal(liveDesk(client).opts.label, '主理鱼', '删不掉也要在本次会话内立刻回默认')
+  assert.deepEqual(storage.calls.remove, [TAB_NAME_KEY], '必须真的尝试删除，不能只改内存')
+  assert.equal(storage.map.get(TAB_NAME_KEY), '夜猫', '桩里删除失败：旧值仍在（模拟刷新后会读回它）')
+  const toast = client.stateCalls().map((call) => call.next)
+    .filter((next) => next && typeof next === 'object' && typeof next.text === 'string').pop()
+  assert.ok(toast, '恢复默认也要有反馈')
+  assert.equal(toast.tone, 'error', '删不掉是错误态，不能报成功')
+  assert.ok(toast.text.includes('刷新后可能又回到'), '必须说清可能回到旧名：' + toast.text)
+  assert.ok(!toast.text.includes('已恢复默认：'), '不能使用「已恢复默认：X」这种持久化口径')
+
+  // 内存里的覆盖确实清掉了：品牌名一到，页签跟随 brandName（若覆盖还在，会仍是「夜猫」）
+  await buttonByText(walk(client.render(liveDesk(client), queue)), '刷新').props.onClick()
+  assert.equal(liveDesk(client).opts.label, '夜莺', '覆盖已清：品牌名到了要能接管页签')
+})
+
+test('其它页面改了页签名：storage 事件跟随新名，删除则回默认（始终只有一条注册）', () => {
+  const storage = memoryStorage()
+  const client = loadClient({ localStorage: storage })
+  assert.equal(liveDesk(client).opts.label, '主理鱼', '默认注册')
+  const deskCount = () => client.liveRegistrations().filter((r) => r.opts.id === 'session-superagent-desk').length
+  assert.equal(client.windowListenerCount('storage'), 1, 'apply 要挂一个 storage 监听')
+
+  // 另一个标签页写入了**新的自定义名**：不能清掉覆盖回品牌名，要同步成新名
+  storage.setItem(TAB_NAME_KEY, '夜猫')
+  assert.equal(
+    client.dispatchWindowEvent('storage', { key: TAB_NAME_KEY, newValue: '夜猫' }),
+    1, 'storage 事件要真的被调用',
+  )
+  assert.equal(liveDesk(client).opts.label, '夜猫', '别的页面设了新名字要跟随，不能回品牌名')
+  assert.equal(deskCount(), 1, '同 id 重注册，只有一条')
+
+  // 与本键无关的写入不得动页签
+  client.dispatchWindowEvent('storage', { key: 'dsh-session-superagent.other', newValue: '别的东西' })
+  assert.equal(liveDesk(client).opts.label, '夜猫', '无关 key 不能改页签')
+
+  // 另一个页面恢复默认（删除覆盖）→ 回品牌名 / 默认
+  storage.removeItem(TAB_NAME_KEY)
+  client.dispatchWindowEvent('storage', { key: TAB_NAME_KEY, newValue: null })
+  assert.equal(liveDesk(client).opts.label, '主理鱼', '删除事件回默认')
+  assert.equal(deskCount(), 1, '删除也是一次重注册，仍然只有一条')
+})
+
+// ── 终审 M1：外部把名字改了，面板里的草稿要跟着走，不能把旧名再存回去 ──────────
+// `tabNameDraft` 是位置化队列的最后一槽；测试桩的 setter 会把函数式更新按**当前草稿**求值并记账，
+// 于是可以直接断言「这次同步把草稿算成了什么」。
+
+const draftSlot = () => deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings').length - 1
+const lastDraftValue = (client) => {
+  const calls = client.stateCalls().filter((call) => call.index === draftSlot())
+  assert.ok(calls.length > 0, '外部改名后草稿槽必须收到一次同步')
+  return calls[calls.length - 1].next
+}
+
+test('M1：外部改了页签名后，干净草稿跟随新名（不会把旧名再存回去）', () => {
+  const storage = memoryStorage()
+  const client = loadClient({ localStorage: storage })
+  const queue = deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings')
+  const input = tabNameInput(walk(client.render(liveDesk(client), queue)))
+  assert.equal(input.props.value, '主理鱼', '首帧草稿 = 当前名字')
+  client.runEffects()
+
+  storage.setItem(TAB_NAME_KEY, '夜猫')
+  client.dispatchWindowEvent('storage', { key: TAB_NAME_KEY, newValue: '夜猫' })
+  assert.equal(liveDesk(client).opts.label, '夜猫', '页签要跟随别的页面设的新名')
+  assert.equal(lastDraftValue(client), '夜猫', '干净草稿必须跟着变成新名')
+
+  // 再点保存时草稿已经是新名：不能把旧名写回去
+  const rerendered = deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings')
+  rerendered[draftSlot()] = lastDraftValue(client)
+  buttonByText(walk(client.render(liveDesk(client), rerendered)), '保存名称').props.onClick()
+  assert.equal(storage.map.get(TAB_NAME_KEY), '夜猫', '保存不得用旧草稿覆盖别人的新名')
+})
+
+test('M1：脏草稿不被外部改名覆盖（用户的选择优先）', () => {
+  const storage = memoryStorage()
+  const client = loadClient({ localStorage: storage })
+  const queue = deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings')
+  queue[draftSlot()] = '我自己在输'
+  walk(client.render(liveDesk(client), queue))
+  client.runEffects()
+  storage.setItem(TAB_NAME_KEY, '夜猫')
+  client.dispatchWindowEvent('storage', { key: TAB_NAME_KEY, newValue: '夜猫' })
+  assert.equal(liveDesk(client).opts.label, '夜猫', '页签仍然跟随')
+  assert.equal(lastDraftValue(client), '我自己在输', '脏草稿不许被外部事件覆盖')
+})
+
+test('M1：brandName 晚到也要同步干净草稿', async () => {
+  const client = loadClient({ fetch: async () => stateResponse({ brandName: '夜莺' }) })
+  const queue = deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings')
+  walk(client.render(liveDesk(client), queue))
+  client.runEffects()
+  await buttonByText(walk(client.render(liveDesk(client), queue)), '刷新').props.onClick()
+  assert.equal(liveDesk(client).opts.label, '夜莺')
+  assert.equal(lastDraftValue(client), '夜莺', 'brandName 晚到：干净草稿跟随')
+})
+
+test('M1：localStorage.clear()（event.key === null）按删除覆盖处理', () => {
+  const storage = memoryStorage({ [TAB_NAME_KEY]: '夜猫' })
+  const client = loadClient({ localStorage: storage })
+  walk(client.render(liveDesk(client), deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings')))
+  client.runEffects()
+  assert.equal(liveDesk(client).opts.label, '夜猫')
+  storage.map.clear()
+  assert.equal(client.dispatchWindowEvent('storage', { key: null, newValue: null }), 1, 'clear 事件也要处理')
+  assert.equal(liveDesk(client).opts.label, '主理鱼', 'clear 之后回默认')
+  assert.equal(lastDraftValue(client), '主理鱼', '干净草稿跟着回默认')
+})
+
+test('M1：无关 key 的 storage 事件仍然忽略', () => {
+  const storage = memoryStorage()
+  const client = loadClient({ localStorage: storage })
+  walk(client.render(liveDesk(client), deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings')))
+  client.runEffects()
+  client.dispatchWindowEvent('storage', { key: 'dsh-session-superagent.other', newValue: '别的东西' })
+  assert.equal(liveDesk(client).opts.label, '主理鱼', '无关 key 不改页签')
+  assert.equal(client.stateCalls().filter((call) => call.index === draftSlot()).length, 0, '也不动草稿')
 })
