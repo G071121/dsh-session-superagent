@@ -13,49 +13,58 @@
 | npm 包名 | `dsh-session-superagent` |
 | 当前版本 | `0.10.12`（npm 已发布 / tag `v0.10.12` / GitHub Release 为 Latest）；门禁子包 `@mycf711/dsh-gate@0.1.5` 同样已发布 |
 | 形态 | DSH 插件：7 个工具 + 自带 `cordis.patch.yml` + 客户端面板与状态栏圆环 |
-| 目标宿主 | DeepSeek Harness ≥ 0.2.1-rc.5；Node ≥ 22.19；需已登录 `gh` CLI |
+| 目标宿主 | DeepSeek Harness `>=0.2.2-rc.1 <0.3.0-0`（`package.json` 的 `engines.dsh`）；Node ≥ 22.19；需已登录 `gh` CLI |
 
-## 二、当前状态（2026-11-09）
+## 二、当前状态（2026-11-13）
 
 ```text
-分支        main（主仓 D:\DeepSeek Harness\大肥鱼工作区\dsh-session-superagent；HEAD 以 origin/main 为准，2026-11-09 为 9df0fe2；发布 commit ec36ddec = PR #31）
-仓库结构    主仓 + 5 个 worktree（v6-integration / gate-adapter / gate-core / deep-ui / 主仓 main）；旧的 .tmp-issue9-push 已迁移，51 棵历史 worktree 已清理，本地 tag 已与远端对齐
+分支        以 origin/main 为准（2026-11-13 为 8da9fd74；#43 / #44 / #45 / #46 已合入）；不写死某个本地 main
+仓库结构    主仓 + 多个任务 worktree（gate 子包 / 各 issue·PR 分支）；已合并分支按需清理，旧副本不要当最新代码
 版本        0.10.12 / gate 0.1.5；tag v0.10.12 / gate-v0.1.5（远端已推、可达 main）；Release v0.10.12 = Latest
-npm         dist-tags.latest = 0.10.12 / 0.1.5（双包已发布）
-工作区      clean；安装副本 %DSH_HOME%\profiles\desktop\node_modules\... 已 --repair 到四段全零（只声明磁盘一致）
+npm         dist-tags.latest = 0.10.12 / 0.1.5（双包已发布；#43–#46 尚未 bump，本轮不发布）
+工作区      本轮只改 CHANGELOG / MAINTENANCE / HANDOFF 三份文档；profile 未重验（preflight --fast 报断链 21，需 --repair）
 ```
 
 | 资产 | 数量 |
 |---|---:|
-| `node --test` | 968 例全过（gate 180 / client 171 / drift 22，含 update-ui 53） |
-| `scripts/preflight.mjs` | 42 项 = 41 PASS / 1 SKIP（`smoke:observe` 需真机宿主） |
+| `node --test` | 992 例全过（gate 180 / client 191 / drift 22，含 update-ui 53；#46 功能 12 + M1 修复 5） |
+| `scripts/preflight.mjs` | 最终 main `--fast` 仅 `profile 一致性` 1 项环境失败（断链 21，需 `--repair`）；全量未跑 |
 | `scripts/ui-audit.mjs` | 11/11，100 分（写死颜色 0 / 自造 token 0） |
 | `docs/kb` | 183 篇 / 9 板块（`check-docs` 五项 PASS，含总数校验） |
 | `scripts/` | 68 个门禁与工装脚本 |
-| GitHub Release | 328 个（最新 `v0.10.12` = Latest、`gate-v0.1.5`）；历史版本仍在按批次回填 |
-| CI / 分支保护 | `ci`（Node 22/24）；main 需 PR + 2 个必需检查，禁强推禁删 |
+| GitHub Release | 328 个（2026-11-09 快照；最新 `v0.10.12` = Latest、`gate-v0.1.5`）；历史版本仍在按批次回填 |
+| CI / 分支保护 | PR #43 / #44 / #45 / #46 的 Node 22/24 均绿；main 的「维护一致性」因运行时改动未 bump **预期红**；main 需 PR + 2 个必需检查，禁强推禁删 |
 
-已验证（发布后实测）：
+已验证（最终 main `8da9fd74` 由 Lead 实测；本交接分支另跑 `check-docs` / `audit-readme-tests 992` / `diff-check`）：
 
-- `node --test` → 968/968；gate 包 180/180 且 `npm run check` 通过；client 171/171；drift 22/22；
-  `PANEL_STRICT` 门禁组 48/48；preflight 全量 **42 项 = 41 PASS / 1 SKIP**；ui-audit 11/11 = 100；
-  `check-docs` 五项 PASS（183 篇）；`check-maintenance` **6/6**；
-- 真实 Chromium **64/64**（安装版前端 `0.2.2-rc.1`；17 条门禁 / 模型场景已进正式套件，不再有单独的临时 harness）；
-- `sync-profile --repair` 处理 22 项（relinked 21 + recopied 1）→ `--check` →
-  **缺失 0 / 断链 0 / 陈旧 0 / 门禁子包漂移 0**（**只声明磁盘副本一致**，宿主运行时是否生效要重载后另验）；
-- 发布：`npm publish` 双包（`0.10.12` + `0.1.5`）；PR #31 merge commit `ec36ddec`；
-  tag `v0.10.12` / `gate-v0.1.5` 可达 main；Release `v0.10.12`（Latest）+ `gate-v0.1.5`；
-  发布时 main CI run `42551155750` 在两个 tag 上远端后重跑，Node 22/24 绿；
-- 回填：PR #32 merge commit `d8359e5`（仅 README / AGENTS / MAINTENANCE / HANDOFF），
-  回填后 main CI run `42553248097` 一次 success；随后 PR #33（交接刷新，`2ba7ada`）只改
-  HANDOFF / MAINTENANCE 的 main 表述，不再写死 main HEAD。
+- 根 `npm test` → **992/992**（gate 180 / client 191 / drift 22，含 update-ui 53；#46 功能 12 + M1 修复 5）；
+- `scripts/check-docs.mjs` 五项 PASS（360 篇 Markdown / 183 篇 kb / 9 板块）；
+- `scripts/ui-audit.mjs` **11/11（100 分）**；
+- 真实 Chromium **72/72**（**rc.1 安装版前端** `0.2.2-rc.1` + 最终 `client.js` sha256
+  `0da9bb0702a08a817c33811c7d803440f05495cb24d9c9747da4826e4b40618c` 基线；#35 新增 8 条；
+  **不是** rc.2 宿主、**不是**真实 DSH WebView）；
+- `scripts/check-maintenance.mjs` **5/6**：①–⑤ 通过，**⑥ 预期红** —— 自 `v0.10.12` 起
+  `client.js` / `lib/gh-format.js` / `lib/index.js` 有改动但版本未 bump（本轮不发布）；
+- #46 的 M1 复审：干净 / 脏草稿与 `localStorage.clear` 两条已修并复核 **resolved**；
+- `git diff --check` 无输出（exit 0）。
+
+历史基线（2026-11-09 v6 发布后快照，不要再当当前计数）：
+
+- `node --test` 968/968；preflight 42 项 = 41 PASS / 1 SKIP；真实 Chromium 64/64；
+  `check-maintenance` 6/6；`sync-profile --repair` 处理 22 项 → 缺失 0 / 断链 0 / 陈旧 0 / 门禁子包漂移 0；
+- 发布：`npm publish` 双包（`0.10.12` + `0.1.5`）；PR #31 merge `ec36ddec`；tag `v0.10.12` /
+  `gate-v0.1.5` 可达 main；Release `v0.10.12`（Latest）；回填 PR #32 `d8359e5`、PR #33 `2ba7ada`。
 
 未验证（不能写成"通过"）：
 
-- **真机走查 22 项**（`docs/真机走查清单-弹层.md`）—— 需要人在界面上按 Tab/Escape、看两套主题；
-- 宿主重载后 profile 运行时是否生效（本轮只声明磁盘一致，未重启 DSH）；
+- 真实 DSH WebView；**rc.2 host-orbit fallback 有 3 项预存失败**（旧 client 同样失败，本轮未修）；
+  **#35 的 portal 场景在 rc.2 上未直达**（脚本在预存失败处超时，未能跑到第四阶段），不能把 rc.1 的
+  72/72 泛化成 rc.2 或真实 WebView 通过；真实读屏 / 触摸 / IME；
+- 真实 Gitee 写操作（#43 只锁请求形状、#44 的 Gitee 保存契约是单测 + 浏览器 fixture，均非真实写）；
+- 宿主重载后 profile 运行时是否生效（本轮只声明磁盘一致，未重启 DSH；preflight `--fast` 的
+  `profile 一致性` 仍报断链 21，需 `--repair`）；
 - 跨主机共享盘（NFS/SMB）锁语义、真实长期数据句柄占用下的 rename EPERM、不经过本锁的外部写者并发；
-- 连续 24 小时运行的误唤醒率、限流表现；物理读屏 / 触摸 / IME；CI 矩阵 Node 22（本机只 Node 24.20）；
+- 连续 24 小时运行的误唤醒率、限流表现；本机只 Node 24.20（Node 22/24 矩阵以 PR CI 为准）；
 - **v6 的 low 残余（Q1，未修）**：Q1-1 `scanMissingImports` 只认「行首 + 单引号 + 单行 + 静态 import」
   —— 双引号 / `export … from` / 多行 `import { … } from` / 动态 `import()` 静默漏检（仓库里已有两处多行 import）；
   Q1-2 `lib/` 里名字以 `.js` 结尾的目录会抛 `EISDIR` 栈而不是「exit 2 + 点名」；
@@ -68,21 +77,25 @@ npm         dist-tags.latest = 0.10.12 / 0.1.5（双包已发布）
   **不是**真实服务端 / 真实模型。
 - **发版顺序的已知竞态**：main 上「先合并、后推 tag」时，CI 的 `checkout(fetch-depth: 0)` 可能早于 tag 推送，
   `check-maintenance` ③④ 会红（v6 首次 main CI 就这样红过）。本轮靠 `gh run rerun` 转绿，
-  根治方案见「三、下一步」第 6 条。
+  根治方案见「三、下一步」第 8 条。
 
 ## 三、下一步
 
 按价值排序，**不要一次混着做**：
 
-1. 真机走查 22 项（需要用户配合，或按用户截图逐条对照）；
-2. 补验跨主机共享盘（NFS/SMB）锁语义与真实长期句柄下的 `rename` EPERM；
-3. 宿主重载后复验 profile 运行时是否生效（现在只声明**磁盘副本一致**，未重启 DSH）；
-4. 继续回填历史 GitHub Release（`node scripts/release-gh.mjs`，用户要求"之前的慢慢改"）；
-5. 收 v6 的 low 残余：Q1-1 把 `scanMissingImports` 扩到双引号 / `export … from` / 动态 `import()`，
+1. **发布**：#43–#46 改了运行时（`client.js` / `lib/gh-format.js` / `lib/index.js`）但**未 bump**，
+   main 的维护一致性 ⑥ 预期红；按 [UPDATING.md](./UPDATING.md) 走五处版本 + tag + Release + npm（本轮未做）。
+2. **PR #41（@iJetLi「弹层显示最近唤醒的是哪一条」）**：已回评，待作者修正文档计数与 `/state` 体积
+   （120 码点上限 / `measure-state` 夹具偏乐观）；**未合入、未 ack**，不要写成已发布。
+3. 真机走查 22 项（需要用户配合，或按用户截图逐条对照）；
+4. 补验跨主机共享盘（NFS/SMB）锁语义与真实长期句柄下的 `rename` EPERM；
+5. 宿主重载后复验 profile 运行时是否生效（现在只声明**磁盘副本一致**，未重启 DSH）；
+6. 继续回填历史 GitHub Release（`node scripts/release-gh.mjs`，用户要求"之前的慢慢改"）；
+7. 收 v6 的 low 残余：Q1-1 把 `scanMissingImports` 扩到双引号 / `export … from` / 动态 `import()`，
    并跳过多行 import 的续行（小状态机，别用正则硬凑）；Q1-2 非普通文件条目归入 `repoMissing` 并点名；
    Q1-3 TARGETS 部分缺失逐条点名；Q1-4 `caseInsensitive` 覆盖 `darwin` 或加环境变量开关；
    Q2-3 删掉 `client.js:2523` / `:2530` 不可达的第二道闸门（连同不变式 tripwire 一起改）。
-6. 修掉发版顺序竞态：把流程改成「**tag 先推、再合并 main**」（tag 指向的 commit 合并后即可达），
+8. 修掉发版顺序竞态：把流程改成「**tag 先推、再合并 main**」（tag 指向的 commit 合并后即可达），
    或给 main CI 的 `check-maintenance` 步骤加一次「tag 未到 → 等待重试」。别把 ③④ 的红当噪声忽略。
 
 ## 四、硬约束

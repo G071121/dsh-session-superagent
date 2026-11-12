@@ -56,6 +56,27 @@
   Gitee 加前缀两种输入都钉住），复制了「静默新建孪生守」的真实服务端契约；旧实现变异
   （改回 `repo: watcher.repo`）下作者用例与维护者用例同时红。单测数 969 → 970
   （README / AGENTS 的基线数字待合并时同步）。
+- **REST 兜底把「最后一条评论」取成了最早一条**（Issue #39 Bug 2，PR #43）：GitHub 的 issue comments
+  接口**不认** `sort` / `direction`（那是 issue 列表的参数，传了会被静默忽略），旧兜底
+  `comments?per_page=1&sort=created&direction=desc` + `.[0]` 于是恒返回**最早**一条 —— 唤醒消息里的
+  「最后评论」从上线起一直停在第一条，会话误判成「对方没回复」后继续 ack 掉。修法：`lib/gh-format.js`
+  新增纯函数 `lastCommentArgs()` / `parseLastComment()`，改成 `per_page=100`（接口上限）+ `--paginate` +
+  `--jq '.[-1] | {login: .user.login, at: .created_at}'`；`--paginate` 下 `--jq` 是**逐页**执行的，
+  stdout 每页一行，解析取**最后一行有效记录**（跳过空行与空页的 `null`），空 / 坏 JSON / `login` 为空
+  一律 `null`，不阻断唤醒。`lib/index.js` 的 GraphQL 失败兜底改用它，删掉整段 `JSON.parse`。补 4 条用例
+  （严格参数形状 / 反向锁 `sort`·`direction`·`per_page=1`·`.[0]` 四种旧写法 / 多页 + CRLF + 空行 + 空页
+  `null` / 空与坏 JSON），旧实现 4 条全红，`.[0]` 与「取第一行」两次变异也各自变红；**Bug 1（ack 后同条
+  永不唤醒）按任务书未改语义**。
+- **卫星环删除确认层被 composer dock 裁剪、footer 点不到**（Issue #35，PR #45）：本地回退 `Modal`
+  （`dt-modal-root`，`position: fixed; inset: 0; z-index: 1000`）渲染在 `StatusOrbit` 子树里；
+  `conversation.composer.dock` 的祖先带 `transform` / `contain: layout paint` / `overflow: hidden` 时，
+  `fixed` 以该祖先为包含块，确认层的「取消 / 确认删除」被裁出视口。修法：回退 `Modal` 根节点改由宿主的
+  `require('react-dom').createPortal(root, document.body)` 渲染；`createPortal` 不可用或 `body` 不可挂载时
+  保持内联；宿主 DSH `Modal` 路径（主面板删除）不变，**没有自造第三套 Modal、没有建第二个 React root**。
+  补 1 条单测（portal 到 `document.body` + 取消 / 确认 / Escape / Tab 焦点圈 / 防重入）；
+  `scripts/verify-panel-chromium.mjs` 增加 8 条真实 Chromium 场景（64 → **72**：窄屏 390 / 桌面 1440
+  几何、footer 真实可点、Escape 关闭并回焦、确认只发一次 `delete` 且 403 留在确认层、取消、深浅截图），
+  证据目录默认仓库内 `tmp-artifacts/issue-35`，可用 `DSH_ISSUE35_ARTIFACTS` 重定向。
 
 ## [0.10.12] - 2026-11-09 —— 门禁 v6（锁回收计龄、profile 真原子、模型证据入库）
 
