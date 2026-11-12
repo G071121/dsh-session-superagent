@@ -361,7 +361,7 @@ test('L84 回归：TraceTimeline 仍是一标题加一事件一 li 的 ol.dt-tim
   }
   const client = loadClient()
   const queue = deskQueue(stateWith([watcher('a/b')]), null, {}, 'judge', '42')
-  queue[queue.length - 2] = payload
+  queue[queue.length - 3] = payload
   const tree = rendered(client.render, deskOf(client), queue)
   const timeline = one(tree, (node) => node.type === 'ol' && node.props?.className === 'dt-timeline' && text(node).includes('#42 @ a/b'), '缺 TraceTimeline')
   const items = timeline.children.filter((node) => node.type === 'li')

@@ -53,6 +53,16 @@ token 不解析 → 标签全变成裸文字，页面看着"没样式"。
 官方那套「工单 / 派工 / 评估强度」的类（`dt-ticket*`、`dt-admission*`、`dt-changed-*`、`dt-prompt*`、
 `dt-rule*` 等）保留在 CSS 里但**我们没有用**——它们是随官方 CSS 一起移植过来的，留着是为了将来真要加时不用重抄。
 
+### 设置 → 来源的「页签名称」
+
+会话头第二个 row 上那个 `conversation.view` 页签的名字可改。这一格**没有新增任何 CSS**，
+全部复用已有原语：`Field`（`dt-field` + `dt-field-head`）、`Input`（`dt-input`）、`Btn`
+（`dt-btn dt-btn-primary/ghost dt-btn-sm`）、`Hint`（`p.dt-hint`）。
+
+为什么说明这一条：对比度体检按「选择器 + 颜色」分组计不达标组数，新造一个 `<small class="...">`
+会多出一组（`.dt-field small` 的 `label-caption` 在白底只有 3.45）。复用 `p.dt-hint` 则组数不变 ——
+浅色 16 组 / 深色 13 组与基线持平。以后往设置页加字段时，说明文字优先用 `Hint`，不要新造 `small`。
+
 ## 三、动效
 
 | 名字 | 时长 | 用途 |

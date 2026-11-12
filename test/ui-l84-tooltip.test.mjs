@@ -293,9 +293,13 @@ test('主面板 scroll-close：capture scroll 函数式递增 key，effect 清�
   assert.ok(Array.isArray(effect.deps), 'HostTooltip effect 必须声明依赖数组')
   assert.equal(effect.deps.length, 0, 'scroll listener 只能在 mount/unmount 注册与清理')
 
-  assert.equal(client.windowRegistrations.length, 0, 'effect 执行前不得提前登记 window listener')
+  // 唯一允许的例外是页签名称跨页面同步用的 'storage'（apply 里挂、effect 清理时解绑）。
+  // 其余任何 window listener 都不许在 effect 执行前出现 —— 这里断言「非 storage 集合为空」，
+  // 比只数 scroll 更严：将来误挂第二个监听器会立刻红。
+  assert.deepEqual(client.windowRegistrations.filter((item) => item[0] !== 'storage'), [],
+    '除本功能的 storage 监听外，effect 执行前不得登记任何 window listener')
   const cleanup = effect.create()
-  const registration = one(client.windowRegistrations, '缺 window scroll 监听')
+  const registration = one(client.windowRegistrations.filter((item) => item[0] === 'scroll'), '缺 window scroll 监听')
   assert.equal(registration[0], 'scroll')
   assert.equal(registration[2], true)
   const listener = registration[1]
@@ -307,7 +311,7 @@ test('主面板 scroll-close：capture scroll 函数式递增 key，effect 清�
   assert.equal(hostTooltip(second.nodes).props.label, JUDGE_HINT)
   assert.equal(typeof cleanup, 'function')
   cleanup()
-  const removal = one(client.removals, 'effect 清理必须解绑 scroll')
+  const removal = one(client.removals.filter((item) => item[0] === 'scroll'), 'effect 清理必须解绑 scroll')
   assert.equal(removal[0], 'scroll')
   assert.strictEqual(removal[1], listener)
   assert.equal(removal[2], true)

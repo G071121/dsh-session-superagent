@@ -19,13 +19,23 @@ export function loadClient(options = {}) {
   // setTimeout 的登记表（用例调 flushTimers() 才真的执行）+ 微任务队列
   const timers = []
   const micro = []
+  // window 级监听要能被用例触发（页签名称靠 'storage' 事件跟随其它页面）：
+  // 以前 addEventListener 是空函数，注册了也永远收不到事件 —— 桩比运行时干净就会掩盖 bug。
+  const windowListeners = new Map()
   const sandbox = {
     window: {
       __ModuleLoader__: { load(m) { mod = m } },
       innerWidth: 1440,
       innerHeight: 900,
-      addEventListener() {},
-      removeEventListener() {},
+      addEventListener(type, fn) {
+        if (typeof fn !== 'function') return
+        if (!windowListeners.has(type)) windowListeners.set(type, new Set())
+        windowListeners.get(type).add(fn)
+      },
+      removeEventListener(type, fn) {
+        const set = windowListeners.get(type)
+        if (set) set.delete(fn)
+      },
     },
     document: {
       getElementById: () => null,
@@ -35,6 +45,9 @@ export function loadClient(options = {}) {
       removeEventListener() {},
     },
     fetch: options.fetch || (() => Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('{}') })),
+    // 页签名称的本地覆盖存在 localStorage 里（本浏览器 profile 范围）。沙箱默认**没有**它 ——
+    // 等同于隐私模式/受限沙箱，用例要模拟「存得住」时显式传一个内存版实现。
+    localStorage: options.localStorage,
     setInterval: () => 0,
     clearInterval: () => {},
     // 审核 T38 第 5 条：沙箱里没有 setTimeout —— 点「保存凭证」实测
@@ -89,13 +102,26 @@ export function loadClient(options = {}) {
   }
 
   const registrations = []
+  // 槽位注册的「活着」集合：真宿主对 list 槽位「同 id + 同 priority」重复注册会抛错
+  // （ui-conversation 的 viewTabs 靠它保证页签不重复）。桩以前返回空 disposer、从不检查，
+  // 于是「改名忘了先 dispose」这种错在桩里全绿、到真机才炸。这里按宿主语义照做。
+  const live = new Set()
   const ctx = {
     effect: (fn) => fn(),
     slots: {
       inject: (_name, fn) => fn(),
       register(opts, Component) {
-        registrations.push({ opts, Component })
-        return () => {}
+        const clash = registrations.find((r) => live.has(r)
+          && r.opts.name === opts.name && r.opts.id === opts.id
+          && (r.opts.priority ?? 0) === (opts.priority ?? 0))
+        if (clash) {
+          throw new Error('list slot "' + opts.name + '" already has an entry with id "' + opts.id
+            + '" — register at a different priority to shadow it (lowest renders)')
+        }
+        const registration = { opts, Component }
+        registrations.push(registration)
+        live.add(registration)
+        return () => { live.delete(registration) }
       },
     },
   }
@@ -133,6 +159,18 @@ export function loadClient(options = {}) {
   return {
     id: mod.id,
     registrations,
+    // 还活着的注册（dispose 过的会被剔掉）—— 「改名只重注册一条」要按它断言，
+    // 按 registrations 长度断言会把「旧的一条已释放」误判成重复。
+    liveRegistrations: () => registrations.filter((registration) => live.has(registration)),
+    // 触发 window 级事件（如 'storage'），返回真正被调用的监听数 —— 0 就说明代码没挂监听。
+    dispatchWindowEvent: (type, event) => {
+      const set = windowListeners.get(type)
+      if (!set) return 0
+      let called = 0
+      for (const fn of [...set]) { fn(event); called += 1 }
+      return called
+    },
+    windowListenerCount: (type) => (windowListeners.get(type) || new Set()).size,
     render,
     setViewport,
     // 审核 T38：setter 以前是空函数，「点击 → 状态变化」零覆盖。
@@ -175,7 +213,7 @@ function walkInner(node, out) {
 
 /** 主理鱼面板的 useState 队列：snap / tab / notice / form / token / goalDraft / goalTouched / toast / editing / draft */
 export const deskForm = { repo: '', intervalSec: '60', goal: '', labels: '', onlyAssigned: false, activeHours: '', isolated: false, workdir: '' }
-export const deskQueue = (snapshot, editing = null, draft = {}, tab = 'overview', search = '', glossary = false, update = null) =>
+export const deskQueue = (snapshot, editing = null, draft = {}, tab = 'overview', search = '', glossary = false, update = null, tabName = '主理鱼') =>
   // 末尾依次是：update / checking（0.8.38 版本检查）、settingsSection / reasonFilter / badgeFilter、
   // 以及 0.9.15 追加的 problemsOnly —— 顺序必须跟组件里的 useState 一致（测试桩按位置取值）
   // 末尾依次是：update / checking、settingsSection / reasonFilter / badgeFilter、problemsOnly，
@@ -183,7 +221,8 @@ export const deskQueue = (snapshot, editing = null, draft = {}, tab = 'overview'
   // 以及 0.9.175 追加的 ghDir（gh 账号配置目录输入框）—— 只能在末尾追加
   // 0.9.263 追加 traceResult（判定页内联追溯）—— 仍然只能在末尾追加
   // 0.9.271 追加 updateResult（界面内安装回执）—— 仍然只能在末尾追加
-  [snapshot, tab, null, deskForm, '', '', false, [], editing, draft, search, glossary, update, false, 'source', null, null, false, null, '', '', null, null]
+  // 0.10.13 追加 tabName（设置→来源的页签名称草稿）—— 只能追加在最后
+  [snapshot, tab, null, deskForm, '', '', false, [], editing, draft, search, glossary, update, false, 'source', null, null, false, null, '', '', null, null, tabName]
 
 export const watcher = (repo, extra = {}) => ({
   repo,
