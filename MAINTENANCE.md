@@ -35,7 +35,7 @@ npm         dist-tags.latest = 0.10.12 / 0.1.5（双包已发布；#43–#46 尚
 | GitHub Release | 328 个（2026-11-09 快照；最新 `v0.10.12` = Latest、`gate-v0.1.5`）；历史版本仍在按批次回填 |
 | CI / 分支保护 | PR #43 / #44 / #45 / #46 的 Node 22/24 均绿；main 的「维护一致性」因运行时改动未 bump **预期红**；main 需 PR + 2 个必需检查，禁强推禁删 |
 
-已验证（最终 main `8da9fd74` 由 Lead 实测；本 docs 分支基于 `9eb543d`，只实跑 `check-docs` / `diff-check`）：
+已验证（最终 main `8da9fd74` 由 Lead 实测；本交接分支另跑 `check-docs` / `audit-readme-tests 992` / `diff-check`）：
 
 - 根 `npm test` → **992/992**（gate 180 / client 191 / drift 22，含 update-ui 53；#46 功能 12 + M1 修复 5）；
 - `scripts/check-docs.mjs` 五项 PASS（360 篇 Markdown / 183 篇 kb / 9 板块）；

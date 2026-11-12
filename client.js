@@ -494,6 +494,142 @@ window.__ModuleLoader__.load({
       return parseSemver(value) !== null
     }
     // SEMVER_COMPARATOR_SOURCE_END
+    // ── 页签名称（`conversation.view` 的 label）────────────────────────────────
+    // 宿主只在 register()/dispose() 时重算页签文案：ui-conversation 的 viewTabs() 每次刷新都读
+    // `resolveSlotLabel(entry.options.label)`，而刷新由 `slots.subscribe('conversation.view')` 驱动
+    // （register/dispose → markDirty → 微任务 flush）。所以原地改 `options.label` 不会重画 ——
+    // 改名必须「先 dispose、再按同 id/order/component 重注册」，保证列表里始终只有一条。
+    //
+    // 名称只有一份品牌语义（issue #11 的 brandName，`/state` 下发），这里不另造字段：
+    //   本地显示覆盖（本浏览器 localStorage）> /state.brandName > 默认「主理鱼」。
+    // 覆盖只改这一个页签，不动面板标题、唤醒抬头、插件包名和 ack 标签。
+    const TAB_NAME_DEFAULT = '主理鱼'
+    const TAB_NAME_STORAGE_KEY = 'dsh-session-superagent.tab-name'
+    // 页签条不允许无限长：超过 24 个码点就截断。按码点切（Array.from）而不是 UTF-16 单元，
+    // 否则「😀」这类增补平面字符会被劈成半个代理对，渲染出一个替换符。
+    const TAB_NAME_MAX = 24
+
+    /**
+     * 页签名称归一化：与 `lib/watch.js` 的 `normalizeBrandName` 同一套规则
+     * （trim → 压平换行 → 空值回落默认），再按码点截断到 TAB_NAME_MAX。
+     * client.js 是 UMD，不能 import ESM，所以规则在这里镜像一份；
+     * `test/client.test.mjs` 有「与 normalizeBrandName 同源」的用例钉住两边一致。
+     */
+    function normalizeTabName(value, fallback = TAB_NAME_DEFAULT) {
+      const text = String(value ?? '').trim().replace(/[\r\n]+/g, ' ')
+      if (!text) return fallback
+      const points = Array.from(text)
+      return points.length <= TAB_NAME_MAX ? text : points.slice(0, TAB_NAME_MAX).join('')
+    }
+
+    /**
+     * 输入框的即时截断：只截长度，不 trim、不回落空值 ——
+     * 否则客户清空输入框想「恢复默认」时，值会被当场改回默认名，看起来像清不掉。
+     */
+    function clampTabNameDraft(value) {
+      const text = String(value ?? '')
+      const points = Array.from(text)
+      return points.length <= TAB_NAME_MAX ? text : points.slice(0, TAB_NAME_MAX).join('')
+    }
+
+    /**
+     * 取 localStorage。桌面/浏览器两种宿主都可能禁用它（隐私模式、沙箱、配额满），
+     * 访问本身也可能抛 —— 一律返回 null，调用方回落默认，绝不因为一个页签名把 apply() 弄挂。
+     */
+    function tabNameStorage() {
+      try {
+        const storage = typeof localStorage === 'undefined' ? null : localStorage
+        if (!storage || typeof storage.getItem !== 'function' || typeof storage.setItem !== 'function') return null
+        return storage
+      } catch {
+        return null
+      }
+    }
+
+    /** 本地显示覆盖（null = 没有覆盖，跟随 /state.brandName）。读不到/读坏都回落 null。 */
+    function readTabNameOverride() {
+      const storage = tabNameStorage()
+      if (!storage) return null
+      try {
+        const raw = storage.getItem(TAB_NAME_STORAGE_KEY)
+        if (typeof raw !== 'string') return null
+        const text = raw.trim()
+        return text ? text : null
+      } catch {
+        return null
+      }
+    }
+
+    let tabNameOverride = null   // 本地显示覆盖；null = 跟随品牌名
+    let tabNameBrand = ''        // /state.brandName；'' = 还没读到（老服务端也没有）
+    const tabNameListeners = new Set()
+
+    /** 当前页签名称：覆盖 > 品牌名 > 默认。 */
+    function tabNameLabel() {
+      return normalizeTabName(tabNameOverride || tabNameBrand || TAB_NAME_DEFAULT)
+    }
+
+    /** 页签名变化时重注册（apply 里订阅）。返回清理函数。 */
+    function subscribeTabName(listener) {
+      tabNameListeners.add(listener)
+      return () => { tabNameListeners.delete(listener) }
+    }
+
+    /**
+     * 通知订阅者；单个订阅者抛错不能连坐其它订阅者。
+     * `previous` 是**变化前**的文案，订阅者据此判断「草稿还是干净的」：
+     * 干净草稿跟着新值走，用户正在编辑的脏草稿不许被外部事件覆盖（终审 M1）。
+     */
+    function notifyTabName(previous) {
+      const label = tabNameLabel()
+      for (const listener of [...tabNameListeners]) {
+        try {
+          listener(label, previous)
+        } catch (error) {
+          try { note('desk-fail', String((error && error.message) || error)) } catch {}
+        }
+      }
+      return label
+    }
+
+    /**
+     * 保存页签名称：空值（含全空格）= 清除覆盖，回到 /state 的 brandName（默认「主理鱼」）。
+     * 返回 { label, persisted }：persisted=false 表示 localStorage 不可用 —— 本次会话内有效，
+     * 刷新后回到默认。面板必须把这件事说清楚，不能假装存住了。
+     */
+    function saveTabName(value) {
+      const previous = tabNameLabel()
+      const text = String(value ?? '').trim()
+      tabNameOverride = text ? normalizeTabName(text) : null
+      let persisted = false
+      const storage = tabNameStorage()
+      if (storage) {
+        try {
+          if (tabNameOverride === null) {
+            if (typeof storage.removeItem === 'function') storage.removeItem(TAB_NAME_STORAGE_KEY)
+            else storage.setItem(TAB_NAME_STORAGE_KEY, '')
+          } else {
+            storage.setItem(TAB_NAME_STORAGE_KEY, tabNameOverride)
+          }
+          persisted = true
+        } catch {
+          persisted = false
+        }
+      }
+      return { label: notifyTabName(previous), persisted }
+    }
+
+    /**
+     * /state 的品牌名同步到页签（issue #11 的唯一品牌源）。变了才重注册；
+     * 有本地覆盖时文案不变，因此不会为品牌名抖动重画。
+     */
+    function syncTabNameBrand(value) {
+      const before = tabNameLabel()
+      tabNameBrand = typeof value === 'string' ? value.trim() : ''
+      if (tabNameLabel() === before) return before
+      return notifyTabName(before)
+    }
+
     const UPDATE_UNKNOWN_HINT = '请求结果未知，请先重新检查 installed/running，再手动确认'
     let BASE = '/session-superagent'
     /**
@@ -589,6 +725,11 @@ window.__ModuleLoader__.load({
         const error = new Error((body && body.error) || ('HTTP ' + res.status))
         if (updatePost && res.status === 404) throw unknownUpdateError(error)
         throw error
+      }
+      // 页签名称跟随品牌名（issue #11 的唯一品牌源）：/state 是唯一带 brandName 的路由，
+      // 所有读取都经过这里 —— 既不额外发请求，也不在本地另存一份品牌名。
+      if (path.startsWith('/state')) {
+        try { syncTabNameBrand(body && body.brandName) } catch {}
       }
       return body
     }
@@ -3070,6 +3211,15 @@ window.__ModuleLoader__.load({
       const traceSeqRef = useRef(0)
       // 安装回执与版本检查分开：POST 失败不能冲掉当前版本和命令回退。
       const [updateResult, setUpdateResult] = useState(null)
+      // 设置→来源里的页签名称草稿。只能在 hook 队列**末尾**追加：前面的下标是测试桩的
+      // 位置化契约（deskQueue / 预览 deskHooks 必须同步追加一位）。
+      const [tabNameDraft, setTabNameDraft] = useState(() => tabNameLabel())
+      // 别处改了名字（另一个页面 / 晚到的 brandName）时同步草稿：**干净草稿**跟着新生效的名字走，
+      // 用户正在编辑的**脏草稿**不动 —— 否则外部刚设的名字会被下一次「保存」用旧草稿覆盖回去（终审 M1）。
+      // 只按「变化前的 label」判断脏净，不新增状态槽，也不碰 hook 队列位置。
+      useEffect(() => subscribeTabName((next, previous) => {
+        setTabNameDraft((current) => (normalizeTabName(current) === previous ? next : current))
+      }), [])
       // POST 后 GET 仍以 runningVersion 比较 latest；已装到 latest 且等待重载时，回执优先于 hasUpdate。
       const updateAwaitingReload = Boolean(updateResult && updateResult.needsReload === true
         && update && updateResult.installedVersion === update.latest)
@@ -3077,6 +3227,26 @@ window.__ModuleLoader__.load({
       const openSettings = (section) => {
         setSettingsSection(section)
         setTab('settings')
+      }
+      // 设置→来源：保存 / 恢复默认页签名称。保存后立刻重注册，当前 GUI 的页签当场就变；
+      // 存不住（localStorage 被禁用）时只在本会话内有效 —— 必须如实说清，不能假装存住了。
+      const saveTabNameDraft = () => {
+        const result = saveTabName(tabNameDraft)
+        setTabNameDraft(result.label)
+        notify(result.persisted
+          ? '页签名称已保存：' + result.label
+          : '页签名称已改为「' + result.label + '」；浏览器本地存储不可用，刷新后会回到默认',
+        result.persisted ? 'info' : 'error')
+      }
+      const resetTabNameDraft = () => {
+        // 删不掉覆盖时不能报「已恢复默认」：本次会话内确实回到了默认，但刷新后旧名字会回来。
+        const previous = tabNameLabel()
+        const result = saveTabName('')
+        setTabNameDraft(result.label)
+        notify(result.persisted
+          ? '页签名称已恢复默认：' + result.label
+          : '页签名称已在本次会话内恢复默认：「' + result.label + '」；浏览器本地存储不可用（删除失败），刷新后可能又回到「' + previous + '」',
+        result.persisted ? 'info' : 'error')
       }
       // 建议规则弹层：给"叫醒了没回音"一个下一步动作（只提供可复制的规则，不替客户写仓库文件）
 
@@ -4097,6 +4267,9 @@ window.__ModuleLoader__.load({
       // 没有就交给服务端按默认目录来，面板把服务端回的路径原样显示出来。
       const gateRepo = (watchers.find((item) => typeof item.workdir === 'string' && item.workdir.trim()) || {}).workdir || ''
 
+      // 页签名称的草稿状态：脏 = 「保存后文案会变」（空值 = 恢复默认，也算一种改动）。
+      const tabNameDirty = normalizeTabName(tabNameDraft) !== tabNameLabel()
+      const tabNameOverridden = tabNameOverride !== null
       const settingsSections = [
         h(Section, { key: 'source', title: '来源' },
           h(KeyValues, { rows: [
@@ -4129,7 +4302,23 @@ window.__ModuleLoader__.load({
               const each = roots.map((r) => r.count + ' 个隔离根 · ' + bytesText(r.bytes)).join('；')
               return roots.length > 1 ? each + '（合计 ' + bytesText(body.isolation.totalBytes) + '）' : each
             })()],
-          ] })),
+          ] }),
+          // 页签名称：只改会话头第二个 row（对话 / 轨迹 / …）上的这一个页签，
+          // 不动面板标题、唤醒抬头、插件包名和 ack 标签。
+          field('页签名称',
+            h(Input, {
+              value: tabNameDraft,
+              'aria-label': '页签名称',
+              placeholder: BRAND,
+              onChange: (e) => setTabNameDraft(clampTabNameDraft(e.target.value)),
+            }),
+            '只改这个页签：会话标题、插件包名和 ack 标签都不动'),
+          h(Hint, null, '默认跟随品牌名「' + BRAND + '」；留空 = 恢复默认。最多 ' + TAB_NAME_MAX
+            + ' 个字符。存在这台机器的浏览器本地（同一浏览器的所有会话共用），不同步到服务端或其他设备。'),
+          h('div', { className: 'dt-actions' },
+            h(Btn, { variant: 'primary', size: 'sm', onClick: saveTabNameDraft, disabled: !tabNameDirty }, '保存名称'),
+            h(Btn, { variant: 'ghost', size: 'sm', onClick: resetTabNameDraft, disabled: !tabNameOverridden }, '恢复默认')),
+        ),
         h(Section, { key: 'creds', title: '凭证' },
           h(KeyValues, { rows: [['GitHub token', credentials.token === 'none' ? '未配置（回退到已登录的 gh CLI）' : '已配置'], ['SSH 私钥', credentials.sshKeyPath === 'none' ? '未配置（当前版本不使用）' : '已配置'],
             ['gh 账号', credentials.ghConfigDir === 'configured' ? '已绑定独立配置目录（评论挂智能体账号）' : '宿主当前登录的账号'],
@@ -4564,17 +4753,68 @@ window.__ModuleLoader__.load({
         try { ensurePortedCss() } catch {}
 
         // ① the 主理鱼 tab in the centre-column view ring
+        //    页签名可设置（本地显示覆盖 > /state.brandName > 默认「主理鱼」）。
+        //    宿主只在 register/dispose 时重算文案，所以改名走「先释放、再同 id/order/component
+        //    重注册」—— 先 dispose 保证列表里不会出现第二条同 id 的注册。
+        tabNameOverride = readTabNameOverride()
         ctx.effect(() => {
           try {
             return ctx.slots.inject('conversation.view', () => {
-              const dispose = ctx.slots.register({
-                name: 'conversation.view',
-                id: 'session-superagent-desk',
-                order: 30,
-                label: '主理鱼',
-              }, ZhuliPanel)
+              let disposeDesk = null
+              const mountDesk = () => {
+                disposeDesk = ctx.slots.register({
+                  name: 'conversation.view',
+                  id: 'session-superagent-desk',
+                  order: 30,
+                  label: tabNameLabel(),
+                }, ZhuliPanel)
+              }
+              const unmountDesk = () => {
+                if (!disposeDesk) return
+                const dispose = disposeDesk
+                disposeDesk = null
+                try { dispose() } catch {}
+              }
+              mountDesk()
               note('desk-registered', 'ok')
-              return dispose
+              const stopWatching = subscribeTabName(() => {
+                try {
+                  unmountDesk()
+                  mountDesk()
+                  note('desk-registered', 'renamed')
+                } catch (error) {
+                  note('desk-fail', String((error && error.message) || error))
+                }
+              })
+              // 同一浏览器的其它页面（另一标签页 / 另一个窗口）改了名字：storage 事件只当触发器，
+              // 真值一律回 localStorage 读最新的 —— 别人设了**新名字**要跟着同步，不能清掉覆盖回品牌名；
+              // 只有对方删除（newValue === null）才回品牌名。
+              const onStorage = (event) => {
+                if (!event) return
+                // localStorage.clear() 的事件 key 是 null —— 那是「所有覆盖都没了」，按删除处理。
+                const cleared = event.key === null || event.key === undefined
+                if (!cleared && event.key !== TAB_NAME_STORAGE_KEY) return
+                const before = tabNameLabel()
+                tabNameOverride = (cleared || event.newValue === null || event.newValue === undefined)
+                  ? null
+                  : readTabNameOverride()
+                if (tabNameLabel() === before) return
+                try { notifyTabName(before) } catch {}
+              }
+              try {
+                if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {
+                  window.addEventListener('storage', onStorage)
+                }
+              } catch {}
+              return () => {
+                stopWatching()
+                try {
+                  if (typeof window !== 'undefined' && typeof window.removeEventListener === 'function') {
+                    window.removeEventListener('storage', onStorage)
+                  }
+                } catch {}
+                unmountDesk()
+              }
             })
           } catch (error) {
             note('desk-fail', String((error && error.message) || error))

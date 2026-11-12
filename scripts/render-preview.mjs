@@ -48,6 +48,13 @@ const sandbox = {
     addEventListener() {}, removeEventListener() {},
   },
   fetch: () => Promise.resolve({ ok: true, status: 200, text: () => Promise.resolve('{}') }),
+  // 页签名称的本地覆盖：预览要展示「已保存」的样子（输入框里的名字 = 生效的名字），
+  // 所以像真机一样从 localStorage 读，而不是往组件里塞一个假的脏草稿。
+  localStorage: {
+    getItem: (key) => (key === 'dsh-session-superagent.tab-name' ? '夜猫' : null),
+    setItem: () => {},
+    removeItem: () => {},
+  },
   setInterval: () => 0, clearInterval: () => {}, setTimeout: () => 0, clearTimeout: () => {},
   console,
 }
@@ -295,8 +302,9 @@ const editingHooks = (dirty = false) => {
   hooks[9] = { ...editDraft, goal: dirty ? '修改后的目标' : editDraft.goal }
   return hooks
 }
-const deskHooks = ({ snap = snapshot, tab = 'overview', notice = null, glossary = false, update = null, settingsSection = 'source' } = {}) => [
-  snap, tab, notice, blankForm, '', '', false, [], null, {}, '', glossary, update, false, settingsSection, null, null, false, null, '', '', null,  // 末尾：ghDir / traceResult / updateResult
+const deskHooks = ({ snap = snapshot, tab = 'overview', notice = null, glossary = false, update = null, settingsSection = 'source', tabName = '主理鱼' } = {}) => [
+  snap, tab, notice, blankForm, '', '', false, [], null, {}, '', glossary, update, false, settingsSection, null, null, false, null, '', '', null, null,  // 末尾：ghDir / giteeToken / traceResult / updateResult / tabName
+  tabName,
 ]
 
 const ONLY_NAME = (process.argv.find((a) => a.startsWith('--only=')) || '').slice('--only='.length)
@@ -307,7 +315,10 @@ const scenarios = [
   { name: '行内编辑（已修改）', hooks: editingHooks(true) },
   { name: '判定', hooks: deskHooks({ tab: 'judge' }) },
   { name: '触发', hooks: deskHooks({ tab: 'trigger' }) },
-  { name: '设置（来源）', hooks: deskHooks({ tab: 'settings' }) },
+  // 页签名称：这一帧展示「已保存」的样子（输入框里就是生效中的名字；保存按钮因无改动而禁用、
+  // 恢复默认可点）。不注入 toast：成功提示走 useToast 的 toastView 槽，不能拿错误色的 notice 冒充。
+  { name: '设置（来源）', hooks: deskHooks({ tab: 'settings', settingsSection: 'source', tabName: '夜猫' }) },
+  // 页签名称：改完之后的样子（字段里是自定义名 + 保存成功提示），深浅两套各出一张图
   { name: '设置（凭证）', hooks: deskHooks({ tab: 'settings', settingsSection: 'creds' }) },
   { name: '设置（诊断）', hooks: deskHooks({ tab: 'settings', settingsSection: 'diagnose' }) },
   { name: '设置（版本与更新）', hooks: deskHooks({ tab: 'settings', settingsSection: 'update', update: { current: '0.8.45', latest: '0.9.0', hasUpdate: true, command: 'dsh plugin add dsh-session-superagent@0.9.0' } }) },
