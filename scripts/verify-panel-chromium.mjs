@@ -26,7 +26,7 @@
 
 import { execFileSync } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs'
 import http from 'node:http'
 import { delimiter, dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -124,7 +124,18 @@ const ASAR = install.asar
 const ELECTRON = install.electron
 const FRONTEND = `${ASAR}/dsh/node_modules/@deepseek-ai/dsh-web-frontend`
 const THEME_CLIENT = `${ASAR}/dsh/node_modules/@deepseek-ai/dsh-client-ui-theme/lib/client.js`
+// rc.2 随包发主题样式源码；rc.1 没有这个目录（走 THEME_CLIENT 的 var 通道）。
+const THEME_SRC_STYLES = `${ASAR}/dsh/node_modules/@deepseek-ai/dsh-client-ui-theme/src/styles`
 const SCREENSHOTS = `${REPO}/docs/assets`
+// Issue #35 的证据目录：真实 Chromium 的几何/点击日志与深浅窄屏截图落这里，不混进 docs/assets 基线。
+// 默认在仓库内 tmp-artifacts/issue-35（tmp-* 已被 .gitignore 覆盖）——脚本绝不隐式写到仓库之外；
+// 需要别的落点（例如汇总目录）时用 DSH_ISSUE35_ARTIFACTS 显式重定向。
+const ISSUE35_ARTIFACTS = process.env.DSH_ISSUE35_ARTIFACTS
+  ? resolve(process.env.DSH_ISSUE35_ARTIFACTS)
+  : join(REPO, 'tmp-artifacts', 'issue-35')
+const ISSUE35_ARTIFACTS_SOURCE = process.env.DSH_ISSUE35_ARTIFACTS
+  ? 'env:DSH_ISSUE35_ARTIFACTS'
+  : 'default:tmp-artifacts/issue-35'
 
 // 只解析路径的探针：给测试与「验的到底是哪一版」取证用，不启动浏览器。
 if (process.argv.includes('--print-paths')) {
@@ -136,6 +147,8 @@ if (process.argv.includes('--print-paths')) {
     source: install.source,
     frontend: FRONTEND,
     themeClient: THEME_CLIENT,
+    issue35Artifacts: ISSUE35_ARTIFACTS,
+    issue35ArtifactsSource: ISSUE35_ARTIFACTS_SOURCE,
   }, null, 2))
   process.exit(0)
 }
@@ -156,7 +169,7 @@ const unverified = [
   '未进入需要真实会话与凭证的 DSH Web GUI；本脚本验证独立 loopback 页面中真实 client.js 的 slot 注册以及 desk/orbit Component 挂载。',
   '真实 StatusOrbit 签名无 props；sessionId 传给 desk，Orbit watcher 数据由同一 fixture /state API 提供，不虚构 ctx/slot 参数。',
   '门禁/模型场景（U1/U5）的 GET /gates、GET /gates/models、POST /gates/preview 与 POST /gates 全部打本脚本的 loopback fixture：不是真实 WebView、不是真实服务端、不是真实模型；只验面板在真实 React 18 下的行为，不验服务端持久化。',
-  '未执行真实保存、安装更新、删除、暂停、恢复或 watcher 轮询；除门禁 fixture 的 POST 外，唯一 POST 是末尾显式 fixture 防写探针，必须由 loopback 返回 403。',
+  '未执行真实保存、安装更新、删除、暂停、恢复或 watcher 轮询；除门禁 fixture 的 POST 外，另有两条显式防写探针（末尾 guardProbe 与 Issue #35 确认点击），都必须由 loopback 返回 403。',
   '未验物理读屏、触摸、IME、真实 GitHub/Gitee 响应与真实 watcher 状态变化。',
 ]
 
@@ -233,8 +246,27 @@ const requiredThemeStyles = [
   'focus_css_default', 'onboarding_css_default', 'scrollbar_css_default',
   'gradient_shadow_text_css_default', 'shiki_css_default',
 ];
+// rc.2 起主题包不再用 var *_css_default = "..." 内联整表（lib/client.js 只剩组件 CSS module），
+// 官方把主题样式随包发在 src/styles/*.css；rc.1 仍走上面的 var 通道，两套都不猜顺序。
+const themeStyleFiles = {
+  base_css_default: 'base.css',
+  corner_shape_css_default: 'corner-shape.css',
+  design_platform_css_default: 'design-platform.css',
+  focus_css_default: 'focus.css',
+  onboarding_css_default: 'onboarding.css',
+  scrollbar_css_default: 'scrollbar.css',
+  gradient_shadow_text_css_default: 'gradient-shadow-text.css',
+  shiki_css_default: 'shiki.css',
+};
 for (const name of requiredThemeStyles) {
-  if (typeof themeStyles[name] !== 'string') throw new Error('missing official theme style: ' + name);
+  if (typeof themeStyles[name] === 'string') continue;
+  const path = process.argv[4] + '/' + themeStyleFiles[name];
+  if (fs.existsSync(path)) themeStyles[name] = fs.readFileSync(path, 'utf8');
+}
+for (const name of requiredThemeStyles) {
+  if (typeof themeStyles[name] !== 'string') {
+    throw new Error('missing official theme style: ' + name + '（rc.1 的 var 通道与 rc.2 的 src/styles 通道都没有）');
+  }
 }
 process.stdout.write(JSON.stringify({
   frontendVersion: pkg.version,
@@ -246,7 +278,7 @@ process.stdout.write(JSON.stringify({
   themeStyles: Object.fromEntries(requiredThemeStyles.map((name) => [name, themeStyles[name]])),
 }));
 `
-  const output = execFileSync(ELECTRON, ['-e', reader, FRONTEND, ASAR, THEME_CLIENT], {
+  const output = execFileSync(ELECTRON, ['-e', reader, FRONTEND, ASAR, THEME_CLIENT, THEME_SRC_STYLES], {
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
@@ -306,6 +338,9 @@ body { color: var(--dsw-alias-label-primary, #f4f4f5); font-family: var(--dsw-fo
 #root { display: none !important; }
 #app { height: 100vh; min-height: 640px; }
 #orbit-app { position: fixed; right: 32px; bottom: 32px; z-index: 20; }
+/* Issue #35：真实 composer dock 的祖先条件 —— transform + contain + overflow 的窄容器。
+   确认层若不 portal 到 body，position:fixed 会以这个容器为包含块并被裁掉。 */
+#dock-app { position: fixed; left: 16px; bottom: 16px; width: 340px; height: 96px; overflow: hidden; contain: layout paint; transform: translateZ(0); z-index: 20; visibility: hidden; }
 button, input, textarea { font: inherit; }
 `
 
@@ -360,6 +395,8 @@ try {
   ReactDOM.createRoot(document.getElementById('app')).render(React.createElement(desk.Component, { sessionId: ${JSON.stringify(SESSION_ID)} }));
   // 真实 StatusOrbit() 没有 props； watcher fixture 由 /state API 加载，不能伪造一个 props 适配层。
   ReactDOM.createRoot(document.getElementById('orbit-app')).render(React.createElement(orbit.Component));
+  // Issue #35：第二个真实 StatusOrbit 实例挂进带 transform/contain 的窄 dock。
+  ReactDOM.createRoot(document.getElementById('dock-app')).render(React.createElement(orbit.Component));
   window.__harnessReady = true;
 } catch (error) {
   window.__harnessError = String(error && error.stack || error);
@@ -378,7 +415,7 @@ ${styles.map((name) => `<link rel="stylesheet" href="/${name}">`).join('\n')}
 <style>${Object.values(installed.themeStyles).join('\n')}</style>
 <style>${HARNESS_CSS}</style>
 <script>${CAPTURE_FACADE}</script>
-</head><body data-ds-dark-theme="true"><div id="root"></div><div id="app"></div><div id="orbit-app"></div>
+</head><body data-ds-dark-theme="true"><div id="root"></div><div id="app"></div><div id="orbit-app"></div><div id="dock-app"></div>
 <script type="module" src="/${entry}"></script>
 <script type="module">${HARNESS_MODULE.replaceAll('</script', '<\\/script')}</script>
 </body></html>`
@@ -637,7 +674,10 @@ try {
     && !document.body.innerText.includes('正在读取…'), undefined, { timeout: 15000 })
   await page.waitForFunction(() => {
     const trigger = document.querySelector('#orbit-app .sa-orbit-trigger')
+    const dockTrigger = document.querySelector('#dock-app .sa-orbit-trigger')
     return trigger && !trigger.classList.contains('is-loading') && trigger.getAttribute('aria-label')?.includes('共 2 条')
+      && dockTrigger && !dockTrigger.classList.contains('is-loading')
+      && dockTrigger.getAttribute('aria-label')?.includes('共 2 条')
   }, undefined, { timeout: 15000 })
   const browser = await page.evaluate(async () => ({
     userAgent: navigator.userAgent,
@@ -1763,7 +1803,270 @@ try {
     && apiLog.filter((row) => row.method !== 'GET' && !row.path.startsWith('/session-superagent/gates')).length === 1
     && apiLog.at(-1)?.body.includes('fixture-read-only-guard-probe'),
   { status: guardProbe.status, body: guardProbe.body, request: apiLog.at(-1) })
+  // ── 第四阶段 · Issue #35：确认层在真实 composer dock 里的几何与真实点击 ─────────────
+  // dock 是 transform + contain:layout paint + overflow:hidden 的窄容器。确认层若不 portal
+  // 到 body，dt-modal-root 的 position:fixed 会以 dock 为包含块并被裁掉：footer 看不见、点不到。
+  // 本段是脚本里第二条显式 mutation：真实鼠标点「确认删除」→ POST /watch → loopback 仍回 403，
+  // 不离开 127.0.0.1、不真的删任何东西；它证明的是「按钮真的被点中」，不是删除成功。
+  // 所有等待都带 try/catch：修复前这一步本来就该红，不能把「红」变成「脚本崩掉」。
+  mkdirSync(ISSUE35_ARTIFACTS, { recursive: true })
+  const dockTrigger = '#dock-app .sa-orbit-trigger'
+  const dockPanelSelector = '.sa-dock-panel[role="dialog"]'
+  const confirmModalSelector = '.dt-modal-root .dt-modal[role="dialog"][aria-modal="true"]'
+  const dockGeometry = async () => page.evaluate((selectors) => {
+    const dock = document.getElementById('dock-app')
+    const root = document.querySelector('.dt-modal-root')
+    const modal = document.querySelector(selectors.confirmModal)
+    const footer = modal && modal.querySelector('.dt-modal-footer')
+    const buttons = [...((footer && footer.querySelectorAll('button')) || [])]
+    const cancel = buttons.find((node) => node.textContent === '取消')
+    const confirm = buttons.find((node) => node.textContent === '确认删除')
+    const box = (node) => {
+      if (!node) return null
+      const rect = node.getBoundingClientRect()
+      return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height }
+    }
+    const cover = (node) => {
+      const rect = box(node)
+      if (!rect) return null
+      return document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+    }
+    const cancelHit = cover(cancel)
+    const confirmHit = cover(confirm)
+    const dockRect = box(dock)
+    const cancelRect = box(cancel)
+    const confirmRect = box(confirm)
+    const rootStyle = root ? getComputedStyle(root) : null
+    const dockStyle = dock ? getComputedStyle(dock) : null
+    const cancelled = cancelHit && cancel && (cancelHit === cancel || cancel.contains(cancelHit))
+    const confirmed = confirmHit && confirm && (confirmHit === confirm || confirm.contains(confirmHit))
+    const inViewport = (rect) => Boolean(rect && rect.left >= 0 && rect.top >= 0
+      && rect.right <= innerWidth && rect.bottom <= innerHeight)
+    return {
+      rootParent: root && root.parentElement ? root.parentElement.tagName : null,
+      root: box(root),
+      dock: dockRect,
+      modal: box(modal),
+      footer: box(footer),
+      cancel: cancelRect,
+      confirm: confirmRect,
+      cancelHit: cancelHit ? (cancelHit.tagName + '.' + String(cancelHit.className || '')) : null,
+      confirmHit: confirmHit ? (confirmHit.tagName + '.' + String(confirmHit.className || '')) : null,
+      cancelHitIsButton: Boolean(cancelled),
+      confirmHitIsButton: Boolean(confirmed),
+      cancelInViewport: inViewport(cancelRect),
+      confirmInViewport: inViewport(confirmRect),
+      dockAncestor: dockStyle ? { contain: dockStyle.contain, transform: dockStyle.transform, overflow: dockStyle.overflow } : null,
+      rootPosition: rootStyle ? rootStyle.position : null,
+      viewport: { width: innerWidth, height: innerHeight },
+      modalInsideDock: Boolean(dockRect && box(modal)
+        && box(modal).left >= dockRect.left && box(modal).right <= dockRect.right
+        && box(modal).top >= dockRect.top && box(modal).bottom <= dockRect.bottom),
+    }
+  }, { confirmModal: confirmModalSelector })
 
+  const openDockOrbit = async () => {
+    await page.click(dockTrigger)
+    await page.waitForFunction((selector) => {
+      const panel = document.querySelector(selector)
+      return panel && getComputedStyle(panel).visibility === 'visible'
+    }, dockPanelSelector, { timeout: 5000 })
+  }
+  const openDockConfirm = async () => {
+    await page.click('.sa-dock-panel[role="dialog"] .sa-dock-row:first-child .sa-dock-actions button[aria-label="删除"]')
+    await page.waitForSelector(confirmModalSelector, { state: 'visible', timeout: 5000 })
+    await page.waitForFunction((selector) => {
+      const modal = document.querySelector(selector)
+      return modal && modal.contains(document.activeElement) && document.activeElement !== document.body
+    }, confirmModalSelector, { timeout: 3000 })
+  }
+  const waitDockConfirmClosed = async () => {
+    try {
+      await page.waitForFunction((selector) => !document.querySelector(selector), confirmModalSelector, { timeout: 4000 })
+      return true
+    } catch {
+      return false
+    }
+  }
+  const dockFocus = async () => page.evaluate((selector) => {
+    const trigger = document.querySelector(selector)
+    return {
+      activeIsTrigger: document.activeElement === trigger,
+      activeConnected: document.activeElement?.isConnected === true,
+      expanded: trigger?.getAttribute('aria-expanded'),
+      modalPresent: Boolean(document.querySelector('.dt-modal-root .dt-modal[role="dialog"]')),
+      orbitPresent: Boolean(document.querySelector('.sa-dock-panel[role="dialog"]')),
+    }
+  }, dockTrigger)
+  const dockPoint = async (text) => page.evaluate(({ selector, text }) => {
+    const modal = document.querySelector(selector)
+    const button = [...(modal?.querySelectorAll('.dt-modal-footer button') || [])].find((node) => node.textContent === text)
+    if (!button) return null
+    const rect = button.getBoundingClientRect()
+    return {
+      x: rect.left + rect.width / 2,
+      y: rect.top + rect.height / 2,
+      rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom },
+      inViewport: rect.left >= 0 && rect.top >= 0 && rect.right <= innerWidth && rect.bottom <= innerHeight,
+    }
+  }, { selector: confirmModalSelector, text })
+  const dockClickButton = async (text, label) => {
+    const point = await dockPoint(text)
+    if (!point || !point.inViewport) return { point, clicked: false }
+    await page.mouse.click(point.x, point.y, { label })
+    return { point, clicked: true }
+  }
+
+  // dock 在其它阶段保持 visibility:hidden —— 否则它盖住设置页底部的控件，拦截真实点击。
+  await page.evaluate(() => { document.getElementById('dock-app').style.visibility = 'visible' })
+  await page.cdp('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 1, mobile: false })
+  await page.waitForTimeout(250)
+  await openDockOrbit()
+  await openDockConfirm()
+  const dockOpened = await dockGeometry()
+  writeFileSync(join(ISSUE35_ARTIFACTS, 'dock-confirm-geometry.json'), JSON.stringify({ phase: 'modal-open-390', dockOpened }, null, 2))
+  observe('Issue #35 dock 确认层几何（窄屏 390）', dockOpened)
+  check('Issue #35 dock 确认层挂到 document.body（结构）', dockOpened.rootParent === 'BODY'
+    && dockOpened.rootPosition === 'fixed'
+    && dockOpened.root?.width >= dockOpened.viewport.width - 1
+    && dockOpened.root?.height >= dockOpened.viewport.height - 1, dockOpened)
+  check('Issue #35 dock 确认层 footer 完整显示且真实可点', dockOpened.footer !== null
+    && dockOpened.cancelInViewport && dockOpened.confirmInViewport
+    && dockOpened.cancelHitIsButton && dockOpened.confirmHitIsButton
+    && dockOpened.modalInsideDock === false, dockOpened)
+
+  // Tab 圈：确认层在 body 下仍只在 dialog 内循环（初始焦点 关闭 → 取消 → 确认删除 → 关闭）。
+  const dockTabCycle = []
+  let dockTabHeld = true
+  for (let index = 0; index < 3; index += 1) {
+    await page.keyboard.press('Tab')
+    const focus = await page.evaluate((selector) => {
+      const modal = document.querySelector(selector)
+      return {
+        inside: Boolean(modal && modal.contains(document.activeElement)),
+        label: document.activeElement?.getAttribute('aria-label') || document.activeElement?.textContent,
+        connected: document.activeElement?.isConnected === true,
+      }
+    }, confirmModalSelector)
+    dockTabCycle.push(focus)
+    dockTabHeld = dockTabHeld && focus.inside && focus.connected
+  }
+  check('Issue #35 dock 确认层 Tab 焦点圈闭合且不丢焦', dockTabHeld
+    && JSON.stringify(dockTabCycle.map((row) => row.label)) === JSON.stringify(['取消', '确认删除', '关闭']), dockTabCycle)
+
+  // 深浅两套主题各出一张窄屏图（确认层打开状态）。
+  const issue35Shots = []
+  const issue35Shot = async (name) => {
+    const path = join(ISSUE35_ARTIFACTS, name)
+    try {
+      await page.screenshot({ path })
+      issue35Shots.push(path)
+      observe('Issue #35 截图', { path, bytes: statSync(path).size })
+    } catch (error) {
+      const detail = String((error && error.message) || error)
+      console.log(`SKIP Issue #35 截图 ${name} ${JSON.stringify(detail)}`)
+      observe('Issue #35 截图通道跳过', { name, error: detail })
+    }
+  }
+  await issue35Shot('issue35-dock-confirm-dark-390.png')
+  await page.evaluate(() => document.body.removeAttribute('data-ds-dark-theme'))
+  await page.waitForTimeout(120)
+  await issue35Shot('issue35-dock-confirm-light-390.png')
+  await page.evaluate(() => document.body.setAttribute('data-ds-dark-theme', 'true'))
+  await page.waitForTimeout(120)
+
+  // 真实鼠标点「确认删除」：必须真的发出 POST /watch（fixture 回 403 → 错误留在确认层里）。
+  const beforeConfirmPosts = apiLog.filter((row) => row.method === 'POST' && row.path === '/session-superagent/watch').length
+  const confirmClick = await dockClickButton('确认删除', '确认删除')
+  let confirmErrorShown = false
+  if (confirmClick.clicked) {
+    try {
+      await page.waitForFunction((selector) => {
+        const error = document.querySelector(selector + ' .dt-error')
+        return Boolean(error && error.textContent.includes('删除失败'))
+      }, confirmModalSelector, { timeout: 3000 })
+      confirmErrorShown = true
+    } catch {}
+  }
+  const confirmClicked = await page.evaluate((selector) => {
+    const modal = document.querySelector(selector)
+    const error = modal?.querySelector('.dt-error')
+    const button = [...(modal?.querySelectorAll('.dt-modal-footer button') || [])].find((node) => node.textContent === '确认删除')
+    return {
+      error: error?.textContent || null,
+      errorRole: error?.getAttribute('role') || null,
+      buttonText: button?.textContent || null,
+      buttonBusy: button?.getAttribute('aria-busy') || null,
+      modalPresent: Boolean(modal),
+    }
+  }, confirmModalSelector)
+  const confirmPosts = apiLog.filter((row) => row.method === 'POST' && row.path === '/session-superagent/watch')
+  check('Issue #35 dock「确认删除」真实可点：点击真的发出唯一一次 delete，403 错误留在确认层里',
+    confirmClick.clicked && confirmErrorShown && confirmClicked.modalPresent
+    && confirmPosts.length === beforeConfirmPosts + 1
+    && confirmPosts.at(-1)?.body.includes('"action":"delete"')
+    && confirmClicked.errorRole === 'alert',
+    { confirmClick, confirmClicked, confirmPosts: confirmPosts.length })
+
+  // 真实鼠标点「取消」：确认层关闭、dock 圆环拿回焦点、orbit surface 不重开。
+  const cancelClick = await dockClickButton('取消', '取消')
+  const cancelClosed = cancelClick.clicked ? await waitDockConfirmClosed() : false
+  if (cancelClosed) {
+    try {
+      await page.waitForFunction((selector) => document.activeElement === document.querySelector(selector), dockTrigger, { timeout: 3000 })
+    } catch {}
+  }
+  const dockCancelled = await dockFocus()
+  check('Issue #35 dock「取消」真实可点：关闭确认层并回焦圆环，不重开 surface',
+    cancelClick.clicked && cancelClosed && !dockCancelled.modalPresent
+    && !dockCancelled.orbitPresent && dockCancelled.activeIsTrigger
+    && dockCancelled.activeConnected && dockCancelled.expanded === 'false',
+    { cancelClick, cancelClosed, dockCancelled })
+
+  // Escape：真实按键关闭确认层，同样回焦圆环。取消都没关掉时不再往下叠步骤（避免点被遮住的控件）。
+  let dockEscaped = null
+  if (cancelClosed) {
+    await openDockOrbit()
+    await openDockConfirm()
+    await page.keyboard.press('Escape')
+    const escapeClosed = await waitDockConfirmClosed()
+    if (escapeClosed) {
+      try {
+        await page.waitForFunction((selector) => document.activeElement === document.querySelector(selector), dockTrigger, { timeout: 3000 })
+      } catch {}
+    }
+    dockEscaped = await dockFocus()
+    check('Issue #35 dock 确认层 Escape 关闭并回焦圆环',
+      escapeClosed && !dockEscaped.modalPresent && !dockEscaped.orbitPresent
+      && dockEscaped.activeIsTrigger && dockEscaped.activeConnected, dockEscaped)
+  } else {
+    check('Issue #35 dock 确认层 Escape 关闭并回焦圆环', false, { skipped: '取消未能关闭确认层，Escape 步骤未执行' })
+  }
+
+  // 1440 宽复核一次几何：同一份 DOM 在常规桌面视口下仍完整显示、footer 可点。
+  let dockDesktop = null
+  if (dockEscaped && !dockEscaped.modalPresent) {
+    await page.cdp('Emulation.setDeviceMetricsOverride', { width: 1440, height: 1000, deviceScaleFactor: 1, mobile: false })
+    await page.waitForTimeout(250)
+    await openDockOrbit()
+    await openDockConfirm()
+    dockDesktop = await dockGeometry()
+    writeFileSync(join(ISSUE35_ARTIFACTS, 'dock-confirm-geometry-desktop.json'), JSON.stringify({ phase: 'desktop-1440', dockDesktop }, null, 2))
+    await issue35Shot('issue35-dock-confirm-dark-1440.png')
+    check('Issue #35 dock 确认层在 1440 宽仍完整显示且 footer 可点', dockDesktop.rootParent === 'BODY'
+      && dockDesktop.cancelInViewport && dockDesktop.confirmInViewport
+      && dockDesktop.cancelHitIsButton && dockDesktop.confirmHitIsButton, dockDesktop)
+    await dockClickButton('取消', '取消')
+    await waitDockConfirmClosed()
+  } else {
+    check('Issue #35 dock 确认层在 1440 宽仍完整显示且 footer 可点', false, { skipped: '前一步未关闭确认层，桌面复核未执行' })
+  }
+  if (issue35Shots.length >= 2) {
+    check('Issue #35 深浅窄屏截图各一张', issue35Shots.some((path) => path.includes('dark'))
+      && issue35Shots.some((path) => path.includes('light')), issue35Shots.map((path) => path.replace(`${REPO}/`, '')))
+  } else {
+    observe('Issue #35 截图未齐', issue35Shots)
+  }
   if (deskCaptures.length === 8) {
     check('四个主页面与五个设置分区截图共八张', true, deskCaptures)
   } else {

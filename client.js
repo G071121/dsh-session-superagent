@@ -13,6 +13,17 @@ window.__ModuleLoader__.load({
     const h = React.createElement
     const { useCallback, useEffect, useRef, useState } = React
 
+    // Issue #35：本地回退 Modal 的 portal 通道。composer dock 的祖先可能带 transform / contain，
+    // 那会让 position:fixed 以该祖先为包含块并被 overflow 裁掉 —— 确认层 footer 既看不见也点不到。
+    // 宿主 react-dom 走 factory require；拿不到时保持内联渲染，不另造第三套 Modal。
+    let localCreatePortal = null
+    try {
+      const reactDom = require('react-dom')
+      if (reactDom && typeof reactDom.createPortal === 'function') localCreatePortal = reactDom.createPortal
+    } catch {
+      localCreatePortal = null
+    }
+
     // client.js 是 UMD：宿主原语只能走 factory 注入的 require，不能 import 相对 ESM 适配模块。
     // 这里的参数与 ui-host-primitives.js 的 createHostUi 保持一致，仅接入本面板需要的 Modal/Toast/Tooltip。
     function dismissToast(current, id) {
@@ -1409,6 +1420,17 @@ window.__ModuleLoader__.load({
       }
     }
 
+    /**
+     * 本地 Modal 的 portal 宿主。只有真实可挂载的 body 才接；
+     * 非 DOM/老宿主拿不到时返回 null，保持内联渲染（不另建第二个 root）。
+     */
+    function localModalHost() {
+      if (typeof document === 'undefined' || !document.body) return null
+      const host = document.body
+      if (typeof host.appendChild !== 'function' || typeof host.contains !== 'function') return null
+      return host
+    }
+
     function Modal({ open, title, description, footer, className, children, onClose }) {
       const dialog = useRef(null)
       const restoreTo = useRef(null)
@@ -1445,7 +1467,7 @@ window.__ModuleLoader__.load({
       }, [open])
       if (!open) return null
       // class 必须与移植来的官方 CSS 对齐：dt-modal-root / dt-modal-mask / dt-modal-header
-      return h('div', { className: 'dt-modal-root' },
+      const root = h('div', { className: 'dt-modal-root' },
         h('div', { className: 'dt-modal-mask', role: 'presentation', onClick: onClose }),
         h('div', {
           ref: dialog, tabIndex: -1,
@@ -1458,6 +1480,10 @@ window.__ModuleLoader__.load({
           description ? h('p', { className: 'dt-modal-description' }, description) : null,
           children !== undefined && children !== null ? h('div', { className: 'dt-modal-body' }, children) : null,
           footer !== undefined ? h('div', { className: 'dt-modal-footer' }, footer) : null))
+      // Issue #35：确认层 portal 到 body，dock 的 transform/contain 祖先就裁不到它。
+      // createPortal 不可用（老宿主/非 DOM）时退回内联，语义与之前完全一致。
+      const host = localCreatePortal ? localModalHost() : null
+      return host ? localCreatePortal(root, host) : root
     }
 
     // 主面板使用 DSH Modal；没有宿主原语时回退到上面的 superagent 同源实现。
