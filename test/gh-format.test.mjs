@@ -140,6 +140,86 @@ test('`gh` 找不到的判据不能宽到抢走 404', async () => {
   assert.equal(classifyGhError('gh: command not found').kind, 'nogh')
 })
 
+// ── Issue #39 Bug 2：REST 兜底取「最后一条评论」 ─────────────────────────────
+// 旧写法 `comments?per_page=1&sort=created&direction=desc` + `.[0]` 是错的：
+// GitHub 的 issue comments 接口**不支持** `sort` / `direction`（那是 issue 列表的参数），
+// 传了会被静默忽略，`per_page=1` 于是恒返回**最早**一条 —— 唤醒消息里的
+// 「最后评论」永远停在第一条，会话误判成「对方没回复」后继续 ack 掉。
+//
+// 正确取法（lib/gh-format.js · lastCommentArgs）：`per_page=100` + `--paginate`，
+// 再用 `--jq '.[-1] | {login: .user.login, at: .created_at}'`。`--paginate` 下
+// `--jq` 是**逐页**执行的，stdout 每页一行，所以解析（parseLastComment）必须取
+// **最后一行有效记录**，否则评论超过 100 条时只能看到第 100 条。
+
+test('REST 兜底取最后评论：参数形状严格锁死（per_page=100 + --paginate + .[-1]）', async () => {
+  const mod = await import('../lib/gh-format.js')
+  assert.equal(typeof mod.lastCommentArgs, 'function', '缺少 lastCommentArgs 纯函数（Issue #39 Bug 2）')
+  // 严格相等：URL、分页、jq 表达式一个字都不许多、一个字都不许少
+  assert.deepEqual(mod.lastCommentArgs('owner/repo', 89), [
+    'api',
+    'repos/owner/repo/issues/89/comments?per_page=100',
+    '--paginate',
+    '--jq',
+    '.[-1] | {login: .user.login, at: .created_at}',
+  ])
+  // 查询串只允许 per_page 一个参数，且值必须是 100（接口上限）
+  const search = mod.lastCommentArgs('owner/repo', 89)[1].split('?')[1] || ''
+  const params = new URLSearchParams(search)
+  assert.deepEqual([...params.keys()], ['per_page'], '查询串只该有 per_page：' + search)
+  assert.equal(params.get('per_page'), '100', '一页必须拉满 100 条，否则多页之间会漏评论')
+})
+
+test('REST 兜底取最后评论：反向锁住 sort / direction / per_page=1 / .[0] 四种旧写法', async () => {
+  const mod = await import('../lib/gh-format.js')
+  assert.equal(typeof mod.lastCommentArgs, 'function', '缺少 lastCommentArgs 纯函数（Issue #39 Bug 2）')
+  const args = mod.lastCommentArgs('owner/repo', 89)
+  const joined = args.join(' ')
+  // 这四种写法每一种单独出现都会让「最后评论」退化（sort/direction 被忽略、per_page=1 取最早、.[0] 取首条）
+  assert.ok(!joined.includes('sort='), '不许再带 sort=（comments 接口不认）：' + joined)
+  assert.ok(!joined.includes('direction='), '不许再带 direction=（comments 接口不认）：' + joined)
+  assert.ok(!/[?&]per_page=1(?:&|$)/.test(joined), '不许再出现 per_page=1（恒返回最早一条）：' + joined)
+  assert.ok(!joined.includes('.[0]'), '不许再用 .[0]（取的是第一页第一条）：' + joined)
+  assert.ok(joined.includes('--paginate'), '必须有 --paginate，否则超过 100 条时看不到最后一条：' + joined)
+  assert.ok(joined.includes('.[-1]'), '必须用 .[-1] 取每页最后一条：' + joined)
+})
+
+test('REST 兜底取最后评论：多页 stdout 取最后一条有效记录（含 CRLF / 空行 / 空页 null）', async () => {
+  const mod = await import('../lib/gh-format.js')
+  assert.equal(typeof mod.parseLastComment, 'function', '缺少 parseLastComment 纯函数（Issue #39 Bug 2）')
+  const page1 = '{"login":"first","at":"2026-11-09T02:19:11Z"}'
+  const page2 = '{"login":"middle","at":"2026-11-09T03:00:00Z"}'
+  const page3 = '{"login":"last","at":"2026-11-09T04:30:44Z"}'
+  const last = { login: 'last', at: '2026-11-09T04:30:44Z' }
+  // 三页（LF）：第 3 页的最后一条才是全线程最后一条
+  assert.deepEqual(mod.parseLastComment([page1, page2, page3].join('\n')), last)
+  // Windows / 真机 gh 可能吐 CRLF；行尾差异不能改变结果
+  assert.deepEqual(mod.parseLastComment([page1, page2, page3].join('\r\n')), last)
+  // 空行、行尾空白、末尾多一个换行都不该被当成一条记录
+  assert.deepEqual(mod.parseLastComment([page1, '', page2, '  ', page3, '', ''].join('\r\n')), last)
+  // --paginate 的最后一页为空时 jq 会输出 null：跳过它，取上一页的最后一条
+  assert.deepEqual(mod.parseLastComment([page1, page2, page3, 'null', ''].join('\n')), last)
+  // 单页只有一行：原样返回
+  assert.deepEqual(mod.parseLastComment(page3 + '\n'), last)
+  // 缺 at：login 仍然可用，at 补空串（消息里只显示人）
+  assert.deepEqual(mod.parseLastComment('{"login":"helper"}'), { login: 'helper', at: '' })
+})
+
+test('REST 兜底取最后评论：空 / 坏 JSON / login 为空一律 null（不抛、不阻断唤醒）', async () => {
+  const mod = await import('../lib/gh-format.js')
+  assert.equal(typeof mod.parseLastComment, 'function', '缺少 parseLastComment 纯函数（Issue #39 Bug 2）')
+  const cases = [
+    '', '   ', '\r\n\r\n', 'null', 'undefined',
+    'not json', '{"login":', '[]', '"just a string"', '123',
+    '{"login":""}', '{"login":null}', '{"login":"   "}', '{"user":{"login":"x"}}',
+    undefined, null,
+  ]
+  for (const bad of cases) {
+    assert.equal(mod.parseLastComment(bad), null, '输入 ' + JSON.stringify(bad) + ' 应返回 null')
+  }
+  // 尾部坏 JSON 时不回退到上一条：宁可少一行，也不展示可能已经过期的评论
+  assert.equal(mod.parseLastComment('{"login":"old","at":"2026-11-09T02:19:11Z"}\nnot json'), null)
+})
+
 test('额度推迟：deferReason 必须是稳定原因，时间只能出现在人读的那句话里（T20 真 bug 回归）', async () => {
   const { quotaDeferText, DEFER_REASONS } = await import('../lib/gh-format.js')
   const t = quotaDeferText(10, 30 * 60 * 1000, Date.parse('2026-11-05T09:00:00Z'))
