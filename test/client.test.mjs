@@ -1568,6 +1568,116 @@ test('保存编辑只发改过的字段（M2：全量 PUT 会把别处刚改的�
   assert.ok(!/body: JSON\.stringify\(\{\s*\r?\n\s*repo: watcher\.repo/.test(src), '保存体又变回全量 PUT 了')
 })
 
+test('编辑 Gitee 守保存时必须把 `gitee:` 前缀补回 repo（0.10.12 真机：改 600 秒保存仍是 180 秒，还多出一条 gh 404 孪生）', async () => {
+  const requests = []
+  const { registrations, render } = loadClient({
+    fetch: async (url, options = {}) => {
+      requests.push({ url, options })
+      return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) }
+    },
+  })
+  const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
+  // 真 /state 的形状：repo 是**规范化后**的 owner/name，provider 单独一个字段，
+  // id 才是带前缀的那个（`gitee:owner/name#session-…`）。
+  const repo = 'iJetLi/deepseek-harness-codearts'
+  const sessionId = 'session-' + repo
+  const snap = {
+    loading: false, error: null,
+    body: {
+      credentials: { token: 'none', sshKeyPath: 'none', ghConfigDir: 'none', giteeToken: 'none' },
+      gh: { ok: true, version: '2.0' }, defaults: {},
+      watchers: [watcher(repo, { id: 'gitee:' + repo + '#' + sessionId, provider: 'gitee', sessionId, intervalSec: 180 })],
+    },
+  }
+  // 行内编辑的 key 是「repo#sessionId」（不含 provider 前缀，见 client.js 的行 key）。
+  // 草稿必须是脏的：SaveBar 在 `!dirty` 时整块不渲染，找不到保存按钮不代表组件坏了。
+  const queue = deskQueue(snap, repo + '#' + sessionId, { intervalSec: '600' })
+  const nodes = walk(render(desk, queue))
+  const labelOf = (node) => walk(node).filter((n) => typeof n.text === 'string').map((n) => n.text).join('')
+  const save = nodes.find((n) => n.type === 'button' && labelOf(n).includes('保存'))
+  assert.ok(save, '编辑器里要有保存按钮')
+  const interval = nodes.find((n) => n.type === 'input' && String(n.props.value) === '600')
+  assert.ok(interval, '编辑器里要有间隔输入框')
+  // 测试桩不重渲染：onChange 只负责把这个字段记进 touched（值必须与草稿不同才会记）。
+  interval.props.onChange({ target: { value: '900' } })
+  await save.props.onClick()
+  const saved = requests.find((r) => String(r.url).endsWith('/watch'))
+  assert.ok(saved, '保存必须真的发请求')
+  const body = JSON.parse(saved.options.body)
+  // 判定：服务端 parseRepoSpec 只认前缀/URL 定 provider。repo 一旦丢掉 `gitee:`，
+  // id 就从 `gitee:owner/name#s` 变成 `owner/name#s` —— 匹配不到已有守 ⇒ 静默新建
+  // 一条 provider=github 的孪生守（每轮 gh 404），原守的间隔分毫不动。
+  assert.equal(body.repo, 'gitee:' + repo, 'repo 丢了 gitee: 前缀 ⇒ 会新建一条 GitHub 孪生守，原守改不动')
+  assert.equal(body.sessionId, sessionId)
+  assert.equal(body.intervalSec, 600, '间隔要真的提交出去（touched 里的字段不能丢）')
+})
+
+test('保存体的 repo 必须能被服务端 parseRepoSpec 原样解析回同一条守（GitHub 不加前缀 / Gitee 加前缀，都不许变成新建）', async () => {
+  // 维护者用例（作者用例只钉了 Gitee 一种输入）：
+  //  ① 严格断言请求体结构 —— 多字段 = 退回全量 PUT（把别处刚改的值写回旧快照），
+  //     少字段 = touched 里的改动丢了；两者都是「门禁绿但功能坏」。
+  //  ② 用服务端自己的 parseRepoSpec 走一遍真实契约：POST /watch 的 id 是
+  //     `(gitee:?)+repo+'#'+sessionId`，解析结果必须和 /state 里这条守的 id 逐字相同，
+  //     否则 created = !state.watchers[id] 为真 ⇒ 静默新建一条孪生守。
+  const { parseRepoSpec } = await import('../lib/watch.js')
+  const cases = [
+    { provider: 'gitee', repo: 'iJetLi/deepseek-harness-codearts' },
+    // GitHub 守不带任何前缀：既不能补成 gitee:，也不该补成 github:（后者靠 parseRepoSpec 恰好能过，
+    // 但请求体里出现 provider 前缀本身就是错的 —— 只认 `gitee:`）。
+    { provider: 'github', repo: 'MYCF711/dsh-session-superagent' },
+  ]
+  for (const { provider, repo } of cases) {
+    const sessionId = 'session-' + provider
+    const id = (provider === 'gitee' ? 'gitee:' : '') + repo + '#' + sessionId
+    const requests = []
+    const { registrations, render } = loadClient({
+      fetch: async (url, options = {}) => {
+        requests.push({ url, options })
+        return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) }
+      },
+    })
+    const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
+    const snap = {
+      loading: false, error: null,
+      body: {
+        credentials: { token: 'none', sshKeyPath: 'none', ghConfigDir: 'none', giteeToken: 'none' },
+        gh: { ok: true, version: '2.0' }, defaults: {},
+        watchers: [watcher(repo, { id, provider, sessionId, intervalSec: 180 })],
+      },
+    }
+    // 行 key 是「repo#sessionId」（不含 provider 前缀，见 client.js 的行 key）；
+    // 草稿必须是脏的，SaveBar 才会渲染出「保存」。
+    const nodes = walk(render(desk, deskQueue(snap, repo + '#' + sessionId, { intervalSec: '600' })))
+    const labelOf = (node) => walk(node).filter((n) => typeof n.text === 'string').map((n) => n.text).join('')
+    const save = nodes.find((n) => n.type === 'button' && labelOf(n).includes('保存'))
+    assert.ok(save, provider + '：编辑器里要有保存按钮')
+    const interval = nodes.find((n) => n.type === 'input' && String(n.props.value) === '600')
+    assert.ok(interval, provider + '：编辑器里要有间隔输入框')
+    // 测试桩不重渲染：onChange 只负责把 intervalSec 记进 touched（提交的仍是渲染时的草稿 600）。
+    interval.props.onChange({ target: { value: '900' } })
+    await save.props.onClick()
+
+    const posts = requests.filter((r) => String(r.url).endsWith('/watch'))
+    assert.equal(posts.length, 1, provider + '：一次保存只能发一条 /watch')
+    assert.equal(posts[0].options.method, 'POST')
+    const body = JSON.parse(posts[0].options.body)
+    // 严格相等：只允许「定位键 + touched 字段」这三项。
+    assert.deepEqual(body, {
+      repo: (provider === 'gitee' ? 'gitee:' : '') + repo,
+      sessionId,
+      intervalSec: 600,
+    }, provider + '：保存体只能是定位键 + touched 字段（全量 PUT 会写回旧快照）')
+
+    // 服务端契约（lib/index.js POST /watch）：id = (gitee:?)+repo+'#'+sessionId。
+    const spec = parseRepoSpec(body.repo)
+    assert.equal(spec.ok, true, provider + '：repo 必须是服务端认得的写法')
+    assert.equal(spec.provider, provider, provider + '：provider 被解析错了')
+    assert.equal(spec.repo, repo, provider + '：规范化后的 owner/name 必须原样')
+    assert.equal((spec.provider === 'gitee' ? 'gitee:' : '') + spec.repo + '#' + body.sessionId, id,
+      provider + '：解析出的 id 与 /state 里的守不一致 ⇒ 保存会静默新建一条孪生守')
+  }
+})
+
 test('行内编辑保存必须真的带上 filters / priority（T24 M1：控件名与字段名对不上，改了发不出去）', async () => {
   const { readFileSync } = await import('node:fs')
   const src = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
@@ -2954,6 +3064,52 @@ test('W14：追溯、首败/stale、持久操作与更新失败均有独立 aler
 // panel-harness 的 useEffect 是空实现、hook 槽位也不持久，量不了「一次 Escape 关几层」。
 // 这里单独做一个小桩：持久化 hook 槽位、真的执行/清理 effect、记录 document 上的
 // capture/bubble 监听，才能复现 Modal 与 Orbit 的同一事件竞争。
+//
+// Issue #35：桩还负责回答「确认层到底挂在谁的子树下」—— 记录 createPortal 的
+// (children, container)，才能把「portal 到 body」与「留在 dock 子树里」区分开。
+const FALLBACK_PORTAL = Symbol('react.portal')
+const HOST_ORBIT_ROW = 'dsh-disclosure-row'
+
+/**
+ * Issue #35 专用展开器：宿主 DisclosureRow 把动作放在 headerAccessory 插槽，
+ * 共享 walk 只走 children 会漏掉「删除」。portal 节点照常展开自己的 children。
+ */
+function expandHostTree(node, out = []) {
+  if (node === null || node === undefined || typeof node === 'boolean') return out
+  if (typeof node === 'string' || typeof node === 'number') {
+    out.push({ type: '#text', text: String(node) })
+    return out
+  }
+  if (Array.isArray(node)) {
+    for (const child of node) expandHostTree(child, out)
+    return out
+  }
+  if (typeof node !== 'object') return out
+  if (typeof node.type === 'function') return expandHostTree(node.type(node.props || {}), out)
+  out.push(node)
+  if (node.type === HOST_ORBIT_ROW) {
+    expandHostTree(node.props?.icon, out)
+    expandHostTree(node.props?.title, out)
+    expandHostTree(node.props?.collapsedContent, out)
+    expandHostTree(node.props?.headerAccessory, out)
+  }
+  // Modal 的 description / footer 是 props 而不是 children：不展开就找不到取消/确认。
+  if (node.props && (node.props.description !== undefined || node.props.footer !== undefined)) {
+    expandHostTree(node.props.description, out)
+    expandHostTree(node.props.footer, out)
+  }
+  expandHostTree(node.props?.children, out)
+  return out
+}
+
+/** 展开后按可见文字找按钮/文本（`#text` 也是独立节点，不能只看 node.props.children）。 */
+function labelOf(node) {
+  if (node === null || node === undefined || typeof node === 'boolean') return ''
+  if (typeof node === 'string' || typeof node === 'number') return String(node)
+  if (node.type === '#text') return String(node.text)
+  return (node.props?.children || []).map(labelOf).join('')
+}
+
 function loadFallbackA11y(options = {}) {
   const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
   const needle = "    return {\n      inject: ['slots'],"
@@ -2965,9 +3121,15 @@ function loadFallbackA11y(options = {}) {
   let mod = null
   const listeners = []
   const timers = []
+  // Issue #35：portal 复现需要记录 createPortal 的 (children, container)。
+  const portals = []
   const document = {
     activeElement: null,
-    body: { nodeName: 'BODY', isConnected: true },
+    // options.portal：body 变成「真实可挂载」的宿主（appendChild/contains 齐全）；
+    // 不传时保持原样 —— 老用例量的就是拿不到 portal 时的内联路径。
+    body: options.portal
+      ? { nodeName: 'BODY', isConnected: true, appendChild() {}, contains() { return true } }
+      : { nodeName: 'BODY', isConnected: true },
     hidden: false,
     addEventListener(type, listener, capture) {
       listeners.push({ type, listener, capture: Boolean(capture) })
@@ -2993,7 +3155,8 @@ function loadFallbackA11y(options = {}) {
     document,
     navigator: { clipboard: { writeText: async () => {} } },
     // 状态读取永远挂着：本轮只验 Escape 分层，不让异步 loadState 改状态。
-    fetch: () => new Promise(() => {}),
+    // 需要走真实写请求的用例（Issue #35 的确认/防重入）用 options.fetch 注入。
+    fetch: options.fetch || (() => new Promise(() => {})),
     setInterval: () => 0,
     clearInterval() {},
     setTimeout: (fn, ms) => {
@@ -3023,6 +3186,12 @@ function loadFallbackA11y(options = {}) {
       return node
     },
     isValidElement: (value) => Boolean(value && typeof value === 'object' && 'type' in value),
+    // Issue #35：只有 options.portal 时才给 createPortal；其余用例照旧走内联路径。
+    createPortal(children, containerInfo) {
+      const portal = { type: FALLBACK_PORTAL, props: { children: [children] }, children, containerInfo }
+      portals.push(portal)
+      return portal
+    },
     forwardRef: (render) => function ForwardRef(props = {}) { return render(props, props.ref || null) },
     memo: (fn) => fn,
     useState(initial) {
@@ -3070,10 +3239,16 @@ function loadFallbackA11y(options = {}) {
       if (options.primitives === undefined) throw new Error('MODULE_NOT_FOUND: ' + name)
       return options.primitives
     }
+    if (name === 'react-dom') {
+      // 没开 portal 的用例仍然是老宿主：require 直接失败，产品代码必须完整内联回退。
+      if (!options.portal) throw new Error('MODULE_NOT_FOUND: ' + name)
+      return { createPortal: React.createPortal }
+    }
     throw new Error('unexpected require: ' + name)
   })
 
-  const mount = (Component, props = {}, seed = []) => {
+  // expand 可换：host DisclosureRow 的动作在 headerAccessory 里，共享 walk 不会进去。
+  const mount = (Component, props = {}, seed = [], expand = walk) => {
     const ctx = { slots: [...seed], cursor: 0, seen: new Set(), effects: new Map(), stateCalls: [] }
     const render = () => {
       ctx.cursor = 0
@@ -3081,7 +3256,7 @@ function loadFallbackA11y(options = {}) {
       currentCtx = ctx
       let nodes
       try {
-        nodes = walk(Component(props))
+        nodes = expand(Component(props))
       } finally {
         currentCtx = null
         // 本次渲染没再出现的 effect 视为卸载：真实 React 会在 commit 后跑清理。
@@ -3096,9 +3271,9 @@ function loadFallbackA11y(options = {}) {
     return { render, ctx, stateCalls: ctx.stateCalls }
   }
 
-  const dispatchEscape = (extra = {}) => {
+  const dispatchKey = (key, extra = {}) => {
     const event = {
-      key: 'Escape', repeat: false, defaultPrevented: false,
+      key, repeat: false, defaultPrevented: false,
       preventDefault() { this.defaultPrevented = true },
       stopPropagation() { this.propagationStopped = true },
       ...extra,
@@ -3109,14 +3284,17 @@ function loadFallbackA11y(options = {}) {
     for (const entry of keydown) if (!entry.capture) entry.listener(event)
     return event
   }
+  const dispatchEscape = (extra = {}) => dispatchKey('Escape', extra)
 
   return {
     internals: sandbox.window.__fallbackA11y,
     document,
     listeners,
     timers,
+    portals,
     mount,
     dispatchEscape,
+    dispatchKey,
   }
 }
 
@@ -3223,6 +3401,132 @@ test('W16：fallback 确认 Modal 独占 Escape，底层 Orbit 不同时关闭�
   client.dispatchEscape()
   assert.ok(orbit.stateCalls.some((call) => call.index === 2 && call.next === false),
     '第二次 Escape 应关闭底层 Orbit')
+})
+
+test('Issue #35：dock 内删除确认层必须 portal 到 document.body（取消/确认/Escape/Tab/防重入）', async () => {
+  const row = watcher('a/b', { id: 'a/b#s1', sessionId: 'session-a/b', title: '会话 a/b' })
+  const primitives = {
+    MenuSurface: 'dsh-menu-surface',
+    DisclosureRow: HOST_ORBIT_ROW,
+    useAnchoredPosition: () => ({ left: 32, top: 48 }),
+    useDismissOnOutsidePointer: () => {},
+  }
+  // 只把 /watch 记成写请求；/state 正常回 watcher，让异步 loadState 有确定结果。
+  const writes = []
+  const okResponse = (body) => ({ ok: true, status: 200, headers: { get: () => null }, text: async () => JSON.stringify(body) })
+  const client = loadFallbackA11y({
+    primitives,
+    portal: true,
+    fetch: async (url, init) => {
+      if (String(url).endsWith('/watch')) {
+        writes.push({ url: String(url), init })
+        return okResponse({ ok: true })
+      }
+      return okResponse({ watchers: [row] })
+    },
+  })
+  const orbit = client.mount(client.internals.StatusOrbit, {}, [[row], null, true, null], expandHostTree)
+  let nodes = orbit.render()
+  const opener = {
+    name: 'dock-delete-opener',
+    isConnected: true,
+    focus() { client.document.activeElement = this },
+  }
+  const modalRoots = (list) => list.filter((node) => node.props && node.props.className === 'dt-modal-root')
+  const byLabel = (list, label) => list.find((node) => node.type === 'button' && node.props['aria-label'] === label)
+
+  // 打开一次确认层：点「删除」→ 先关 orbit → 再由 StatusOrbit 持有 ConfirmDialog。
+  const openConfirm = () => {
+    // 取消/确认后 orbit 已经关闭；再次删除要先像用户那样把弹层重新打开。
+    if (!nodes.some((node) => node.type === 'button' && node.props['aria-label'] === '删除')) {
+      const trigger = nodes.find((node) => node.type === 'button'
+        && String(node.props.className || '').includes('sa-orbit-trigger'))
+      assert.ok(trigger, '缺 orbit 圆环触发器')
+      trigger.props.onClick()
+      nodes = orbit.render()
+    }
+    const deleteButton = nodes.find((node) => node.type === 'button' && node.props['aria-label'] === '删除')
+    assert.ok(deleteButton, 'DSH 弹层缺删除按钮')
+    client.document.activeElement = opener
+    deleteButton.props.onClick()
+    const before = client.portals.length
+    nodes = orbit.render()
+    return client.portals.slice(before)
+  }
+
+  // ① 结构：确认层必须不是 dock 子树的一部分。
+  const created = openConfirm()
+  assert.equal(modalRoots(nodes).length, 1, '确认层必须有唯一 dt-modal-root')
+  assert.equal(created.length, 1,
+    'Issue #35 复现：旧实现没有 createPortal，dt-modal-root 直接挂在 StatusOrbit 子树里，'
+    + '落进 composer dock 的 transform/contain 祖先 —— fixed 以祖先为包含块并被裁掉，footer 点不到')
+  assert.strictEqual(created[0].containerInfo, client.document.body, '确认层 portal 容器必须是 document.body')
+  assert.equal(modalRoots(expandHostTree(created[0].children)).length, 1, 'dt-modal-root 必须在 body portal 的子树里')
+
+  // ② 取消：关闭确认层、不写请求、焦点归还 opener。
+  const cancel = nodes.find((node) => node.type === 'button' && labelOf(node) === '取消')
+  assert.ok(cancel, '确认层缺「取消」')
+  cancel.props.onClick()
+  nodes = orbit.render()
+  assert.equal(modalRoots(nodes).length, 0, '取消后确认层必须卸载')
+  assert.equal(writes.length, 0, '取消不得发任何写请求')
+  assert.equal(client.document.activeElement, opener, '取消后焦点必须归还打开确认层的元素')
+
+  // ③ Escape：只关确认层，焦点同样归还。
+  openConfirm()
+  client.portals.length = 0
+  const escaped = client.dispatchEscape()
+  assert.equal(escaped.defaultPrevented, true, '确认层的 Escape 必须被消费')
+  nodes = orbit.render()
+  assert.equal(modalRoots(nodes).length, 0, 'Escape 后确认层必须关闭')
+  assert.equal(client.document.activeElement, opener, 'Escape 后焦点必须归还 opener')
+  assert.equal(writes.length, 0, 'Escape 不得发写请求')
+
+  // ④ Tab 圈：portal 不改变键盘语义，Tab/Shift+Tab 只能在 dialog 内循环。
+  openConfirm()
+  const dialog = nodes.find((node) => node.props && node.props.role === 'dialog'
+    && String(node.props.className || '').includes('dt-modal'))
+  assert.ok(dialog && dialog.props.ref, '确认层缺 dialog ref，无法验证 Tab 圈')
+  const makeFocusable = (name) => ({
+    name,
+    focused: 0,
+    matches: () => true,
+    focus() { this.focused += 1; client.document.activeElement = this },
+  })
+  const dialogClose = makeFocusable('dialog-close')
+  const dialogCancel = makeFocusable('dialog-cancel')
+  const dialogConfirm = makeFocusable('dialog-confirm')
+  const fakeDialog = {
+    contains: (node) => [dialogClose, dialogCancel, dialogConfirm, fakeDialog].includes(node),
+    querySelectorAll: () => [dialogClose, dialogCancel, dialogConfirm],
+  }
+  dialog.props.ref.current = fakeDialog
+  client.document.activeElement = dialogConfirm
+  const tab = client.dispatchKey('Tab', { shiftKey: false })
+  assert.equal(tab.defaultPrevented, true, '焦点在最后一个按钮时 Tab 必须被拦下')
+  assert.equal(dialogClose.focused, 1, 'Tab 必须绕回第一个按钮')
+  client.document.activeElement = dialogClose
+  const shiftTab = client.dispatchKey('Tab', { shiftKey: true })
+  assert.equal(shiftTab.defaultPrevented, true, '焦点在第一个按钮时 Shift+Tab 必须被拦下')
+  assert.equal(dialogConfirm.focused, 1, 'Shift+Tab 必须绕到最后一个按钮')
+  client.document.activeElement = dialogCancel
+
+  // ⑤ 确认：busy 期间按钮显示进行中、二次点击被挡住，只发一次 delete。
+  const confirmButton = byLabel(nodes, '确认删除')
+  assert.ok(confirmButton, '确认层缺「确认删除」')
+  const firstClick = confirmButton.props.onClick()
+  const midNodes = orbit.render()
+  const busyButton = byLabel(midNodes, '确认删除')
+  assert.equal(labelOf(busyButton), '删除中…', 'busy 期间按钮必须显示进行中文案')
+  assert.equal(busyButton.props['aria-busy'], 'true', 'busy 期间必须标 aria-busy')
+  const secondClick = confirmButton.props.onClick()
+  assert.equal(await secondClick, false, 'busy 期间二次确认必须被挡住（防重入）')
+  assert.equal(await firstClick, true, '第一次确认必须完成')
+  assert.equal(writes.length, 1, 'busy 防重入：只允许一次 delete 请求')
+  assert.equal(writes[0].init.method, 'POST')
+  assert.deepEqual(JSON.parse(writes[0].init.body), { action: 'delete', id: 'a/b#s1' })
+  nodes = orbit.render()
+  assert.equal(modalRoots(nodes).length, 0, '确认成功后确认层必须关闭')
 })
 
 test('W17：fallback Toast 以 item.id 为 key，连续通知重新挂载且 hold 与 timer 对齐', () => {

@@ -28,6 +28,23 @@
   写失败回退 / 恢复默认删除失败回退 / 跨页面 storage 新名与删除 / 码点截断 / 与 `normalizeBrandName` 同源 /
   重注册不重复），全量 **980/980**；UI 体检 **11/11 = 100**；浅色不达组 16 组、深色 13 组，与基线持平
   （新字段复用 `p.dt-hint`，没有新增对比度组）。
+### Fixed
+
+- **面板里编辑 Gitee 守「保存」会静默新建一条 GitHub 孪生守**（PR #42，@iJetLi 报告；0.10.12 真机）：`saveEdit` 提交的
+  `repo` 直接取 `/state` 的 `watcher.repo`，而那是**规范化后**的 `owner/name`（provider 单独一个字段），
+  没有 `gitee:` 前缀；服务端 `parseRepoSpec` 只认 `gitee:` 前缀 / `gitee.com` URL 定 provider，
+  其余一律判成 GitHub ⇒ id 从 `gitee:owner/name#session` 变成 `owner/name#session`，
+  匹配不到已有守 ⇒ 走**新建**分支（`created = !state.watchers[id]`），于是静默多出一条每轮
+  `gh: Not Found (HTTP 404)` 的孪生守，而原来那条的间隔/过滤分毫不动 —— 症状是「改 600 秒保存后
+  仍是 180 秒」；暂停的同样只是 Gitee 那条，孪生守仍 `enabled: true` 在跑 ⇒「暂停了改也没用」。
+  修法：提交前按 `watcher.provider` 把 `gitee:` 前缀补回去（`watcherId(w)` 本来就带前缀，
+  暂停 / 删除 / 立刻一直是对的）。补行为级用例：编辑 Gitee 守保存时 `body.repo` 必须等于
+  `'gitee:' + repo`。
+  维护者复核（PR #42）：另补一条结构级用例 —— 保存体必须严格等于「定位键 + touched 字段」，
+  且 `parseRepoSpec(body.repo)` 解析出的 id 必须与 `/state` 里那条守逐字相同（GitHub 不加前缀、
+  Gitee 加前缀两种输入都钉住），复制了「静默新建孪生守」的真实服务端契约；旧实现变异
+  （改回 `repo: watcher.repo`）下作者用例与维护者用例同时红。单测数 969 → 970
+  （README / AGENTS 的基线数字待合并时同步）。
 
 ## [0.10.12] - 2026-11-09 —— 门禁 v6（锁回收计龄、profile 真原子、模型证据入库）
 
