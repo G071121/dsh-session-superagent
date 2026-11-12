@@ -6,7 +6,7 @@
 
 ### Fixed
 
-- **面板里编辑 Gitee 守「保存」会静默新建一条 GitHub 孪生守**（0.10.12 真机）：`saveEdit` 提交的
+- **面板里编辑 Gitee 守「保存」会静默新建一条 GitHub 孪生守**（PR #42，@iJetLi 报告；0.10.12 真机）：`saveEdit` 提交的
   `repo` 直接取 `/state` 的 `watcher.repo`，而那是**规范化后**的 `owner/name`（provider 单独一个字段），
   没有 `gitee:` 前缀；服务端 `parseRepoSpec` 只认 `gitee:` 前缀 / `gitee.com` URL 定 provider，
   其余一律判成 GitHub ⇒ id 从 `gitee:owner/name#session` 变成 `owner/name#session`，
@@ -16,6 +16,11 @@
   修法：提交前按 `watcher.provider` 把 `gitee:` 前缀补回去（`watcherId(w)` 本来就带前缀，
   暂停 / 删除 / 立刻一直是对的）。补行为级用例：编辑 Gitee 守保存时 `body.repo` 必须等于
   `'gitee:' + repo`。
+  维护者复核（PR #42）：另补一条结构级用例 —— 保存体必须严格等于「定位键 + touched 字段」，
+  且 `parseRepoSpec(body.repo)` 解析出的 id 必须与 `/state` 里那条守逐字相同（GitHub 不加前缀、
+  Gitee 加前缀两种输入都钉住），复制了「静默新建孪生守」的真实服务端契约；旧实现变异
+  （改回 `repo: watcher.repo`）下作者用例与维护者用例同时红。单测数 969 → 970
+  （README / AGENTS 的基线数字待合并时同步）。
 
 ## [0.10.12] - 2026-11-09 —— 门禁 v6（锁回收计龄、profile 真原子、模型证据入库）
 

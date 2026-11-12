@@ -1612,6 +1612,72 @@ test('编辑 Gitee 守保存时必须把 `gitee:` 前缀补回 repo（0.10.12 �
   assert.equal(body.intervalSec, 600, '间隔要真的提交出去（touched 里的字段不能丢）')
 })
 
+test('保存体的 repo 必须能被服务端 parseRepoSpec 原样解析回同一条守（GitHub 不加前缀 / Gitee 加前缀，都不许变成新建）', async () => {
+  // 维护者用例（作者用例只钉了 Gitee 一种输入）：
+  //  ① 严格断言请求体结构 —— 多字段 = 退回全量 PUT（把别处刚改的值写回旧快照），
+  //     少字段 = touched 里的改动丢了；两者都是「门禁绿但功能坏」。
+  //  ② 用服务端自己的 parseRepoSpec 走一遍真实契约：POST /watch 的 id 是
+  //     `(gitee:?)+repo+'#'+sessionId`，解析结果必须和 /state 里这条守的 id 逐字相同，
+  //     否则 created = !state.watchers[id] 为真 ⇒ 静默新建一条孪生守。
+  const { parseRepoSpec } = await import('../lib/watch.js')
+  const cases = [
+    { provider: 'gitee', repo: 'iJetLi/deepseek-harness-codearts' },
+    // GitHub 守不带任何前缀：既不能补成 gitee:，也不该补成 github:（后者靠 parseRepoSpec 恰好能过，
+    // 但请求体里出现 provider 前缀本身就是错的 —— 只认 `gitee:`）。
+    { provider: 'github', repo: 'MYCF711/dsh-session-superagent' },
+  ]
+  for (const { provider, repo } of cases) {
+    const sessionId = 'session-' + provider
+    const id = (provider === 'gitee' ? 'gitee:' : '') + repo + '#' + sessionId
+    const requests = []
+    const { registrations, render } = loadClient({
+      fetch: async (url, options = {}) => {
+        requests.push({ url, options })
+        return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) }
+      },
+    })
+    const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
+    const snap = {
+      loading: false, error: null,
+      body: {
+        credentials: { token: 'none', sshKeyPath: 'none', ghConfigDir: 'none', giteeToken: 'none' },
+        gh: { ok: true, version: '2.0' }, defaults: {},
+        watchers: [watcher(repo, { id, provider, sessionId, intervalSec: 180 })],
+      },
+    }
+    // 行 key 是「repo#sessionId」（不含 provider 前缀，见 client.js 的行 key）；
+    // 草稿必须是脏的，SaveBar 才会渲染出「保存」。
+    const nodes = walk(render(desk, deskQueue(snap, repo + '#' + sessionId, { intervalSec: '600' })))
+    const labelOf = (node) => walk(node).filter((n) => typeof n.text === 'string').map((n) => n.text).join('')
+    const save = nodes.find((n) => n.type === 'button' && labelOf(n).includes('保存'))
+    assert.ok(save, provider + '：编辑器里要有保存按钮')
+    const interval = nodes.find((n) => n.type === 'input' && String(n.props.value) === '600')
+    assert.ok(interval, provider + '：编辑器里要有间隔输入框')
+    // 测试桩不重渲染：onChange 只负责把 intervalSec 记进 touched（提交的仍是渲染时的草稿 600）。
+    interval.props.onChange({ target: { value: '900' } })
+    await save.props.onClick()
+
+    const posts = requests.filter((r) => String(r.url).endsWith('/watch'))
+    assert.equal(posts.length, 1, provider + '：一次保存只能发一条 /watch')
+    assert.equal(posts[0].options.method, 'POST')
+    const body = JSON.parse(posts[0].options.body)
+    // 严格相等：只允许「定位键 + touched 字段」这三项。
+    assert.deepEqual(body, {
+      repo: (provider === 'gitee' ? 'gitee:' : '') + repo,
+      sessionId,
+      intervalSec: 600,
+    }, provider + '：保存体只能是定位键 + touched 字段（全量 PUT 会写回旧快照）')
+
+    // 服务端契约（lib/index.js POST /watch）：id = (gitee:?)+repo+'#'+sessionId。
+    const spec = parseRepoSpec(body.repo)
+    assert.equal(spec.ok, true, provider + '：repo 必须是服务端认得的写法')
+    assert.equal(spec.provider, provider, provider + '：provider 被解析错了')
+    assert.equal(spec.repo, repo, provider + '：规范化后的 owner/name 必须原样')
+    assert.equal((spec.provider === 'gitee' ? 'gitee:' : '') + spec.repo + '#' + body.sessionId, id,
+      provider + '：解析出的 id 与 /state 里的守不一致 ⇒ 保存会静默新建一条孪生守')
+  }
+})
+
 test('行内编辑保存必须真的带上 filters / priority（T24 M1：控件名与字段名对不上，改了发不出去）', async () => {
   const { readFileSync } = await import('node:fs')
   const src = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
