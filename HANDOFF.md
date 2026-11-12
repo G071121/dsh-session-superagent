@@ -1,9 +1,25 @@
 # HANDOFF —— 主理鱼 / dsh-gate 会话交接
 
-> 快照时间：2026-11-09（Asia/Shanghai），gate v6 发布完成后。**给新会话直接接手用，不要凭聊天记录重推。**
-> 本文件只记录当次实测；后续状态可能变化，先复核再动作。
+> **当前快照：2026-11-13（Asia/Shanghai）**，`origin/main` 为 `8da9fd74`（已含 #43 / #44 / #45 / #46）。
+> **给新会话直接接手用，不要凭聊天记录重推。** 本文件只记录实测；没跑过的写成「未验证」。
 
-## 1. 一句话现状
+## 0. 当前快照（2026-11-13）
+
+| 项 | 当前事实 |
+|---|---|
+| main | 以 `origin/main` 为准，2026-11-13 为 `8da9fd74991d0421f2a720f0d79f481bebb60041`；#43 / #44 / #45 / #46 已合入 |
+| 版本 | `0.10.12`（**未 bump、未发布新版本**）；npm / tag / Release 仍是 2026-11-09 的 `v0.10.12` |
+| 单测 | 根 `npm test` **992/992**（gate 180 / client 191 / drift 22，含 update-ui 53；#46 功能 12 + M1 修复 5） |
+| UI / Chromium | UI **11/11（100 分）**；真实 Chromium **72/72**，边界 = **rc.1 安装版前端** `0.2.2-rc.1` + 最终 `client.js` sha256 `0da9bb0702a08a817c33811c7d803440f05495cb24d9c9747da4826e4b40618c`；**不是** rc.2 宿主、**不是**真实 DSH WebView |
+| CI | PR #43 / #44 / #45 / #46 的 Node 22/24 均绿；main 的「维护一致性」因运行时改动未 bump **预期红**（发布未做，不要写成 main 全绿） |
+| 已合入 | #43（Issue #39 Bug 2：REST 兜底 `per_page=100` + `--paginate` 取最后评论，+4 测试）；#44（保留 @iJetLi PR #42 的 Gitee 前缀修复，维护者 +1 条请求体契约测试）；#45（Issue #35：Orbit 删除确认层 portal 到 body，+1 单测 / +8 Chromium 场景）；#46（页签名称可设置 + M1 干净/脏草稿与 `localStorage.clear` 修复，功能 12 + M1 修复 5 条测试，已复核 resolved） |
+| 未合入 | PR #41（@iJetLi，弹层显示「最近唤醒的是哪一条」）已回评，待作者修正文档计数与 `/state` 体积，**未合入未 ack** |
+| 未验证 | 真实 DSH WebView、读屏 / 触摸 / IME、真实 Gitee 写操作；rc.2 host-orbit fallback 有 3 项预存失败（旧 client 同样失败，本轮未修）；**#35 portal 场景在 rc.2 上未直达**，不能把 72/72 泛化成 rc.2 / 真实 WebView 通过 |
+
+> **历史基线说明**：下面 §1–§10 写于 **2026-11-09 v6 发布后**，其中「968 例 / `0.10.12` 已发布 /
+> 64 条 Chromium」是**当时**的事实，只用于定位合并链与历史闭环；当前工作树以本节为准。
+
+## 1. 一句话现状（2026-11-09 历史基线）
 
 **v6 已发布：主包 `0.10.12` / `@mycf711/dsh-gate@0.1.5`。** PR **#31** 以 merge commit **`ec36ddec`** 发布，
 随后 PR #32（回填）/ #33（交接刷新）两个 docs 合并把 main 推前；**main 以 `origin/main` 为准**（本文写就时 `2ba7ada`）。
@@ -62,7 +78,7 @@ d8359e5  Merge pull request #32  ← docs 回填
 | 回填（t8） | PR #32 → merge `d8359e5`（仅 4 份文档）；回填后 main CI `42553248097` success | PR #32 |
 | 交接刷新 | PR #33 → merge `2ba7ada`（仅 HANDOFF / MAINTENANCE；main 表述改为「以 origin/main 为准」）；PR CI `42554849882` 双 Node pass | PR #33 |
 
-## 5. 发布后实测计数（跑过才算）
+## 5. 发布后实测计数（2026-11-09 历史基线，跑过才算）
 
 - 根 `npm test`：**968/968**；gate 包：**180/180** + `npm run check`
 - `test/client.test.mjs`：**171/171**；`test/sync-profile-drift.test.mjs`：**22/22**；`PANEL_STRICT` 门禁组：**48/48**
@@ -80,26 +96,26 @@ main 上「**先合并、后推 tag**」时，CI 的 `checkout(fetch-depth: 0)` 
 **根治**：发版顺序改成「tag 先推、再合并 main」，或给 main CI 的该步加一次「tag 未到 → 重试」。
 `check-maintenance` 源码注释里记过同型事故（0.9.248）。
 
-## 7. 主理鱼真实运行状态（**未重载宿主**）
+## 7. 主理鱼真实运行状态（2026-11-09 历史基线，**未重载宿主**）
 
 GUI：`http://127.0.0.1:51092`（**端口每次重启会变，不要写死**）。发布前后**没有重启 / 重载 DSH**，
 所以运行中的仍是 `0.10.11` 的代码；磁盘上（仓库 + 已 `--repair` 的 profile）是 `0.10.12`。
 这是预期状态，不是没生效 —— **宿主重载后 profile 运行时是否生效未验**。
 
-## 8. 复跑命令（集成树内）
+## 8. 复跑命令（当前工作树；计数以 §0 实测为准）
 
 ```bash
-cd "/d/DeepSeek Harness/大肥鱼工作区/dsh-gate-v6-integration"
-npm test                                            # 968/968
+cd "/d/DeepSeek Harness/大肥鱼工作区/dsh-sa-docs"
+npm test                                            # 992/992
 (cd packages/dsh-gate && npm test && npm run check)  # 180/180 + 语法
-node scripts/test.mjs test/client.test.mjs           # 171/171
+node scripts/test.mjs test/client.test.mjs           # 191/191
 node scripts/test.mjs test/sync-profile-drift.test.mjs  # 22/22
-PANEL_STRICT=1 node scripts/test.mjs --test-name-pattern='门禁' test/client.test.mjs  # 48/48
-node scripts/preflight.mjs                           # 全量 42 项 = 41 PASS / 1 SKIP
-node scripts/check-maintenance.mjs                   # 6/6
+PANEL_STRICT=1 node scripts/test.mjs --test-name-pattern='门禁' test/client.test.mjs  # 48/48（2026-11-09 快照）
+node scripts/preflight.mjs --fast                    # 仅 profile 一致性 1 项环境失败（断链 21，需 --repair）
+node scripts/check-maintenance.mjs                   # 5/6；⑥ 因运行时改动未 bump 预期红
 node scripts/ui-audit.mjs                            # 11/11 = 100
-node scripts/audit-readme-tests.mjs 968              # README 单测数与实测一致
-node scripts/sync-profile.mjs --check                # 只读；四段应全零
+node scripts/audit-readme-tests.mjs 992              # README 单测数与实测一致
+node scripts/sync-profile.mjs --check                # 只读；四段应全零（本轮未重跑）
 
 # 正式 Chromium（loopback fixture，不是 DSH WebView）
 REPO_W=$(pwd -W)
@@ -123,4 +139,9 @@ REPO_W=$(pwd -W)
 - PR #31：**v6 已发布并 ack**（发布 merge `ec36ddec`，0.10.12 / gate 0.1.5）。
 - PR #32：v6 发布回填已合并并 ack（`d8359e5`，仅 4 份文档）。
 - PR #33：交接刷新已合并并 ack（`2ba7ada`，main 表述改为「以 origin/main 为准」）。
+- PR #43：Issue #39 Bug 2 已合入（`927bf70`，REST 兜底 `per_page=100` + `--paginate` 取最后评论）。
+- PR #44：保留 @iJetLi PR #42 的 Gitee 前缀修复并合入（`6077e1a`，维护者补 1 条请求体契约测试）。
+- PR #45：Issue #35 已合入（`9eb543d`，Orbit 删除确认层 portal 到 body，+1 单测 / +8 Chromium 场景）。
+- PR #46：页签名称功能已合入（`8da9fd74`，功能 12 + M1 修复 5；M1 干净/脏草稿与 `localStorage.clear` 已复核 resolved）。
+- PR #41：**未合入**（@iJetLi 最近唤醒条目，待作者修正文档计数与 `/state` 体积；不要当已发布）。
 - issue #19（awesome-ai-plugins 邀请）：**不处理、不关闭、不回复**。
