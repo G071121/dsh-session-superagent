@@ -92,6 +92,16 @@ dirty 折叠/切换复用确认 Modal，取消/Escape 保留，确认才丢弃�
 
 11 项必须修 + 18 项值得改 + N1/N2/N3 全部收口；ETag 分 scope、保存不假失败、删除错误不残留，事件/焦点/fallback/heading/alert 统一。全量 **675/675**，Chromium **47/47**。
 
+## 实施回写（Issue #35 · 确认层 portal 到 document.body）
+
+**根因**：卫星环删除确认层用的是 superagent 同源回退 `Modal`（`dt-modal-root` + `position: fixed; inset: 0`），但它渲染在 `StatusOrbit` 的子树里；`composer.dock` 槽位的祖先带 `transform` / `contain: layout paint` / `overflow: hidden` 时，`fixed` 以该祖先为包含块并被裁剪 —— footer 的「取消 / 确认删除」既不在视口里，也点不到。
+
+**修复**：回退 `Modal` 的根节点改由宿主模块加载器可用的 `require('react-dom').createPortal(root, document.body)` 渲染；拿不到 `createPortal` 或 `body` 不可挂载时仍内联（不另造第三套 Modal、不建第二个 React root）。宿主 `DSH Modal` 路径不变（主面板删除仍走 `PanelModal`）。键盘/焦点语义完全复用原实现，未改 `dt-modal-*` CSS。
+
+**验收**：非浏览器结构断言（`createPortal` 的 `containerInfo === document.body`）+ 真实 Chromium 在 `transform + contain:layout paint + overflow:hidden` 的 340×96 窄 dock 里量几何与 `elementFromPoint`，并真实鼠标点「取消 / 确认删除」、Tab 圈、Escape 回焦；深浅主题 390 窄屏与 1440 各出图。证据目录默认是仓库内 `tmp-artifacts/issue-35/`（`tmp-*` 已被 `.gitignore` 覆盖；需要落别处时设 `DSH_ISSUE35_ARTIFACTS=<绝对路径>`，`--print-paths` 会打印 `issue35Artifacts` 与来源），产物为 `dock-confirm-geometry.json`、`chromium-after.log`、`issue35-dock-confirm-*.png`。
+
+**未验**：真实 DSH WebView 里的 composer dock 祖先组合、读屏与触摸；Chromium fixture 的 dock 是等价构造，不是真宿主 CSS。
+
 ## 0. 基线、口径与复用边界
 
 | 来源 | 本次核对基线 | 用法 |
@@ -211,7 +221,7 @@ dirty 折叠/切换复用确认 Modal，取消/Escape 保留，确认才丢弃�
 
 | 弹层 | 当前 DOM / 组件 | 官方对应件 | 应该直接复用什么 | 需要改哪一行 / 哪一段 | 验收方式 |
 |---|---|---|---|---|---|
-| 通用 Modal | 自写 root/mask/dialog 留在面板 DOM 内；标题是 span；effect 依赖 inline `onClose`（`443-496`） | superagent `Modal` 与 DSH `Modal`：body portal、h2、description/footer、`onClose` ref、焦点圈与归还 | 优先 DSH Modal；若保留 superagent 版，至少补 portal、`onClose` ref 和 h2 | `443-496`；调用点 `2301-2340` 同步 description/footer | 5 秒轮询时焦点不被重置；Tab 圈在 dialog 内；Escape/背板关闭； opener 还焦点；Portal 到 body |
+| 通用 Modal | 自写 root/mask/dialog 留在面板 DOM 内；**Issue #35 起回退 Modal 也 portal 到 `document.body`**（`createPortal`）；标题是 span；effect 依赖 inline `onClose`（`443-496`） | superagent `Modal` 与 DSH `Modal`：body portal、h2、description/footer、`onClose` ref、焦点圈与归还 | 优先 DSH Modal；若保留 superagent 版，至少补 portal、`onClose` ref 和 h2 | `443-496`；调用点 `2301-2340` 同步 description/footer | 5 秒轮询时焦点不被重置；Tab 圈在 dialog 内；Escape/背板关闭； opener 还焦点；Portal 到 body |
 | 删除确认 | 两个入口均为 `ConfirmBtn` 二段按钮，不是 Modal；0.9.264 已移除卫星环原生 confirm（`498-514,822-839`） | superagent `ConfirmButton` footer 两键 | 同 ROI-2；普通删除不使用 RiskConfirmation | `498-514`、`822-839` 与两个调用点 | 两个入口同 Modal DOM、同文案、同 busy；原生 `window.confirm` 调用数保持为 0 |
 | AGENTS 建议 | Modal body 中放说明、pre、复制/关闭 actions（`2301-2321`） | DSH/superagent `Modal(description, footer)`；superagent `dt-pre` | 保留主理鱼规则内容，说明移 description，按钮移 footer，代码块仍 `dt-pre` | `2301-2321` | 长规则在 body 内滚动；footer 不随代码滚走；复制成功/失败各有 Toast；关闭焦点回“看建议规则” |
 
