@@ -575,12 +575,16 @@ window.__ModuleLoader__.load({
       return () => { tabNameListeners.delete(listener) }
     }
 
-    /** 通知订阅者；单个订阅者抛错不能连坐其它订阅者。 */
-    function notifyTabName() {
+    /**
+     * 通知订阅者；单个订阅者抛错不能连坐其它订阅者。
+     * `previous` 是**变化前**的文案，订阅者据此判断「草稿还是干净的」：
+     * 干净草稿跟着新值走，用户正在编辑的脏草稿不许被外部事件覆盖（终审 M1）。
+     */
+    function notifyTabName(previous) {
       const label = tabNameLabel()
       for (const listener of [...tabNameListeners]) {
         try {
-          listener(label)
+          listener(label, previous)
         } catch (error) {
           try { note('desk-fail', String((error && error.message) || error)) } catch {}
         }
@@ -594,6 +598,7 @@ window.__ModuleLoader__.load({
      * 刷新后回到默认。面板必须把这件事说清楚，不能假装存住了。
      */
     function saveTabName(value) {
+      const previous = tabNameLabel()
       const text = String(value ?? '').trim()
       tabNameOverride = text ? normalizeTabName(text) : null
       let persisted = false
@@ -611,7 +616,7 @@ window.__ModuleLoader__.load({
           persisted = false
         }
       }
-      return { label: notifyTabName(), persisted }
+      return { label: notifyTabName(previous), persisted }
     }
 
     /**
@@ -622,7 +627,7 @@ window.__ModuleLoader__.load({
       const before = tabNameLabel()
       tabNameBrand = typeof value === 'string' ? value.trim() : ''
       if (tabNameLabel() === before) return before
-      return notifyTabName()
+      return notifyTabName(before)
     }
 
     const UPDATE_UNKNOWN_HINT = '请求结果未知，请先重新检查 installed/running，再手动确认'
@@ -3209,6 +3214,12 @@ window.__ModuleLoader__.load({
       // 设置→来源里的页签名称草稿。只能在 hook 队列**末尾**追加：前面的下标是测试桩的
       // 位置化契约（deskQueue / 预览 deskHooks 必须同步追加一位）。
       const [tabNameDraft, setTabNameDraft] = useState(() => tabNameLabel())
+      // 别处改了名字（另一个页面 / 晚到的 brandName）时同步草稿：**干净草稿**跟着新生效的名字走，
+      // 用户正在编辑的**脏草稿**不动 —— 否则外部刚设的名字会被下一次「保存」用旧草稿覆盖回去（终审 M1）。
+      // 只按「变化前的 label」判断脏净，不新增状态槽，也不碰 hook 队列位置。
+      useEffect(() => subscribeTabName((next, previous) => {
+        setTabNameDraft((current) => (normalizeTabName(current) === previous ? next : current))
+      }), [])
       // POST 后 GET 仍以 runningVersion 比较 latest；已装到 latest 且等待重载时，回执优先于 hasUpdate。
       const updateAwaitingReload = Boolean(updateResult && updateResult.needsReload === true
         && update && updateResult.installedVersion === update.latest)
@@ -4779,13 +4790,16 @@ window.__ModuleLoader__.load({
               // 真值一律回 localStorage 读最新的 —— 别人设了**新名字**要跟着同步，不能清掉覆盖回品牌名；
               // 只有对方删除（newValue === null）才回品牌名。
               const onStorage = (event) => {
-                if (!event || event.key !== TAB_NAME_STORAGE_KEY) return
+                if (!event) return
+                // localStorage.clear() 的事件 key 是 null —— 那是「所有覆盖都没了」，按删除处理。
+                const cleared = event.key === null || event.key === undefined
+                if (!cleared && event.key !== TAB_NAME_STORAGE_KEY) return
                 const before = tabNameLabel()
-                tabNameOverride = (event.newValue === null || event.newValue === undefined)
+                tabNameOverride = (cleared || event.newValue === null || event.newValue === undefined)
                   ? null
                   : readTabNameOverride()
                 if (tabNameLabel() === before) return
-                try { notifyTabName() } catch {}
+                try { notifyTabName(before) } catch {}
               }
               try {
                 if (typeof window !== 'undefined' && typeof window.addEventListener === 'function') {

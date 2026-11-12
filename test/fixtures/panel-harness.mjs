@@ -96,11 +96,15 @@ export function loadClient(options = {}) {
       }
       return [value, setter]
     },
-    useEffect() {},
+    // effect 默认**不执行**（真跑起来会触发 /state 轮询，破坏既有静态用例）。
+    // 但「订阅 → 外部事件 → 改状态」这类行为必须能验：这里记下来，用例显式 runEffects() 才执行。
+    useEffect(fn, deps) { if (typeof fn === 'function') effects.push({ fn, deps }) },
     useCallback: (fn) => fn,
     useRef: (value) => ({ current: value }),
   }
 
+  // 本 render 里登记的 effect（runEffects() 才执行），每次 render 清空
+  const effects = []
   const registrations = []
   // 槽位注册的「活着」集合：真宿主对 list 槽位「同 id + 同 priority」重复注册会抛错
   // （ui-conversation 的 viewTabs 靠它保证页签不重复）。桩以前返回空 disposer、从不检查，
@@ -132,6 +136,7 @@ export function loadClient(options = {}) {
 
   // props 可以传：面板有些文案取决于宿主给的 sessionId（"添加到当前会话" vs "先打开一个会话"）
   const render = (registration, queue, props = {}) => {
+    effects.length = 0
     hooks.queue = queue || []
     hooks.index = 0
     const tree = registration.Component(props)
@@ -162,6 +167,15 @@ export function loadClient(options = {}) {
     // 还活着的注册（dispose 过的会被剔掉）—— 「改名只重注册一条」要按它断言，
     // 按 registrations 长度断言会把「旧的一条已释放」误判成重复。
     liveRegistrations: () => registrations.filter((registration) => live.has(registration)),
+    // 执行上一次 render 登记的 effect，返回清理函数数组（顺序与登记一致，由用例显式调用）
+    runEffects: () => {
+      const cleanups = []
+      for (const effect of effects) {
+        const cleanup = effect.fn()
+        if (typeof cleanup === 'function') cleanups.push(cleanup)
+      }
+      return cleanups
+    },
     // 触发 window 级事件（如 'storage'），返回真正被调用的监听数 —— 0 就说明代码没挂监听。
     dispatchWindowEvent: (type, event) => {
       const set = windowListeners.get(type)

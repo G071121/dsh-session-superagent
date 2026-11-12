@@ -5849,3 +5849,79 @@ test('其它页面改了页签名：storage 事件跟随新名，删除则回默
   assert.equal(liveDesk(client).opts.label, '主理鱼', '删除事件回默认')
   assert.equal(deskCount(), 1, '删除也是一次重注册，仍然只有一条')
 })
+
+// ── 终审 M1：外部把名字改了，面板里的草稿要跟着走，不能把旧名再存回去 ──────────
+// `tabNameDraft` 是位置化队列的最后一槽；测试桩的 setter 会把函数式更新按**当前草稿**求值并记账，
+// 于是可以直接断言「这次同步把草稿算成了什么」。
+
+const draftSlot = () => deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings').length - 1
+const lastDraftValue = (client) => {
+  const calls = client.stateCalls().filter((call) => call.index === draftSlot())
+  assert.ok(calls.length > 0, '外部改名后草稿槽必须收到一次同步')
+  return calls[calls.length - 1].next
+}
+
+test('M1：外部改了页签名后，干净草稿跟随新名（不会把旧名再存回去）', () => {
+  const storage = memoryStorage()
+  const client = loadClient({ localStorage: storage })
+  const queue = deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings')
+  const input = tabNameInput(walk(client.render(liveDesk(client), queue)))
+  assert.equal(input.props.value, '主理鱼', '首帧草稿 = 当前名字')
+  client.runEffects()
+
+  storage.setItem(TAB_NAME_KEY, '夜猫')
+  client.dispatchWindowEvent('storage', { key: TAB_NAME_KEY, newValue: '夜猫' })
+  assert.equal(liveDesk(client).opts.label, '夜猫', '页签要跟随别的页面设的新名')
+  assert.equal(lastDraftValue(client), '夜猫', '干净草稿必须跟着变成新名')
+
+  // 再点保存时草稿已经是新名：不能把旧名写回去
+  const rerendered = deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings')
+  rerendered[draftSlot()] = lastDraftValue(client)
+  buttonByText(walk(client.render(liveDesk(client), rerendered)), '保存名称').props.onClick()
+  assert.equal(storage.map.get(TAB_NAME_KEY), '夜猫', '保存不得用旧草稿覆盖别人的新名')
+})
+
+test('M1：脏草稿不被外部改名覆盖（用户的选择优先）', () => {
+  const storage = memoryStorage()
+  const client = loadClient({ localStorage: storage })
+  const queue = deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings')
+  queue[draftSlot()] = '我自己在输'
+  walk(client.render(liveDesk(client), queue))
+  client.runEffects()
+  storage.setItem(TAB_NAME_KEY, '夜猫')
+  client.dispatchWindowEvent('storage', { key: TAB_NAME_KEY, newValue: '夜猫' })
+  assert.equal(liveDesk(client).opts.label, '夜猫', '页签仍然跟随')
+  assert.equal(lastDraftValue(client), '我自己在输', '脏草稿不许被外部事件覆盖')
+})
+
+test('M1：brandName 晚到也要同步干净草稿', async () => {
+  const client = loadClient({ fetch: async () => stateResponse({ brandName: '夜莺' }) })
+  const queue = deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings')
+  walk(client.render(liveDesk(client), queue))
+  client.runEffects()
+  await buttonByText(walk(client.render(liveDesk(client), queue)), '刷新').props.onClick()
+  assert.equal(liveDesk(client).opts.label, '夜莺')
+  assert.equal(lastDraftValue(client), '夜莺', 'brandName 晚到：干净草稿跟随')
+})
+
+test('M1：localStorage.clear()（event.key === null）按删除覆盖处理', () => {
+  const storage = memoryStorage({ [TAB_NAME_KEY]: '夜猫' })
+  const client = loadClient({ localStorage: storage })
+  walk(client.render(liveDesk(client), deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings')))
+  client.runEffects()
+  assert.equal(liveDesk(client).opts.label, '夜猫')
+  storage.map.clear()
+  assert.equal(client.dispatchWindowEvent('storage', { key: null, newValue: null }), 1, 'clear 事件也要处理')
+  assert.equal(liveDesk(client).opts.label, '主理鱼', 'clear 之后回默认')
+  assert.equal(lastDraftValue(client), '主理鱼', '干净草稿跟着回默认')
+})
+
+test('M1：无关 key 的 storage 事件仍然忽略', () => {
+  const storage = memoryStorage()
+  const client = loadClient({ localStorage: storage })
+  walk(client.render(liveDesk(client), deskQueue(brandSnapshot('主理鱼'), null, {}, 'settings')))
+  client.runEffects()
+  client.dispatchWindowEvent('storage', { key: 'dsh-session-superagent.other', newValue: '别的东西' })
+  assert.equal(liveDesk(client).opts.label, '主理鱼', '无关 key 不改页签')
+  assert.equal(client.stateCalls().filter((call) => call.index === draftSlot()).length, 0, '也不动草稿')
+})
