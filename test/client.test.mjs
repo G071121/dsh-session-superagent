@@ -1396,6 +1396,53 @@ test('弹层副行显示会话标题（不是只有 8 位 ID）', () => {
   assert.ok(subs[0].includes('#'), '同时保留短 ID 去重：' + subs[0])
 })
 
+test('弹层显示「最近唤醒的是哪一条」（编号 + 标题 + 时间，条数看本轮新增）', () => {
+  // 客户问的是「现在在处理哪个仓库的哪一条」：只写「主理中」看不出轮到谁。
+  const { registrations, render } = loadClient()
+  const orbit = registrations.find((r) => r.opts.id === 'session-superagent-orbit')
+  const list = [watcher('a/b', {
+    id: 'a/b#s1',
+    lastWake: new Date(Date.now() - 5 * 60 * 1000).toISOString(),
+    lastWakeCount: 2,
+    lastWakeItem: { number: '12', title: '登录页 500', kind: 'issue' },
+  })]
+  const nodes = walk(render(orbit, [list, null, true, { x: 700, y: 800 }]))
+  const lines = nodes.filter((n) => n.props && n.props.className === 'sa-dock-wake')
+    .map((n) => (n.props.children || []).join(''))
+  assert.equal(lines.length, 1, '应有一行「最近唤醒」：' + JSON.stringify(lines))
+  assert.ok(!lines[0].includes('a/b'), '仓库名由 sa-dock-name 那行给，这里不重复：' + lines[0])
+  // 严格相等：「等 N 条」必须来自 lastWakeCount（本轮新增），不能是条数数组长度。
+  // 用 includes 的话，「等 2 条」写成「等 1 条」这类回归照样绿（AGENTS 坑 7）。
+  assert.equal(lines[0], '最近唤醒 issue #12 登录页 500 等 2 条 · 5 分钟前')
+})
+
+test('弹层没有唤醒记录时不占行（老条目 / 从未唤醒）', () => {
+  const { registrations, render } = loadClient()
+  const orbit = registrations.find((r) => r.opts.id === 'session-superagent-orbit')
+  const list = [watcher('a/b', { id: 'a/b#s1', lastWake: null, lastWakeItem: undefined })]
+  const nodes = walk(render(orbit, [list, null, true, { x: 700, y: 800 }]))
+  const lines = nodes.filter((n) => n.props && n.props.className === 'sa-dock-wake')
+  assert.equal(lines.length, 0, '没有唤醒记录就不该多一行空行')
+})
+
+test('唤醒失败时保留上一批条目，但不显示「多久前」（失败不是处理过）', () => {
+  const { registrations, render } = loadClient()
+  const orbit = registrations.find((r) => r.opts.id === 'session-superagent-orbit')
+  const list = [watcher('a/b', {
+    id: 'a/b#s1',
+    lastWake: 'failed: gh: HTTP 502（网关）',
+    lastWakeCount: 2,
+    lastWakeItem: { number: '12', title: '登录页 500', kind: 'issue' },
+  })]
+  const nodes = walk(render(orbit, [list, null, true, { x: 700, y: 800 }]))
+  const lines = nodes.filter((n) => n.props && n.props.className === 'sa-dock-wake')
+    .map((n) => (n.props.children || []).join(''))
+  assert.equal(lines.length, 1, '上一批条目要留着，客户才知道本来轮到谁')
+  // 严格相等：「上次成功唤醒」这个前缀是失败态唯一能区分「上一批」的信号，
+  // 也不能带时间 —— ageText('failed: …') 返回「—」，靠 includes('前') 抓不住。
+  assert.equal(lines[0], '上次成功唤醒 issue #12 登录页 500 等 2 条')
+})
+
 test('弹层指标用官方「数值强 + 单位弱」两段（不是一句 1 / 2 主理中）', () => {
   const { registrations, render } = loadClient()
   const orbit = registrations.find((r) => r.opts.id === 'session-superagent-orbit')

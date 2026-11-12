@@ -647,6 +647,8 @@ window.__ModuleLoader__.load({
 .sa-dock-session { flex: none; font-size: 11px; line-height: 18px; color: var(--dsw-alias-label-tertiary); }
 .sa-dock-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; line-height: 18px; font-weight: 500; color: var(--dsw-alias-label-primary); }
 .sa-dock-sub { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-tertiary); }
+/* 最近唤醒的条目：仓库名与状态之后的第二行事实，比 sub 亮一档（客户最关心的一条） */
+.sa-dock-wake { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-label-secondary); }
 .sa-dock-err { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--dsw-alias-state-error-primary); }
 .sa-dock-actions { display: flex; flex: none; gap: 2px; opacity: 0; transition: opacity 120ms ease; }
 .sa-dock-row:hover .sa-dock-actions, .sa-dock-row:focus-within .sa-dock-actions { opacity: 1; }
@@ -1940,6 +1942,23 @@ window.__ModuleLoader__.load({
         if (w.activeHours) parts.push('时段 ' + w.activeHours)
         return parts.join(' · ')
       }
+      // 「这个仓库正在处理哪一条」：服务端在唤醒真正发出后写 lastWakeItem（编号 + 标题 + 类型）。
+      // 只显示**一条**（batchFresh 已按优先级降序，取 head = listed[0]），
+      // 条数用 lastWakeCount（本轮新增条数，可能大于 batchLimit），行高不变 ——
+      // 弹层一行摘要的写法，不新增展开层级。
+      const wakeLine = (w) => {
+        const item = w.lastWakeItem && typeof w.lastWakeItem === 'object' ? w.lastWakeItem : null
+        if (!item || !String(item.number || '').trim()) return ''
+        const title = String(item.title || '').trim()
+        const kind = String(item.kind || '').toLowerCase() === 'pr' ? 'PR' : 'issue'
+        // 失败时 lastWake 是 'failed: …'：那条时间不属于「处理过」，前缀也要说清是上一批
+        const failed = typeof w.lastWake === 'string' && w.lastWake.indexOf('failed') === 0
+        const total = Math.max(0, Number(w.lastWakeCount) || 0)
+        const at = !failed && typeof w.lastWake === 'string' && w.lastWake ? ' · ' + ageText(w.lastWake) : ''
+        return (failed ? '上次成功唤醒 ' : '最近唤醒 ') + kind + ' #' + String(item.number)
+          + (title ? ' ' + title : '')
+          + (total > 1 ? ' 等 ' + total + ' 条' : '') + at
+      }
       const detailTitle = (w) => [
         w.title || '未命名会话',
         '会话 ' + sessionTag(w.sessionId),
@@ -1947,6 +1966,7 @@ window.__ModuleLoader__.load({
         isolationText(w),
         backoffText(w),
         historyText(w),
+        wakeLine(w),
         w.lastDeferred,
         w.goal && w.goal.objective ? 'goal · ' + String(w.goal.objective).slice(0, 80) : '',
         w.lastError || '',
@@ -1965,6 +1985,9 @@ window.__ModuleLoader__.load({
         const togglePending = actionPending(w, toggleAction)
         const detailContent = h(React.Fragment, null,
           h('div', { className: 'sa-dock-sub' }, shortSub(w)),
+          // 最近唤醒条目（编号 + 标题）：客户在弹层里就能看出「轮到哪一条了」，
+          // 不用回会话翻消息。没有唤醒记录时不占一行。
+          wakeLine(w) ? h('div', { className: 'sa-dock-wake' }, wakeLine(w)) : null,
           w.lastError
             ? h('div', { className: 'sa-dock-err' }, splitErrorText(w.lastError).main)
             : null)

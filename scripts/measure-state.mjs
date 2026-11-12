@@ -44,6 +44,11 @@ for (const count of sizes) {
   const view = statusView(list)
   view.watchers = view.watchers.map((w, index) => ({
     ...w,
+    // 弹层「最近唤醒的是哪一条」：只有 /state 投影有（statusView 不带给工具），
+    // 单条对象；不放进 fixture 就量不出它对请求体积的真实贡献
+    lastWakeItem: index % 2 === 0
+      ? { number: String(100 + index), title: '插件安装后工具同名重复注册（示例标题，接近真实长度）', kind: index % 3 === 0 ? 'pr' : 'issue' }
+      : null,
     filteredLog: list[index].filteredLog.slice(-5),
     history: list[index].history.slice(-5),
     // 按新的预算算：每守 min(6, 240/N) 条
