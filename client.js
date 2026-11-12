@@ -3232,7 +3232,12 @@ window.__ModuleLoader__.load({
           // 只发 touched 字段；repo/sessionId 只是现有 /watch 的定位键，不是全量快照。
           body: JSON.stringify((() => {
             const full = {
-              repo: watcher.repo,
+              // /state 里的 repo 是**规范化后**的 `owner/name`（provider 单独一个字段）——
+              // 提交前必须把 `gitee:` 前缀补回去。否则服务端 parseRepoSpec 会把它判成 GitHub：
+              // id 从 `gitee:owner/name#s` 变成 `owner/name#s`，匹配不到已有守 ⇒ **静默新建一条
+              // github 孪生守**（每轮 gh 404），而原来那条的间隔/过滤分毫不动
+              //（0.10.12 真机踩到：Gitee 仓库改 600 秒保存后仍是 180 秒，面板里还多出一条 404 的孪生）。
+              repo: (watcher.provider === 'gitee' ? 'gitee:' : '') + String(watcher.repo || ''),
               sessionId: watcher.sessionId,
               intervalSec: numberOrUndefined(draft.intervalSec) ?? watcher.intervalSec,
               filters: {
