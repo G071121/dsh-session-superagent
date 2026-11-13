@@ -223,7 +223,9 @@ function snapshot() {
 }
 
 function updateQueue() {
-  // 本测试只依赖任务开始时的 22 个根槽；updateResult 是被测 client 自己追加的第 23 槽。
+  // 本测试只依赖主面板前 22 个根槽（到 settingsSection 为止）。0.10.13 在末尾追加了
+  // 「页签名称草稿」，所以 ConfirmButton 的占位从「updateResult 之后」变成
+  // 「updateResult / tabNameDraft 之后」—— 见下面各用例里的 [...base, X, null, open, busy]。
   // 不切分公共 fixture，避免其它任务向共享队列追加占位后改变这里 open/busy 的位置。
   const queue = deskQueue(snapshot(), null, {}, 'settings', '', false, UPDATE).slice(0, 22)
   queue[7] = null
@@ -289,7 +291,9 @@ function isStateUrl(url) {
 }
 
 function hookIndexes(base) {
-  return { result: base.length, open: base.length + 1, busy: base.length + 2 }
+  // base 到 settingsSection（index 14）为止；之后依次是 updateResult / tabNameDraft，
+  // 再后面才是 ConfirmButton 自己的 open / busy。
+  return { result: base.length, open: base.length + 2, busy: base.length + 3 }
 }
 
 test('Btn 官方 variant：primary/ghost/outline/toolbar 全部委托，props 原样保留且 link 不自造映射', () => {
@@ -1120,7 +1124,7 @@ test('hasUpdate 显示官方 primary 安装按钮；点击只确认，复制命�
   assert.ok(client.stateCalls().some((call) => call.index === hooks.open && call.next === true))
   assert.equal(postsOf(calls).length, 0, '打开确认框不能发 POST')
 
-  const opened = nodesOf(client, [...base, null, true, false])
+  const opened = nodesOf(client, [...base, null, null, true, false])
   const modal = hostModal(opened)
   assert.equal(modal.props.open, true)
   assert.equal(modal.props.title, '安装更新')
@@ -1152,7 +1156,7 @@ test('deferred POST 忙碌时取消/onClose/连点均不关闭或重发；成功
   })
   const base = updateQueue()
   const hooks = hookIndexes(base)
-  const opened = nodesOf(client, [...base, null, true, false])
+  const opened = nodesOf(client, [...base, null, null, true, false])
   const openedModal = hostModal(opened)
   const openedFooter = walk(openedModal.props.footer)
   const confirm = control(openedFooter, '确认安装')
@@ -1169,7 +1173,7 @@ test('deferred POST 忙碌时取消/onClose/连点均不关闭或重发；成功
   assert.ok(client.stateCalls().some((call) => call.index === hooks.busy && call.next === true))
   assert.equal(calls.filter(([url]) => url.endsWith('/update?refresh=1')).length, 0, 'POST 未完成前不能刷新')
 
-  const busyTree = nodesOf(client, [...base, null, true, true])
+  const busyTree = nodesOf(client, [...base, null, null, true, true])
   const busyModal = hostModal(busyTree)
   const busyFooter = walk(busyModal.props.footer)
   const cancel = control(busyFooter, '取消')
@@ -1216,7 +1220,7 @@ test('成功回执覆盖真实 GET hasUpdate:true：等待重载且不再提示�
   })
   const base = updateQueue()
   const hooks = hookIndexes(base)
-  const opened = nodesOf(client, [...base, null, true, false])
+  const opened = nodesOf(client, [...base, null, null, true, false])
   client.resetStateCalls()
   assert.equal(await control(walk(hostModal(opened).props.footer), '确认安装').props.onClick(), true)
 
@@ -1316,7 +1320,7 @@ test('更新 POST 首个 fetch reject 只发一次：不 discoverBase，保留 u
   })
   const base = updateQueue()
   const hooks = hookIndexes(base)
-  const opened = nodesOf(client, [...base, null, true, false])
+  const opened = nodesOf(client, [...base, null, null, true, false])
   client.resetStateCalls()
   assert.equal(await control(walk(hostModal(opened).props.footer), '确认安装').props.onClick(), false)
   assert.equal(postsOf(calls).length, 1, 'fetch rejection 不能自动重放更新 POST')
@@ -1334,7 +1338,7 @@ test('更新 POST 首个 fetch reject 只发一次：不 discoverBase，保留 u
   const visibleQueue = updateQueue()
   visibleQueue[2] = { ok: false, text: errorText }
   visibleQueue[7] = { id: 1, text: errorText, tone: 'error' }
-  const visible = nodesOf(client, [...visibleQueue, UNKNOWN_RECEIPT, true, false])
+  const visible = nodesOf(client, [...visibleQueue, UNKNOWN_RECEIPT, null, true, false])
   const text = textOf(visible)
   assert.ok(text.includes('0.9.270') && text.includes(UPDATE.command), '结果未知后当前版本或命令回退丢失')
   assert.ok(text.includes(UNKNOWN_HINT), 'Section 必须持久显示重新检查 installed/running 的提示')
@@ -1364,7 +1368,7 @@ test('更新 POST 404 只发一次：即使 discoverBase 可找到新前缀也�
   })
   const base = updateQueue()
   const hooks = hookIndexes(base)
-  const opened = nodesOf(client, [...base, null, true, false])
+  const opened = nodesOf(client, [...base, null, null, true, false])
   client.resetStateCalls()
   assert.equal(await control(walk(hostModal(opened).props.footer), '确认安装').props.onClick(), false)
   assert.equal(postsOf(calls).length, 1, '404 不能经 discoverBase 自动重放更新 POST')
@@ -1427,7 +1431,7 @@ test('deferred POST 失败保留版本/命令与错误，busy 结束后取消和
   })
   const base = updateQueue()
   const hooks = hookIndexes(base)
-  const opened = nodesOf(client, [...base, null, true, false])
+  const opened = nodesOf(client, [...base, null, null, true, false])
   client.resetStateCalls()
   const pending = control(walk(hostModal(opened).props.footer), '确认安装').props.onClick()
   assert.equal(postsOf(calls).length, 1)
@@ -1449,7 +1453,7 @@ test('deferred POST 失败保留版本/命令与错误，busy 结束后取消和
   const visibleQueue = updateQueue()
   visibleQueue[2] = { ok: false, text: errorText }
   visibleQueue[7] = { id: 1, text: errorText, tone: 'error' }
-  const visible = nodesOf(client, [...visibleQueue, null, true, false])
+  const visible = nodesOf(client, [...visibleQueue, null, null, true, false])
   const text = textOf(visible)
   assert.ok(text.includes('0.9.270') && text.includes(UPDATE.command), '失败后当前版本或命令回退丢失')
   assert.ok(text.includes(errorText), 'Section 必须留住错误')
@@ -1487,7 +1491,7 @@ test('老宿主缺 Button/Modal/Toast 时保留完整本地 fallback，确认仍
     assert.equal(closed.filter((node) => node.type === HOST.Button || node.type === HOST.Modal).length, 0)
 
     trigger.props.onClick()
-    const opened = nodesOf(client, [...base, null, true, false])
+    const opened = nodesOf(client, [...base, null, null, true, false])
     const modal = localModal(opened)
     assert.equal(modal.props.role, 'dialog')
     assert.ok(textOf(opened).includes('修改安装副本'))

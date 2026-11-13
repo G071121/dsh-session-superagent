@@ -594,6 +594,35 @@ if (FAST) {
   }
 }
 
+// ⑧.6 贡献归属（客户 issue / PR）：默认门禁，但只在 PR CI 联网执行。
+// 本地与 main push 明确 SKIP；可用 scripts/check-pr-attribution.mjs --pr N 手动复核。
+{
+  const args = []
+  if (process.env.GITHUB_EVENT_NAME === 'pull_request') {
+    try {
+      if (!process.env.GITHUB_EVENT_PATH) throw new Error('PR 事件缺少 GITHUB_EVENT_PATH，不能静默 SKIP')
+      const event = JSON.parse(readFileSync(process.env.GITHUB_EVENT_PATH, 'utf8'))
+      const number = Number(event && event.pull_request && event.pull_request.number)
+      const repo = event && event.repository && event.repository.full_name
+      if (!Number.isInteger(number) || number <= 0 || !repo) throw new Error('PR number / repository 缺失')
+      args.push('--pr', String(number), '--repo', String(repo))
+    } catch (error) {
+      record('贡献归属', false, 'PR 事件解析失败：' + String((error && error.message) || error))
+    }
+  }
+  // 解析失败已经记了一条 FAIL，不重复执行；本地无参数时脚本会明确 SKIP。
+  if (!rows.some((row) => row.name === '贡献归属')) {
+    const res = tryRun('node', ['scripts/check-pr-attribution.mjs', ...args], { timeout: 120000 })
+    const out = (String(res.stdout || '') + String(res.stderr || '')).trim()
+    if (out.startsWith('SKIP')) {
+      console.log(out.replace(/^SKIP /, 'SKIP 贡献归属 '))
+    } else {
+      if (res.status !== 0 && out) console.log(out)
+      record('贡献归属', res.status === 0, out.split(String.fromCharCode(10))[0] || `exit ${res.status}`)
+    }
+  }
+}
+
 // ⑨ 维护一致性（版本 / tag / CHANGELOG / 徽章 是否真的对齐）
 //    本地化自 magpie-plugin-scaffold 的 check-maintenance：六条都不报错也都不崩，
 //    但任何一条不满足，用户拿到的就是旧版。
