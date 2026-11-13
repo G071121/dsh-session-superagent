@@ -2743,3 +2743,68 @@ test('pollPrOnce：首次同步走 REST 全量拉评论，之后走列表自带�
     assert.equal(wake.calls.length, 1, '没有新评论不重复叫醒')
   })
 })
+
+test('pollPrOnce：上一轮排队的唤醒先送出，本轮不按旧水位重复投递（A1）', async () => {
+  await withPrState(async () => {
+    // WAKE_WINDOW_MS 在模块加载时读：用带 query 的新实例拿到 20ms 的合并窗口
+    const previousWindow = process.env.DSH_SUPERAGENT_WAKE_WINDOW_MS
+    process.env.DSH_SUPERAGENT_WAKE_WINDOW_MS = '20'
+    const mod = await prModule('flush-before-read')
+    if (previousWindow === undefined) delete process.env.DSH_SUPERAGENT_WAKE_WINDOW_MS
+    else process.env.DSH_SUPERAGENT_WAKE_WINDOW_MS = previousWindow
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
+
+    // 会话先忙后闲：忙时唤醒进队列，空闲后（下一轮开轮）flush 送出并推进水位
+    let busy = true
+    const followed = []
+    const ctx = {
+      get: (name) => name === 'agents' ? {
+        get: () => ({
+          status: busy ? 'busy' : 'idle',
+          followup: async (text) => { followed.push(text) },
+        }),
+      } : undefined,
+    }
+
+    const rows = [{
+      number: 7,
+      title: 'PR 7',
+      isDraft: false,
+      headRefName: 'b7',
+      headRepository: { nameWithOwner: 'me/r' },
+      baseRepository: { nameWithOwner: 'o/r' },
+      comments: {
+        pageInfo: { hasPreviousPage: false },
+        nodes: [{ databaseId: 14, author: { login: 'someone' }, createdAt: '2026-11-13T00:00:00Z', body: 'review 意见' }],
+      },
+    }]
+    const ghRun = async (file, args) => {
+      const joined = (args || []).join(' ')
+      // 首次同步（seenId=0）走 REST 全量：必须回数组，否则被判「评论列表不是数组」
+      if (joined.includes('/issues/7/comments')) {
+        return { code: 0, stderr: '', stdout: JSON.stringify([{ id: 14, user: { login: 'someone' }, body: 'review 意见', created_at: '2026-11-13T00:00:00Z' }]) }
+      }
+      return { code: 0, stderr: '', stdout: JSON.stringify({ data: { search: { pageInfo: { hasNextPage: false }, nodes: rows } } }) }
+    }
+
+    const entry = prEntry()
+    mod.__test.writeState({ watchers: { [entry.id]: entry } })
+
+    // 第一轮：会话忙 → 进队列，水位不动
+    await mod.__test.pollPrOnce(ctx, mod.__test.readState().watchers[entry.id], 300000, null, { ghRun, selfLogin: 'me' })
+    await sleep(150)
+    const afterFirst = mod.__test.readState().watchers[entry.id]
+    assert.equal(mod.__test.wakeQueueCount('session-pr'), 1, '忙时唤醒必须进队列')
+    assert.equal(afterFirst.seenComments[7], undefined, '忙时不能推进水位')
+    assert.equal(afterFirst.deferReason, 'busy', '忙时记 busy')
+
+    // 第二轮：会话空闲 → 开轮 flush 旧队列 → 送出 → 回调推进水位 → 本轮无新评论
+    busy = false
+    await mod.__test.pollPrOnce(ctx, mod.__test.readState().watchers[entry.id], 300000, null, { ghRun, selfLogin: 'me' })
+    await sleep(150)
+    const afterSecond = mod.__test.readState().watchers[entry.id]
+    assert.equal(followed.length, 1, '同一条评论只能投递一次，实际投递了 ' + followed.length + ' 次')
+    assert.equal(afterSecond.seenComments[7], 14, '水位必须推进到 14')
+    mod.__test.clearWakeQueues()
+  })
+})
