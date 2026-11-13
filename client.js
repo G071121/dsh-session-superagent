@@ -1223,8 +1223,11 @@ window.__ModuleLoader__.load({
     // 这里刻意不引入 DSH InlineEditor：watcher 是多字段表单，不是单文本编辑器。
     const AUTHOR_LIST_PLACEHOLDER = 'GitHub 登录名，逗号分隔，留空 = 谁都算'
     const PRIORITY_LABEL = '优先级（在「单次最多唤醒条数」内先挑谁）'
+    // PR 响应监控：watchKind 决定后面三项显不显示，所以必须进初值 ——
+    // 否则新建表单的分段控件没有选中项（两个都不亮），dirty 比较也会漏掉这个键。
     const CREATE_WATCHER_VALUES = {
-      repo: '', intervalSec: '60', labels: '', ignoreLabels: '', assignee: '',
+      repo: '', watchKind: 'issue', audit: false, adversarialAudit: false, auditMode: 'subagent',
+      intervalSec: '60', labels: '', ignoreLabels: '', assignee: '',
       activeHours: '', goal: '', ackLabel: '', onlyAssigned: false, allowAuthors: '',
       observe: false, isolated: false, workdir: '', batchLimit: '', maxWakesPerHour: '',
       sessionMaxWakes: '', isolateKeepDays: '', maxIsolated: '',
@@ -1246,6 +1249,11 @@ window.__ModuleLoader__.load({
     }
     const watcherValuesFrom = (watcher, ackDefaults) => ({
       repo: watcher.repo || '',
+      // 服务端用 kind: 'pr' 表示 PR 响应监控（老 watcher 没有这个字段 → issue）。
+      watchKind: watcher.kind === 'pr' ? 'pr' : 'issue',
+      audit: watcher.audit === true,
+      adversarialAudit: watcher.adversarialAudit === true,
+      auditMode: watcher.auditMode === 'inline' ? 'inline' : 'subagent',
       intervalSec: watcherNumberText(watcher.intervalSec ?? 60),
       labels: (watcher.filters && Array.isArray(watcher.filters.labels) ? watcher.filters.labels : []).join(','),
       ignoreLabels: (watcher.filters && Array.isArray(watcher.filters.ignoreLabels) ? watcher.filters.ignoreLabels : []).join(','),
@@ -1275,6 +1283,17 @@ window.__ModuleLoader__.load({
     // label/hint/note/control 的顺序只在这里声明一次；两个调用点只负责提供值与回调。
     const WATCHER_FIELD_SCHEMA = [
       { key: 'repo', label: '仓库', kind: 'text', modes: ['create'], required: true, placeholder: 'owner/name，或 gitee:owner/name' },
+      // PR 响应监控（Task 6）：类型本身跟仓库走，所以不 advanced；后三项只在 PR 类型下出现。
+      { key: 'watchKind', label: '监控类型', kind: 'segmented', options: [
+        { value: 'issue', label: 'Issue' },
+        { value: 'pr', label: 'PR 响应' },
+      ] },
+      { key: 'audit', label: '审计', kind: 'switch', when: (value) => value.watchKind === 'pr', hint: '修改后先自审一遍再提交' },
+      { key: 'adversarialAudit', label: '对抗性审计', kind: 'switch', when: (value) => value.watchKind === 'pr', hint: '专门挑刺：假设这段代码一定有 bug' },
+      { key: 'auditMode', label: '执行方式', kind: 'segmented', when: (value) => value.watchKind === 'pr', options: [
+        { value: 'inline', label: '当前会话' },
+        { value: 'subagent', label: '子代理' },
+      ], disabledWhen: (value) => !value.audit && !value.adversarialAudit },
       { key: 'intervalSec', label: '间隔（秒）', kind: 'number', min: 30, max: 3600, required: true, hint: '多长时间检查一次这个仓库，最小 30 秒' },
       { key: 'labels', label: '只处理这些标签', kind: 'text', placeholder: '逗号分隔，留空 = 全部' },
       { key: 'ignoreLabels', label: '排除这些标签', kind: 'text', placeholder: '逗号分隔，留空 = 不排除', hint: '命中任意一个就跳过，优先级高于上面的白名单' },
@@ -1472,17 +1491,27 @@ window.__ModuleLoader__.load({
         if (spec.modes && !spec.modes.includes(mode)) return null
         if (spec.when && !spec.when(values)) return null
         const id = idPrefix + '-' + spec.key
+        // 统一算一次：busy/disabled 是整表语义，disabledWhen 是字段自己的规则，两者取或。
+        // 以前三处各写一遍 `busy || disabled` —— 加第四种控件时漏一处就静默可点。
+        const specDisabled = busy || disabled || (typeof spec.disabledWhen === 'function' ? !!spec.disabledWhen(values) : false)
         if (spec.kind === 'switch') {
-          return h(WatcherSwitch, { key: spec.key, spec, value: values[spec.key], disabled: busy || disabled, id,
+          return h(WatcherSwitch, { key: spec.key, spec, value: values[spec.key], disabled: specDisabled, id,
             onChange: (next) => change(spec.key, next) })
         }
         if (spec.kind === 'priority') {
-          return h(WatcherPriority, { key: spec.key, value: values, disabled: busy || disabled, idPrefix,
+          return h(WatcherPriority, { key: spec.key, value: values, disabled: specDisabled, idPrefix,
             onChange: change })
+        }
+        if (spec.kind === 'segmented') {
+          return h(Field, { key: spec.key, id, label: spec.label, hint: spec.hint, note: spec.note },
+            h(SegmentedControl, {
+              id, label: spec.label, options: spec.options, value: values[spec.key],
+              disabled: specDisabled, onChange: (next) => change(spec.key, next),
+            }))
         }
         const common = {
           value: spec.kind === 'hours' ? (values[spec.key] || '') : watcherNumberText(values[spec.key]),
-          disabled: busy || disabled,
+          disabled: specDisabled,
           onChange: (next) => change(spec.key, next),
         }
         const control = spec.kind === 'hours'
@@ -1493,7 +1522,7 @@ window.__ModuleLoader__.load({
             min: spec.min, max: spec.max, step: spec.kind === 'number' ? 1 : undefined,
             required: !!spec.required,
             placeholder: typeof spec.placeholder === 'function' ? spec.placeholder(defaults) : spec.placeholder,
-            disabled: busy || disabled,
+            disabled: specDisabled,
             onChange: (event) => change(spec.key, event.target.value),
           })
         return h(Field, { key: spec.key, id, label: spec.label, hint: spec.hint, note: spec.note }, control)
@@ -3322,6 +3351,12 @@ window.__ModuleLoader__.load({
         touchedRef.current = new Set()
         editSnapshotRef.current = nextKey ? { key: nextKey, values } : null
         setDraft({
+          // PR 响应监控的四项必须一起进 draft：watcherDirty 只比较 snapshot 里有的键，
+          // 少一个键就等于「切了类型不算修改」，SaveBar 永远不出现。
+          watchKind: values.watchKind,
+          audit: values.audit,
+          adversarialAudit: values.adversarialAudit,
+          auditMode: values.auditMode,
           intervalSec: watcherNumberText(watcher.intervalSec ?? 60),
           labels: (watcher.filters && watcher.filters.labels ? watcher.filters.labels : []).join(','),
           ignoreLabels: (watcher.filters && watcher.filters.ignoreLabels ? watcher.filters.ignoreLabels : []).join(','),

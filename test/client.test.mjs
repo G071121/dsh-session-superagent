@@ -3017,6 +3017,112 @@ test('W12：普通 Disclosure 单键只切一次，重复 keydown 被忽略', ()
   assert.equal(row.props.tabIndex, 0)
 })
 
+// PR 响应监控：四个新字段（监控类型 / 审计 / 对抗性审计 / 执行方式）。
+// 一律按「真跑 WatcherForm 后树里有没有这个控件、它可不可点」断言 —— 不断言源码字符串。
+function renderPrFormFields(value, onChange = () => {}, disabled = false) {
+  const { internals } = loadA11yInternals()
+  const tree = internals.WatcherForm({
+    mode: 'edit', idPrefix: 'watcher-pr', value, snapshot: { ...value },
+    disabled, onChange, onSave: async () => true, onDiscard() {},
+  })
+  return walk(tree)
+}
+
+const segmented = (nodes, label) => nodes.find((node) => node.type === 'div'
+  && node.props.role === 'radiogroup' && node.props['aria-label'] === label)
+
+const segmentButtons = (group, label = '') => {
+  assert.ok(group, '缺少分段控件' + (label ? '「' + label + '」' : ''))
+  return walk(group).filter((node) => node.type === 'button' && node.props.role === 'radio')
+}
+
+const toggleOf = (nodes, label) => nodes.find((node) => node.type === 'button'
+  && node.props.role === 'switch' && node.props['aria-label'] === label)
+
+test('PR 面板：监控类型是原生分段控件，选中值跟 watchKind 走', () => {
+  const segments = segmentButtons(segmented(renderPrFormFields({ intervalSec: '60', watchKind: 'pr' }), '监控类型'))
+  assert.deepEqual(segments.map((node) => a11yText(node)), ['Issue', 'PR 响应'])
+  assert.deepEqual(segments.map((node) => node.props['aria-checked']), [false, true], 'watchKind=pr 必须选中「PR 响应」')
+  assert.deepEqual(segments.map((node) => node.props.tabIndex), [-1, 0], 'roving tab stop 只能落在选中项')
+
+  const issue = segmentButtons(segmented(renderPrFormFields({ intervalSec: '60', watchKind: 'issue' }), '监控类型'))
+  assert.deepEqual(issue.map((node) => node.props['aria-checked']), [true, false], 'watchKind=issue 必须选中「Issue」')
+})
+
+test('PR 面板：PR 类型显示审计与对抗性审计开关（默认关，hint 可读）', () => {
+  const nodes = renderPrFormFields({ intervalSec: '60', watchKind: 'pr' })
+  for (const label of ['审计', '对抗性审计']) {
+    const toggle = toggleOf(nodes, label)
+    assert.ok(toggle, 'PR 类型必须显示「' + label + '」开关')
+    assert.equal(toggle.props['aria-checked'], false, label + ' 默认必须关闭')
+  }
+  const tip = (text) => nodes.some((node) => node.type === 'button' && node.props['aria-label'] === text)
+  assert.ok(tip('修改后先自审一遍再提交'), '「审计」的 hint 必须能被读屏读到')
+  assert.ok(tip('专门挑刺：假设这段代码一定有 bug'), '「对抗性审计」的 hint 必须能被读屏读到')
+})
+
+test('PR 面板：Issue 类型不显示审计三项，监控类型仍在', () => {
+  const nodes = renderPrFormFields({ intervalSec: '60', watchKind: 'issue' })
+  assert.equal(toggleOf(nodes, '审计'), undefined)
+  assert.equal(toggleOf(nodes, '对抗性审计'), undefined)
+  assert.equal(segmented(nodes, '执行方式'), undefined)
+  assert.ok(segmented(nodes, '监控类型'), '监控类型本身与类型无关，必须始终可见')
+})
+
+test('PR 面板：两个审计都关时执行方式置灰，值仍读得出来', () => {
+  const nodes = renderPrFormFields({
+    intervalSec: '60', watchKind: 'pr', audit: false, adversarialAudit: false, auditMode: 'subagent',
+  })
+  const segments = segmentButtons(segmented(nodes, '执行方式'))
+  assert.deepEqual(segments.map((node) => a11yText(node)), ['当前会话', '子代理'])
+  assert.ok(segments.every((node) => node.props.disabled === true), '两个审计都关时执行方式必须不可点')
+  assert.deepEqual(segments.map((node) => node.props['aria-checked']), [false, true], '置灰不是隐藏：选中值照常渲染')
+})
+
+test('PR 面板：任一审计开启后执行方式可点，点击写回 auditMode', () => {
+  for (const [name, flags] of [['审计开', { audit: true }], ['对抗性审计开', { adversarialAudit: true }]]) {
+    const changes = []
+    const nodes = renderPrFormFields(
+      { intervalSec: '60', watchKind: 'pr', auditMode: 'subagent', ...flags },
+      (key, next) => changes.push([key, next]),
+    )
+    const segments = segmentButtons(segmented(nodes, '执行方式'))
+    assert.ok(segments.every((node) => node.props.disabled === false), name + ' 时执行方式必须可点')
+    segments[0].props.onClick()
+    assert.deepEqual(changes, [['auditMode', 'inline']], name + ' 时点「当前会话」必须把 auditMode 改成 inline')
+  }
+})
+
+test('PR 面板：整表 disabled（无会话）时监控类型与执行方式一起不可点', () => {
+  const nodes = renderPrFormFields(
+    { intervalSec: '60', watchKind: 'pr', audit: true, auditMode: 'inline' }, undefined, true,
+  )
+  assert.ok(segmentButtons(segmented(nodes, '监控类型')).every((node) => node.props.disabled === true),
+    'disabledWhen 不能绕过整表 disabled —— 两处必须统一')
+  assert.ok(segmentButtons(segmented(nodes, '执行方式')).every((node) => node.props.disabled === true))
+})
+
+test('PR 面板：打开已有 PR 类型 watcher 时四项的值来自服务端快照', () => {
+  const { registrations, render } = loadClient()
+  const desk = registrations.find((registration) => registration.opts.id === 'session-superagent-desk')
+  const item = watcher('a/b', {
+    id: 'a/b#session-a/b', kind: 'pr', audit: true, adversarialAudit: false, auditMode: 'inline',
+  })
+  const snapshot = {
+    loading: false, error: null,
+    body: { sessionGoal: null, sessionTitle: '会话', credentials: {}, watchers: [item] },
+  }
+  const nodes = walk(render(desk, deskQueue(snapshot, 'a/b#session-a/b'), { sessionId: 'session-a/b' }))
+  // 值初始化在 watcherValuesFrom：kind/audit/auditMode 必须原样映射到四个字段。
+  assert.deepEqual(segmentButtons(segmented(nodes, '监控类型'), '监控类型').map((node) => node.props['aria-checked']),
+    [false, true], 'watcher.kind=pr 必须选中「PR 响应」')
+  assert.equal(toggleOf(nodes, '审计').props['aria-checked'], true, 'audit:true 必须点亮「审计」')
+  assert.equal(toggleOf(nodes, '对抗性审计').props['aria-checked'], false, 'adversarialAudit 缺省必须关闭')
+  const mode = segmentButtons(segmented(nodes, '执行方式'), '执行方式')
+  assert.deepEqual(mode.map((node) => node.props['aria-checked']), [true, false], 'auditMode:inline 必须选中「当前会话」')
+  assert.ok(mode.every((node) => node.props.disabled === false), '审计开着时执行方式必须可点')
+})
+
 test('W13：总览/判定/触发/设置的每个 Section 标题都是 h2，视觉 class 保留', () => {
   const { registrations, render } = loadClient()
   const desk = registrations.find((item) => item.opts.id === 'session-superagent-desk')

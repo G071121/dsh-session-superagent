@@ -24,6 +24,8 @@ function makeWatcher() {
 
 function makeDraft() {
   return {
+    // PR 响应监控的四项：与 watcherValuesFrom 返回的键保持一致，否则「放弃恢复快照」会假红。
+    watchKind: 'issue', audit: false, adversarialAudit: false, auditMode: 'subagent',
     intervalSec: '30', labels: 'bug', ignoreLabels: 'old', assignee: '', activeHours: '',
     goal: '原始目标', ackLabel: '主理鱼:已处理', onlyAssigned: false, allowAuthors: 'alice',
     observe: false, isolated: true, workdir: '', batchLimit: '', maxWakesPerHour: '',
@@ -35,7 +37,8 @@ function makeDraft() {
 
 function makeForm() {
   return {
-    ...deskForm, repo: '', intervalSec: '60', goal: '', labels: '', ignoreLabels: '', assignee: '',
+    ...deskForm, watchKind: 'issue', audit: false, adversarialAudit: false, auditMode: 'subagent',
+    repo: '', intervalSec: '60', goal: '', labels: '', ignoreLabels: '', assignee: '',
     allowAuthors: '', onlyAssigned: false, activeHours: '', isolated: true, workdir: '', observe: false,
     batchLimit: '', maxWakesPerHour: '', sessionMaxWakes: '', isolateKeepDays: '', maxIsolated: '',
   }

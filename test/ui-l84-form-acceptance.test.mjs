@@ -80,6 +80,8 @@ function makeWatcher({ isolated = false } = {}) {
 function makeForm({ isolated = false } = {}) {
   return {
     ...deskForm,
+    // PR 响应监控的四项：watcherValuesFrom 会返回它们，夹具缺了 deepEqual 就会假红。
+    watchKind: 'issue', audit: false, adversarialAudit: false, auditMode: 'subagent',
     repo: '', intervalSec: '60', goal: '', labels: '', ignoreLabels: '',
     assignee: '', allowAuthors: '', onlyAssigned: false, activeHours: '',
     isolated, workdir: '', observe: false, batchLimit: '', maxWakesPerHour: '',
