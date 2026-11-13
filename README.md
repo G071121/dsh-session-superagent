@@ -149,7 +149,7 @@ Gitee 没有 ETag，每轮会真读一次列表；私有仓库需要在面板里
 
 ## 验证
 
-1069 项单测、42 项 preflight（41 PASS / 1 SKIP，`smoke:observe` 需真机宿主）、11 项 UI 全绿（0.11.0）。
+1070 项单测、42 项 preflight（41 PASS / 1 SKIP，`smoke:observe` 需真机宿主）、11 项 UI 全绿（0.11.0）。
 
 ## 数据来源
 

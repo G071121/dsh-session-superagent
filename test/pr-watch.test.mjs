@@ -98,6 +98,34 @@ test('buildPrWakeText 带 PR 号、评论者、正文', () => {
   assert.equal(noGoal.split('\n').some((line) => line.startsWith('目标:')), false)
 })
 
+test('buildPrWakeText：处理建议里的「自审」按设置带上驱动方式与审计项', () => {
+  const base = (extra) => buildPrWakeText({
+    base: 'MYCF711/repo', number: 53, title: 'feat: yyy', branch: 'feat/b',
+    comments: [{ author: 'MYCF711', body: '再看一眼', createdAt: '2026-11-13T12:27:29Z' }],
+    ...extra,
+  })
+  const suggestion = (text) => text.split('\n').find((line) => line.startsWith('处理建议:'))
+  // 两项都开：必须写清「subagent 驱动的审计和对抗性审计」，否则会话只做一次普通自查
+  assert.equal(
+    suggestion(base({ audit: true, adversarialAudit: true, auditMode: 'subagent' })),
+    '处理建议: 阅读评论 → 修改代码 → 自审（subagent 驱动的审计和对抗性审计） → 提交 → 回评',
+  )
+  // 只开一项：只写那一项，且驱动方式跟着 auditMode 走
+  assert.equal(
+    suggestion(base({ audit: true, auditMode: 'inline' })),
+    '处理建议: 阅读评论 → 修改代码 → 自审（inline 驱动的审计） → 提交 → 回评',
+  )
+  assert.equal(
+    suggestion(base({ adversarialAudit: true, auditMode: 'subagent' })),
+    '处理建议: 阅读评论 → 修改代码 → 自审（subagent 驱动的对抗性审计） → 提交 → 回评',
+  )
+  // 都没开：退回原来的「自审」，不凭空造调解模式
+  assert.equal(
+    suggestion(base({})),
+    '处理建议: 阅读评论 → 修改代码 → 自审 → 提交 → 回评',
+  )
+})
+
 test('buildPrWakeText 多条评论逐条引用', () => {
   const text = buildPrWakeText({
     base: 'MYCF711/repo', number: 48, title: 'fix: xxx', branch: 'fix/a', self: 'iJetLi',
