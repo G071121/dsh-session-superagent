@@ -2067,6 +2067,147 @@ try {
   } else {
     observe('Issue #35 截图未齐', issue35Shots)
   }
+
+  // 用户实拍窗口约 520×415：portal 只解决 dock stacking context，不自动解决 dialog 自身越界。
+  // 四种高度都直接量 getBoundingClientRect/visualViewport；180/140 还必须真能滚到 footer。
+  for (const height of [415, 320, 180, 140]) {
+    const width = 520
+    const name = `Orbit 删除确认 ${width}x${height} 视口几何/滚动/焦点/Escape`
+    const artifactBase = `orbit-viewport-${width}x${height}`
+    let before = null
+    let after = null
+    let escaped = null
+    let escapeClosed = false
+    let runError = null
+    const measure = () => page.evaluate((selector) => {
+      const root = document.querySelector('.dt-modal-root')
+      const modal = document.querySelector(selector)
+      const body = modal?.querySelector('.dt-modal-body')
+      const header = modal?.querySelector('.dt-modal-header')
+      const description = modal?.querySelector('.dt-modal-description')
+      const footer = modal?.querySelector('.dt-modal-footer')
+      const buttons = [...(footer?.querySelectorAll('button') || [])]
+      const cancel = buttons.find((node) => node.textContent === '取消')
+      const confirm = buttons.find((node) => node.textContent === '确认删除')
+      const box = (node) => {
+        if (!node) return null
+        const rect = node.getBoundingClientRect()
+        return { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height }
+      }
+      const visual = window.visualViewport
+      const viewport = {
+        width: visual?.width || innerWidth,
+        height: visual?.height || innerHeight,
+        offsetLeft: visual?.offsetLeft || 0,
+        offsetTop: visual?.offsetTop || 0,
+        scale: visual?.scale || 1,
+      }
+      const inViewport = (rect) => Boolean(rect && rect.left >= viewport.offsetLeft && rect.top >= viewport.offsetTop
+        && rect.right <= viewport.offsetLeft + viewport.width && rect.bottom <= viewport.offsetTop + viewport.height)
+      const hit = (node) => {
+        const rect = box(node)
+        if (!rect || !inViewport(rect)) return null
+        const element = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2)
+        return element ? { tag: element.tagName, className: String(element.className || ''), isButton: element === node || node.contains(element) } : null
+      }
+      const style = modal ? getComputedStyle(modal) : null
+      const rootStyle = root ? getComputedStyle(root) : null
+      const bodyStyle = body ? getComputedStyle(body) : null
+      const modalRect = box(modal)
+      const rootRect = box(root)
+      return {
+        rootParent: root?.parentElement?.tagName || null,
+        root: rootRect,
+        rootInViewport: inViewport(rootRect),
+        rootStyle: rootStyle ? {
+          position: rootStyle.position,
+          boxSizing: rootStyle.boxSizing,
+          paddingTop: rootStyle.paddingTop,
+          paddingRight: rootStyle.paddingRight,
+          paddingBottom: rootStyle.paddingBottom,
+          paddingLeft: rootStyle.paddingLeft,
+          overflowY: rootStyle.overflowY,
+        } : null,
+        viewport,
+        dialog: modalRect,
+        dialogInViewport: inViewport(modalRect),
+        header: box(header),
+        description: box(description),
+        body: body ? {
+          rect: box(body),
+          scrollTop: body.scrollTop,
+          scrollHeight: body.scrollHeight,
+          clientHeight: body.clientHeight,
+          minHeight: bodyStyle?.minHeight || null,
+          overflowY: bodyStyle?.overflowY || null,
+        } : null,
+        footer: box(footer),
+        cancel: box(cancel),
+        confirm: box(confirm),
+        cancelInViewport: inViewport(box(cancel)),
+        confirmInViewport: inViewport(box(confirm)),
+        cancelHit: hit(cancel),
+        confirmHit: hit(confirm),
+        activeInside: Boolean(modal?.contains(document.activeElement)),
+        activeLabel: document.activeElement?.getAttribute('aria-label') || document.activeElement?.textContent || null,
+        activeConnected: document.activeElement?.isConnected === true,
+        scroll: modal ? { top: modal.scrollTop, height: modal.scrollHeight, clientHeight: modal.clientHeight } : null,
+        style: style ? {
+          position: style.position,
+          width: style.width,
+          height: style.height,
+          minHeight: style.minHeight,
+          maxHeight: style.maxHeight,
+          gap: style.gap,
+          overflowY: style.overflowY,
+          transform: style.transform,
+          boxSizing: style.boxSizing,
+        } : null,
+        wheelPoint: modalRect ? {
+          x: Math.max(1, Math.min(modalRect.left + modalRect.width / 2, viewport.offsetLeft + viewport.width - 1)),
+          y: Math.max(1, Math.min(modalRect.top + Math.min(modalRect.height, viewport.height) / 2, viewport.offsetTop + viewport.height - 1)),
+        } : null,
+      }
+    }, confirmModalSelector)
+    try {
+      await page.cdp('Emulation.setDeviceMetricsOverride', { width, height, deviceScaleFactor: 1, mobile: false })
+      await page.evaluate(() => { document.getElementById('app').style.minHeight = '0' })
+      await page.waitForTimeout(150)
+      await openDockOrbit()
+      await openDockConfirm()
+      before = await measure()
+      await issue35Shot(`${artifactBase}.png`)
+      if (before.wheelPoint) {
+        await page.mouse.move(before.wheelPoint.x, before.wheelPoint.y)
+        await page.mouse.wheel(0, 720)
+      }
+      await page.waitForTimeout(100)
+      after = await measure()
+      await page.keyboard.press('Escape')
+      escapeClosed = await waitDockConfirmClosed()
+      if (escapeClosed) {
+        try {
+          await page.waitForFunction((selector) => document.activeElement === document.querySelector(selector), dockTrigger, { timeout: 3000 })
+        } catch {}
+      }
+      escaped = await dockFocus()
+    } catch (error) {
+      runError = String(error && error.stack || error)
+    }
+    const detail = { before, after, escapeClosed, escaped, runError }
+    writeFileSync(join(ISSUE35_ARTIFACTS, `${artifactBase}.json`), JSON.stringify(detail, null, 2))
+    observe(`Orbit 删除确认小视口 ${width}x${height}`, detail)
+    const noScrollNeeded = before?.scroll && before.scroll.height <= before.scroll.clientHeight + 1
+    const scrolled = after?.scroll?.top > 0
+    check(name, !runError && before?.rootParent === 'BODY' && before.rootInViewport && before.dialogInViewport
+      && before.activeInside && before.activeConnected
+      && (noScrollNeeded || scrolled)
+      && after?.cancelInViewport && after?.confirmInViewport
+      && after?.cancelHit?.isButton && after?.confirmHit?.isButton
+      && after.activeInside && after.activeConnected
+      && escapeClosed && escaped && !escaped.modalPresent && !escaped.orbitPresent
+      && escaped.activeIsTrigger && escaped.activeConnected && escaped.expanded === 'false', detail)
+  }
   if (deskCaptures.length === 8) {
     check('四个主页面与五个设置分区截图共八张', true, deskCaptures)
   } else {

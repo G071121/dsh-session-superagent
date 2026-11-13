@@ -77,6 +77,15 @@
   `scripts/verify-panel-chromium.mjs` 增加 8 条真实 Chromium 场景（64 → **72**：窄屏 390 / 桌面 1440
   几何、footer 真实可点、Escape 关闭并回焦、确认只发一次 `delete` 且 403 留在确认层、取消、深浅截图），
   证据目录默认仓库内 `tmp-artifacts/issue-35`，可用 `DSH_ISSUE35_ARTIFACTS` 重定向。
+- **Orbit 删除确认在小 / 矮视口中 footer 被裁且无法滚动**（用户实拍约 520×415；#45 portal 修复后仍存在）：
+  真实 Chromium 量得 portal 已挂到 `document.body`、dialog `transform:none`、`max-height:100%` 正常生效；
+  根因是 `.dt-modal` 的 `overflow:hidden`，而普通删除确认没有 `.dt-modal-body`，内容超高时没有可滚动容器。
+  最小修复为 dialog 自身 `overflow-x:hidden; overflow-y:auto`，并固定 header / description / footer `flex-shrink:0`；
+  既有 body 滚动、portal、焦点圈与 Escape 均保持不变。新增 1 条单测和 4 档真实 DOM 几何回归
+  （520×415 / 320 / 180 / 140）：修前 140 高度下按钮 `bottom=152 > 140` 且 wheel 后 `scrollTop=0`；
+  修后 wheel 滚到 48，按钮完整可见、可命中，Escape / 取消回焦圆环。全量 **993/993**、UI **11/11**、
+  Chromium **75/75**（当前 minimized 截图通道 SKIP 时总数；条件截图检查未注册）。真实 DSH WebView 未验，
+  Chromium + loopback 不等同 WebView。
 
 ## [0.10.12] - 2026-11-09 —— 门禁 v6（锁回收计龄、profile 真原子、模型证据入库）
 
