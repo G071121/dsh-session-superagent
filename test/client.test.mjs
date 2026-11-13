@@ -6189,10 +6189,16 @@ test('B7：PR 守的表单不出现隔离执行 / 隔离工作目录，issue 守
   const prSummary = prLabels.join('\n')
   assert.ok(!prSummary.includes('隔离区保留天数'), 'PR 守的收起摘要不该出现「隔离区保留天数」：' + prSummary)
   assert.ok(!prSummary.includes('最多保留几个隔离区'), 'PR 守的收起摘要不该出现「最多保留几个隔离区」')
+  // 收起标题本身也要按类型分流 —— 摘要正文藏干净了，标题还写着「隔离保留策略」，
+  // 对没有隔离配置的 PR 守就是误导（同一条 review 的第二处）。
+  assert.ok(!prSummary.includes('隔离'), 'PR 守的收起标题不该出现「隔离」：' + prSummary)
+  assert.ok(prSummary.includes('限额与优先级'), 'PR 守的收起标题应是「限额与优先级」：' + prSummary)
   // issue 守必须原样保留：摘要里的隔离保留策略只在 isolated 打开时出现（四个 spec 都是这个条件）。
   const issueLabels = labelsOf(walk(render(desk, deskQueue(
     snapshot('issue', 'o/r#session-o/r'), 'o/r#session-o/r', { isolated: true }),
   )))
   assert.ok(issueLabels.includes('隔离执行'), 'issue 守的隔离能力不受影响')
-  assert.ok(issueLabels.join('\n').includes('隔离区保留天数'), 'issue 守的收起摘要仍有隔离保留策略')
+  const issueSummary = issueLabels.join('\n')
+  assert.ok(issueSummary.includes('隔离区保留天数'), 'issue 守的收起摘要仍有隔离保留策略')
+  assert.ok(issueSummary.includes('限额、优先级与隔离保留策略'), 'issue 守的收起标题保持原文：' + issueSummary)
 })

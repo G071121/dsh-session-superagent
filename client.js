@@ -1536,7 +1536,10 @@ window.__ModuleLoader__.load({
       const basic = WATCHER_FIELD_SCHEMA.filter((spec) => !spec.advanced).map(renderField)
       const advanced = WATCHER_FIELD_SCHEMA.filter((spec) => spec.advanced).map(renderField)
       const collapsedAdvanced = h('span', { className: 'dt-row-meta' },
-        h('span', { className: 'dt-hint' }, '限额、优先级与隔离保留策略'),
+        // 标题也要按类型分流：PR 守没有隔离配置，标题再写「隔离保留策略」就是误导
+        // （2026-11-13 真实 Chromium 复验 B7 最后一处）。
+        h('span', { className: 'dt-hint' },
+          values.watchKind === 'pr' ? '限额与优先级' : '限额、优先级与隔离保留策略'),
         // 收起时只展示默认值摘要，不挂载高级 input；默认值仍来自 /state.defaults。
         // `when` 必须和 renderField 走同一套判断：只按 advanced+number 过滤时，
         // 真正的高级 input 已经被隐藏，摘要却仍把「隔离区保留天数 / 最多保留几个隔离区」
