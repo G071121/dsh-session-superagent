@@ -1650,6 +1650,43 @@ test('失败的唤醒也要进 history（客户能看到「叫过但没叫醒」
   assert.deepEqual(res.lastBatch, [7])
 })
 
+test('fresh 为空时水位不许清空（T39：pending 非空但本轮没新增 → cursor 被写成 null，下一轮重复唤醒）', async () => {
+  const { planWakeSettlement } = await import('../lib/watch.js')
+  const entry = { cursor: '2026-11-01T00:00:00.000Z', seen: {}, wakeTimes: [], history: [], silentWakes: 0 }
+  const out = planWakeSettlement(entry, {
+    ok: true,
+    fresh: [],
+    listed: [{ number: 41, updated_at: '2026-10-01T00:00:00.000Z' }],
+  })
+  // 纯函数层的防线：正常路径根本走不到这里（调用方 `fresh.length === 0` 就早退了），
+  // 但一旦有人再放开那个早退，这里必须挡住 —— newestUpdatedAt([]) 是 null，
+  // 写回等于把水位清空，下一轮旧内容会被当成「首次同步」重提。
+  assert.equal(out.cursor, entry.cursor, 'fresh 为空时 newestUpdatedAt 返回 null，不许写回')
+  assert.deepEqual(Object.keys(out.seen), ['41'], 'listed 里的条目照常进 seen')
+})
+
+test('batchLimit=1 连续两轮：先提第 1 条、下轮提第 2 条，且不重复第 1 条（T39 端到端）', async () => {
+  const { planWakeSettlement, partitionItems } = await import('../lib/watch.js')
+  const items = [
+    { number: 31, updated_at: '2026-11-05T00:01:00.000Z' },
+    { number: 32, updated_at: '2026-11-05T00:02:00.000Z' },
+  ]
+  const entry = { seen: {}, cursor: null, wakeTimes: [], history: [], silentWakes: 0 }
+  // 第一轮：只列第 1 条（batchLimit=1 的等价形状）
+  const round1 = planWakeSettlement(entry, { ok: true, fresh: items, listed: items.slice(0, 1) })
+  assert.deepEqual(Object.keys(round1.seen), ['31'], '第一轮只记列出去的第 1 条')
+  assert.equal(round1.cursor, null, '没全列出时全局水位不动')
+  // 第二轮：第 2 条仍是 fresh，第 1 条不能重复
+  const r2 = partitionItems(items, { seen: round1.seen, cursor: round1.cursor }, {})
+  assert.deepEqual(r2.fresh.map((i) => i.number), [32], '第 2 条要能被提，第 1 条不能重复')
+  const round2 = planWakeSettlement(
+    { ...entry, seen: round1.seen, cursor: round1.cursor },
+    { ok: true, fresh: r2.fresh, listed: r2.fresh },
+  )
+  assert.deepEqual(Object.keys(round2.seen).sort(), ['31', '32'], '两轮之后两条都记过')
+  assert.equal(round2.cursor, '2026-11-05T00:02:00.000Z', '全部列出时才推全局水位')
+})
+
 test('实际间隔 = 自己配置与 x-poll-interval 取大者（T23：以前测试在算自己的算术）', async () => {
   const { effectiveIntervalMs } = await import('../lib/watch.js')
   // 没有下限：用自己的
