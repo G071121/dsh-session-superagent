@@ -1708,21 +1708,69 @@ test('保存体的 repo 必须能被服务端 parseRepoSpec 原样解析回同�
     assert.equal(posts.length, 1, provider + '：一次保存只能发一条 /watch')
     assert.equal(posts[0].options.method, 'POST')
     const body = JSON.parse(posts[0].options.body)
-    // 严格相等：只允许「定位键 + touched 字段」这三项。
+    // 严格相等：只允许「定位键 + touched 字段」。
+    // watchKind 算定位键的一部分 —— 它决定服务端 id 前缀（`pr:`），和 repo/sessionId 一样
+    // 必须无条件带；而它在编辑态不渲染，touchedRef 里永远没有它。
     assert.deepEqual(body, {
       repo: (provider === 'gitee' ? 'gitee:' : '') + repo,
       sessionId,
+      watchKind: 'issue',
       intervalSec: 600,
     }, provider + '：保存体只能是定位键 + touched 字段（全量 PUT 会写回旧快照）')
 
-    // 服务端契约（lib/index.js POST /watch）：id = (gitee:?)+repo+'#'+sessionId。
+    // 服务端契约（lib/index.js POST /watch）：id = (pr:?)+(gitee:?)+repo+'#'+sessionId。
     const spec = parseRepoSpec(body.repo)
     assert.equal(spec.ok, true, provider + '：repo 必须是服务端认得的写法')
     assert.equal(spec.provider, provider, provider + '：provider 被解析错了')
     assert.equal(spec.repo, repo, provider + '：规范化后的 owner/name 必须原样')
-    assert.equal((spec.provider === 'gitee' ? 'gitee:' : '') + spec.repo + '#' + body.sessionId, id,
+    assert.equal((body.watchKind === 'pr' ? 'pr:' : '') + (spec.provider === 'gitee' ? 'gitee:' : '') + spec.repo + '#' + body.sessionId, id,
       provider + '：解析出的 id 与 /state 里的守不一致 ⇒ 保存会静默新建一条孪生守')
   }
+})
+
+test('编辑 PR 守：保存体必须带 watchKind=pr，id 仍能解析回 pr: 前缀', async () => {
+  // 回归用例：`watchKind` 控件在编辑态不渲染（modes: ['create']），touchedRef 里永远没有它。
+  // 如果保存体只发 touched 字段，服务端会把 id 算成 `owner/name#session`（没有 `pr:`）——
+  // 于是「保存」变成静默新建一条 issue 守，原来那条 PR 守的参数分毫不动。
+  const { parseRepoSpec } = await import('../lib/watch.js')
+  const { loadClient, walk, watcher, deskQueue } = await import('./fixtures/panel-harness.mjs')
+  const repo = 'MYCF711/dsh-session-superagent'
+  const sessionId = 'session-pr'
+  const id = 'pr:' + repo + '#' + sessionId
+  const requests = []
+  const { registrations, render } = loadClient({
+    fetch: async (url, options = {}) => {
+      requests.push({ url, options })
+      return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) }
+    },
+  })
+  const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
+  const snap = {
+    loading: false, error: null,
+    body: {
+      credentials: { token: 'none', sshKeyPath: 'none', ghConfigDir: 'none', giteeToken: 'none' },
+      gh: { ok: true, version: '2.0' }, defaults: {},
+      watchers: [watcher(repo, {
+        id, sessionId, intervalSec: 180, kind: 'pr',
+        audit: true, adversarialAudit: false, auditMode: 'inline',
+      })],
+    },
+  }
+  const nodes = walk(render(desk, deskQueue(snap, id, { intervalSec: '600' })))
+  const labelOf = (node) => walk(node).filter((n) => typeof n.text === 'string').map((n) => n.text).join('')
+  const save = nodes.find((n) => n.type === 'button' && labelOf(n).includes('保存'))
+  assert.ok(save, 'PR 守编辑器里要有保存按钮')
+  await save.props.onClick()
+
+  const posts = requests.filter((r) => String(r.url).endsWith('/watch'))
+  assert.equal(posts.length, 1, '一次保存只能发一条 /watch')
+  const body = JSON.parse(posts[0].options.body)
+  assert.equal(body.watchKind, 'pr', '编辑 PR 守必须带 watchKind=pr，否则服务端按 issue 算 id')
+  assert.equal(body.repo, repo, 'PR 守的 repo 不带 pr: 前缀（前缀只进 id）')
+  const spec = parseRepoSpec(body.repo)
+  assert.equal(spec.ok, true)
+  assert.equal((body.watchKind === 'pr' ? 'pr:' : '') + (spec.provider === 'gitee' ? 'gitee:' : '') + spec.repo + '#' + body.sessionId, id,
+    '解析出的 id 必须与 /state 里的 PR 守一致')
 })
 
 test('行内编辑保存必须真的带上 filters / priority（T24 M1：控件名与字段名对不上，改了发不出去）', async () => {
@@ -3062,6 +3110,112 @@ test('W12：普通 Disclosure 单键只切一次，重复 keydown 被忽略', ()
   assert.equal(toggles, 2, '普通 Space 必须只切一次')
   assert.equal(row.props['aria-disabled'], false)
   assert.equal(row.props.tabIndex, 0)
+})
+
+// PR 响应监控：四个新字段（监控类型 / 审计 / 对抗性审计 / 执行方式）。
+// 一律按「真跑 WatcherForm 后树里有没有这个控件、它可不可点」断言 —— 不断言源码字符串。
+function renderPrFormFields(value, onChange = () => {}, disabled = false) {
+  const { internals } = loadA11yInternals()
+  const tree = internals.WatcherForm({
+    mode: 'edit', idPrefix: 'watcher-pr', value, snapshot: { ...value },
+    disabled, onChange, onSave: async () => true, onDiscard() {},
+  })
+  return walk(tree)
+}
+
+const segmented = (nodes, label) => nodes.find((node) => node.type === 'div'
+  && node.props.role === 'radiogroup' && node.props['aria-label'] === label)
+
+const segmentButtons = (group, label = '') => {
+  assert.ok(group, '缺少分段控件' + (label ? '「' + label + '」' : ''))
+  return walk(group).filter((node) => node.type === 'button' && node.props.role === 'radio')
+}
+
+const toggleOf = (nodes, label) => nodes.find((node) => node.type === 'button'
+  && node.props.role === 'switch' && node.props['aria-label'] === label)
+
+test('PR 面板：监控类型是原生分段控件，选中值跟 watchKind 走', () => {
+  const segments = segmentButtons(segmented(renderPrFormFields({ intervalSec: '60', watchKind: 'pr' }), '监控类型'))
+  assert.deepEqual(segments.map((node) => a11yText(node)), ['收到的 Issue/PR', '对外发出的 PR'])
+  assert.deepEqual(segments.map((node) => node.props['aria-checked']), [false, true], 'watchKind=pr 必须选中「对外发出的 PR」')
+  assert.deepEqual(segments.map((node) => node.props.tabIndex), [-1, 0], 'roving tab stop 只能落在选中项')
+
+  const issue = segmentButtons(segmented(renderPrFormFields({ intervalSec: '60', watchKind: 'issue' }), '监控类型'))
+  assert.deepEqual(issue.map((node) => node.props['aria-checked']), [true, false], 'watchKind=issue 必须选中「收到的 Issue/PR」')
+})
+
+test('PR 面板：PR 类型显示审计与对抗性审计开关（默认关，hint 可读）', () => {
+  const nodes = renderPrFormFields({ intervalSec: '60', watchKind: 'pr' })
+  for (const label of ['审计', '对抗性审计']) {
+    const toggle = toggleOf(nodes, label)
+    assert.ok(toggle, 'PR 类型必须显示「' + label + '」开关')
+    assert.equal(toggle.props['aria-checked'], false, label + ' 默认必须关闭')
+  }
+  const tip = (text) => nodes.some((node) => node.type === 'button' && node.props['aria-label'] === text)
+  assert.ok(tip('修改后先自审一遍再提交'), '「审计」的 hint 必须能被读屏读到')
+  assert.ok(tip('专门挑刺：假设这段代码一定有 bug'), '「对抗性审计」的 hint 必须能被读屏读到')
+})
+
+test('PR 面板：Issue 类型不显示审计三项，监控类型仍在', () => {
+  const nodes = renderPrFormFields({ intervalSec: '60', watchKind: 'issue' })
+  assert.equal(toggleOf(nodes, '审计'), undefined)
+  assert.equal(toggleOf(nodes, '对抗性审计'), undefined)
+  assert.equal(segmented(nodes, '执行方式'), undefined)
+  assert.ok(segmented(nodes, '监控类型'), '监控类型本身与类型无关，必须始终可见')
+})
+
+test('PR 面板：两个审计都关时执行方式置灰，值仍读得出来', () => {
+  const nodes = renderPrFormFields({
+    intervalSec: '60', watchKind: 'pr', audit: false, adversarialAudit: false, auditMode: 'subagent',
+  })
+  const segments = segmentButtons(segmented(nodes, '执行方式'))
+  assert.deepEqual(segments.map((node) => a11yText(node)), ['当前会话', '子代理'])
+  assert.ok(segments.every((node) => node.props.disabled === true), '两个审计都关时执行方式必须不可点')
+  assert.deepEqual(segments.map((node) => node.props['aria-checked']), [false, true], '置灰不是隐藏：选中值照常渲染')
+})
+
+test('PR 面板：任一审计开启后执行方式可点，点击写回 auditMode', () => {
+  for (const [name, flags] of [['审计开', { audit: true }], ['对抗性审计开', { adversarialAudit: true }]]) {
+    const changes = []
+    const nodes = renderPrFormFields(
+      { intervalSec: '60', watchKind: 'pr', auditMode: 'subagent', ...flags },
+      (key, next) => changes.push([key, next]),
+    )
+    const segments = segmentButtons(segmented(nodes, '执行方式'))
+    assert.ok(segments.every((node) => node.props.disabled === false), name + ' 时执行方式必须可点')
+    segments[0].props.onClick()
+    assert.deepEqual(changes, [['auditMode', 'inline']], name + ' 时点「当前会话」必须把 auditMode 改成 inline')
+  }
+})
+
+test('PR 面板：整表 disabled（无会话）时监控类型与执行方式一起不可点', () => {
+  const nodes = renderPrFormFields(
+    { intervalSec: '60', watchKind: 'pr', audit: true, auditMode: 'inline' }, undefined, true,
+  )
+  assert.ok(segmentButtons(segmented(nodes, '监控类型')).every((node) => node.props.disabled === true),
+    'disabledWhen 不能绕过整表 disabled —— 两处必须统一')
+  assert.ok(segmentButtons(segmented(nodes, '执行方式')).every((node) => node.props.disabled === true))
+})
+
+test('PR 面板：打开已有 PR 类型 watcher 时四项的值来自服务端快照', () => {
+  const { registrations, render } = loadClient()
+  const desk = registrations.find((registration) => registration.opts.id === 'session-superagent-desk')
+  const item = watcher('a/b', {
+    id: 'a/b#session-a/b', kind: 'pr', audit: true, adversarialAudit: false, auditMode: 'inline',
+  })
+  const snapshot = {
+    loading: false, error: null,
+    body: { sessionGoal: null, sessionTitle: '会话', credentials: {}, watchers: [item] },
+  }
+  const nodes = walk(render(desk, deskQueue(snapshot, 'pr:a/b#session-a/b'), { sessionId: 'session-a/b' }))
+  // 值初始化在 watcherValuesFrom：kind/audit/auditMode 必须原样映射到四个字段。
+  assert.deepEqual(segmentButtons(segmented(nodes, '监控类型'), '监控类型').map((node) => node.props['aria-checked']),
+    [false, true], 'watcher.kind=pr 必须选中「对外发出的 PR」')
+  assert.equal(toggleOf(nodes, '审计').props['aria-checked'], true, 'audit:true 必须点亮「审计」')
+  assert.equal(toggleOf(nodes, '对抗性审计').props['aria-checked'], false, 'adversarialAudit 缺省必须关闭')
+  const mode = segmentButtons(segmented(nodes, '执行方式'), '执行方式')
+  assert.deepEqual(mode.map((node) => node.props['aria-checked']), [true, false], 'auditMode:inline 必须选中「当前会话」')
+  assert.ok(mode.every((node) => node.props.disabled === false), '审计开着时执行方式必须可点')
 })
 
 test('W13：总览/判定/触发/设置的每个 Section 标题都是 h2，视觉 class 保留', () => {
@@ -5989,4 +6143,62 @@ test('M1：无关 key 的 storage 事件仍然忽略', () => {
   client.dispatchWindowEvent('storage', { key: 'dsh-session-superagent.other', newValue: '别的东西' })
   assert.equal(liveDesk(client).opts.label, '主理鱼', '无关 key 不改页签')
   assert.equal(client.stateCalls().filter((call) => call.index === draftSlot()).length, 0, '也不动草稿')
+})
+
+test('B5：同仓库同会话的 issue 守与 PR 守并存时，点 PR 行只展开 PR 编辑器', () => {
+  const { registrations, render } = loadClient()
+  const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
+  const snapshot = {
+    loading: false, error: null,
+    body: {
+      sessionGoal: null, sessionTitle: '会话',
+      credentials: { token: 'configured', sshKeyPath: 'none' },
+      watchers: [
+        watcher('o/r', { id: 'o/r#session-o/r', kind: 'issue', enabled: true }),
+        watcher('o/r', { id: 'pr:o/r#session-o/r', kind: 'pr', audit: true, adversarialAudit: false, auditMode: 'inline', enabled: true }),
+      ],
+    },
+  }
+  // 点 PR 行（editing 是完整 kind key）：只有 PR 表单会渲染「审计 / 对抗性审计 / 执行方式」。
+  // dirty 才会渲染 SaveBar：带一个和 snapshot 不同的 draft。
+  const nodes = walk(render(desk, deskQueue(snapshot, 'pr:o/r#session-o/r', { audit: true, adversarialAudit: true })))
+  const buttons = nodes.filter((n) => n.type === 'button')
+    .map((b) => (b.props.children || []).filter((c) => typeof c === 'string').join(''))
+  assert.ok(buttons.includes('保存'), '点 PR 行必须展开 PR 编辑器（有保存按钮）：' + buttons.join('|'))
+})
+
+test('B7：PR 守的表单不出现隔离执行 / 隔离工作目录，issue 守仍然有', () => {
+  const { registrations, render } = loadClient()
+  const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
+  const snapshot = (kind, id) => ({
+    loading: false, error: null,
+    body: {
+      sessionGoal: null, sessionTitle: '会话',
+      credentials: { token: 'configured', sshKeyPath: 'none' },
+      watchers: [watcher('o/r', { id, kind, enabled: true })],
+    },
+  })
+  // 控件的 label 是 Field 的 #text，不是 button 文案。
+  const labelsOf = (nodes) => nodes.filter((n) => n.type === '#text').map((n) => n.text)
+  const prNodes = walk(render(desk, deskQueue(snapshot('pr', 'pr:o/r#session-o/r'), 'pr:o/r#session-o/r')))
+  const prLabels = labelsOf(prNodes)
+  assert.ok(!prLabels.includes('隔离执行'), 'PR 守不该有「隔离执行」：' + prLabels.join('|'))
+  assert.ok(!prLabels.includes('隔离工作目录'), 'PR 守不该有「隔离工作目录」')
+  // 高级设置收起时的摘要只按 advanced+number 过滤过一遍，`when` 没走 ——
+  // 隔离 input 被隐藏了，摘要却仍把这两个数字打出来（2026-11-13 真实 Chromium 复验）。
+  const prSummary = prLabels.join('\n')
+  assert.ok(!prSummary.includes('隔离区保留天数'), 'PR 守的收起摘要不该出现「隔离区保留天数」：' + prSummary)
+  assert.ok(!prSummary.includes('最多保留几个隔离区'), 'PR 守的收起摘要不该出现「最多保留几个隔离区」')
+  // 收起标题本身也要按类型分流 —— 摘要正文藏干净了，标题还写着「隔离保留策略」，
+  // 对没有隔离配置的 PR 守就是误导（同一条 review 的第二处）。
+  assert.ok(!prSummary.includes('隔离'), 'PR 守的收起标题不该出现「隔离」：' + prSummary)
+  assert.ok(prSummary.includes('限额与优先级'), 'PR 守的收起标题应是「限额与优先级」：' + prSummary)
+  // issue 守必须原样保留：摘要里的隔离保留策略只在 isolated 打开时出现（四个 spec 都是这个条件）。
+  const issueLabels = labelsOf(walk(render(desk, deskQueue(
+    snapshot('issue', 'o/r#session-o/r'), 'o/r#session-o/r', { isolated: true }),
+  )))
+  assert.ok(issueLabels.includes('隔离执行'), 'issue 守的隔离能力不受影响')
+  const issueSummary = issueLabels.join('\n')
+  assert.ok(issueSummary.includes('隔离区保留天数'), 'issue 守的收起摘要仍有隔离保留策略')
+  assert.ok(issueSummary.includes('限额、优先级与隔离保留策略'), 'issue 守的收起标题保持原文：' + issueSummary)
 })

@@ -22,9 +22,11 @@ const sectionTitles = new Set([...client.matchAll(/title: '([^']{2,24})'/g)].map
 // 要检查的文档
 // 审核 T25：以前清单写死 5 份文档 —— 其余 40+ 份里的死工具名 / 死路由完全看不见。
 // 改成扫描**全部** Markdown；只跳过 CHANGELOG（它记录历史，允许出现已经删掉的名字）与报告类（历史快照）。
+// 点号开头的目录（`.git` / `.superpowers` / `.tmp-*` 之类）一律不扫：
+// 那是本地工作区，里面的 task 报告会写 `watch_pr_*` 这类通配占位，不是客户会照着敲的文档。
 const collectDocs = (dir, out = []) => {
   for (const name of readdirSync(dir)) {
-    if (name === 'node_modules' || name === '.git') continue
+    if (name === 'node_modules' || name.startsWith('.')) continue
     const full = join(dir, name)
     if (statSync(full).isDirectory()) { collectDocs(full, out); continue }
     if (!name.endsWith('.md')) continue

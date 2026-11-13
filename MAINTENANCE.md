@@ -12,7 +12,7 @@
 | 仓库 | `MYCF711/dsh-session-superagent` |
 | npm 包名 | `dsh-session-superagent` |
 | 当前版本 | `0.10.12`（npm 已发布 / tag `v0.10.12` / GitHub Release 为 Latest）；门禁子包 `@mycf711/dsh-gate@0.1.5` 同样已发布 |
-| 形态 | DSH 插件：7 个工具 + 自带 `cordis.patch.yml` + 客户端面板与状态栏圆环 |
+| 形态 | DSH 插件：11 个工具 + 自带 `cordis.patch.yml` + 客户端面板与状态栏圆环 |
 | 目标宿主 | DeepSeek Harness `>=0.2.2-rc.1 <0.3.0-0`（`package.json` 的 `engines.dsh`）；Node ≥ 22.19；需已登录 `gh` CLI |
 
 ## 二、当前状态（2026-11-13）

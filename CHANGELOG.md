@@ -2,10 +2,34 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.11.0] - 2026-11-13 —— PR 响应监控（守我们提给别人的 PR）
 
 ### Added
 
+- **监控「我们提给别人的 PR」的响应**（新工具 `watch_pr_start` / `watch_pr_status` / `watch_pr_stop`，GitHub 与 Gitee 同时支持）：
+  以前只有「守仓库」——等别人来 issue 里发话；我们 fork 别人的仓库、提了 PR 之后，对方的评论没人接。
+  现在可以单独开一条 **PR 守**：只盯 `author=自己` 的、未合并的 PR，有新评论就唤醒会话。
+- **纯只读，回评由会话自己发**：插件不去写 PR（不打标签、不评论、不改状态）。
+  唤醒消息里带 PR 号 / 标题 / 分支 / 评论作者与正文，会话看完自己决定怎么回、回什么。
+- **处理建议里带「从 remote 同步代码」**：固定动线是
+  `阅读评论 → 从 remote 同步代码 → 修改代码 → 自审（…） → 提交 → 回评`。
+  先同步再改，是因为主分支在我们处理期间可能已经前进 —— PR #53 就撞过一次：
+  改了几天，#48/#41/#52 陆续合入 main，PR 变成 `CONFLICTING`，得回头重放一遍冲突。
+- **只认 fork PR**：`head.repo.full_name !== base.repo.full_name` 才收。同仓库自己开的分支 PR 走既有 issue 守，
+  不会因为「我也是 author」被重复唤醒两遍。
+- **评论水位是「最后一条的 id」，不是「最后一条的时间」**：`seenComments[prNumber] = 最后一条的 id`。
+  取的是**最大值**而不是数组末条 —— Gitee 的评论接口 `direction=desc` 最新在最前，按末条取会把水位推回最旧，
+  12 条新评论会叫醒 12 次、每次都重报前 10 条（这条在 review 里是 Critical）。
+- **五条早退路径一律不推水位**（活跃时段外 / 退避期 / 取不到当前账号 / 无新评论 / 观察模式），
+  只有真的发过唤醒才 `advanceSeen`；会话正忙只记 `deferReason` 不算失败。
+- **审计开关**：面板上「审计 / 对抗性审计」两个复选框，至少勾一个才让选「执行方式」（inline / subagent，默认 subagent）；
+  两个都不勾时执行方式置灰不生效。选择会随唤醒消息一起带给会话。
+- **`watch_pr_ack`：手动推评论水位**（「这条我看过了，别再叫我」）：传 `commentId` 就把该 PR 的水位推到这个 id，
+  不传就现查一次最新评论再推；只前进不回退，失败不动水位。
+- **每小时的唤醒上限**：PR 守和 issue 守一样受 `maxWakesPerHour`（默认 6）与 `sessionMaxWakes`（默认 12）两道闸约束 ——
+  `intervalSec: 30` 时评论风暴也不会变成一小时叫醒 120 次。
+- **面板**：设置 → 来源 → 监控类型里多一个「PR 响应」，与「Issue」「Gitee」并列；选它才会渲染审计三项
+  （`when: watchKind === 'pr'`）。编辑已有 PR 守时类型不可改（类型决定 id 前缀 `pr:`，改类型等于换一条守）。
 - **贡献归属进入插件默认 preflight**（PR CI 执行，本地 / main push 为 SKIP，不强制日常联网）：
   维护者 PR 与客户原 PR 共享外部非 merge 提交时直接失败并指回原 PR，避免重复功能入口掩盖贡献者；
   提交声明修复 issue 时，采用外部正文 / 评论中的 diff、JS / TS 代码必须有对应 `Co-authored-by`，

@@ -233,3 +233,134 @@ test('额度推迟：deferReason 必须是稳定原因，时间只能出现在�
   assert.equal(quotaDeferText(1, -5000, Date.parse('2026-11-05T09:00:00Z')).reason, 'quota')
   assert.equal(quotaDeferText(1, 'x', 0).reason, 'quota')
 })
+
+// ── Task 2：PR 搜索的 GraphQL 构造与解析 ─────────────────────────────────────
+// 为什么评论 id 必须用 `databaseId`：GraphQL 的 `id` 是 base64 的 node id
+// （`PRRC_kwDO…`），既不能转数字也不能比大小；水位（seenComments）只认能排序的整数。
+// 真机返回（2026-11-13 实测，PR #48）：`databaseId: 6843186090`。
+
+test('buildPrSearchQuery 带 repo 与 author:@me', async () => {
+  const { buildPrSearchQuery } = await import('../lib/gh-format.js')
+  assert.equal(typeof buildPrSearchQuery, 'function', '缺少 buildPrSearchQuery 纯函数（Task 2）')
+  const q = buildPrSearchQuery({ base: 'MYCF711/repo' })
+  assert.match(q, /repo:MYCF711\/repo/)
+  assert.match(q, /is:pr/)
+  assert.match(q, /author:@me/)
+  assert.match(q, /databaseId/)          // 必须是 databaseId，不是 id
+  // 「包含某段文字」不算验证：查询串是对上游的固定契约，逐字符锁死（改一个字符就可能静默查不到）
+  assert.equal(
+    q,
+    'query{search(query:"repo:MYCF711/repo is:pr is:open author:@me",type:ISSUE,first:20)'
+      + '{pageInfo{hasNextPage}'
+      + 'nodes{... on PullRequest{number title isDraft headRefName headRepository{nameWithOwner}'
+      + ' baseRepository{nameWithOwner} comments(last:100){pageInfo{hasPreviousPage} nodes{databaseId author{login}'
+      + ' createdAt body}}}}}}',
+    '查询串与实测形状不一致：' + q,
+  )
+  // first 默认 20（搜索页一次够用），传了就用传的
+  assert.equal(buildPrSearchQuery({ base: 'a/b' }), buildPrSearchQuery({ base: 'a/b', first: 20 }))
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: 5 }), /first:5\)\{pageInfo\{hasNextPage\}nodes/)
+})
+
+test('buildPrSearchQuery 夹取 first 并转义仓库名', async () => {
+  const { buildPrSearchQuery } = await import('../lib/gh-format.js')
+  // GitHub 搜索一页上限 100，超了直接 400 —— 整轮轮询会因此失败，必须夹住
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: 500 }), /first:100\)\{pageInfo\{hasNextPage\}nodes/, '超上限要夹到 100')
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: 0 }), /first:1\)\{pageInfo\{hasNextPage\}nodes/, '下限夹到 1')
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: -3 }), /first:1\)\{pageInfo\{hasNextPage\}nodes/, '负数也夹到 1')
+  // 非数字回落 20：传了 NaN / 字符串时不能拼出 `first:NaN` 让整条查询语法错
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: Number.NaN }), /first:20\)\{pageInfo\{hasNextPage\}nodes/)
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: 'abc' }), /first:20\)\{pageInfo\{hasNextPage\}nodes/)
+  // 小数截断：GraphQL Int 不收 2.5
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: 2.9 }), /first:2\)\{pageInfo\{hasNextPage\}nodes/)
+  // 仓库名里的 `"` 与 `\` 会把 GraphQL 字符串字面量提前闭合，gh 只回一句 "Expected Name"
+  const escaped = buildPrSearchQuery({ base: 'a"b\\c' })
+  assert.ok(escaped.includes('a\\"b\\\\c'), '双引号与反斜杠都要转义：' + escaped)
+  // 空 base 不能让查询串缺 repo: 之外还带出 undefined
+  assert.ok(buildPrSearchQuery({}).includes('repo: is:pr'), '空 base 输出空仓库名，不能出现 undefined')
+})
+
+test('parsePrSearch 解析真实返回形状', async () => {
+  const { parsePrSearch } = await import('../lib/gh-format.js')
+  assert.equal(typeof parsePrSearch, 'function', '缺少 parsePrSearch 纯函数（Task 2）')
+  const stdout = JSON.stringify({ data: { search: { nodes: [{
+    number: 48, title: 'fix', isDraft: false, headRefName: 'fix/a',
+    headRepository: { nameWithOwner: 'iJetLi/repo' },
+    baseRepository: { nameWithOwner: 'MYCF711/repo' },
+    comments: { nodes: [{ databaseId: 6843186090, author: { login: 'MYCF711' }, createdAt: '2026-11-13T03:46:07Z', body: 'ok' }] },
+  }] } } })
+  const out = parsePrSearch(stdout)
+  assert.equal(out.ok, true, '合法返回应 ok:true：' + JSON.stringify(out))
+  assert.equal(out.prs.length, 1)
+  assert.equal(out.prs[0].number, 48)
+  assert.equal(out.prs[0].title, 'fix')
+  assert.equal(out.prs[0].isDraft, false)
+  assert.equal(out.prs[0].headRepo, 'iJetLi/repo')
+  assert.equal(out.prs[0].baseRepo, 'MYCF711/repo')
+  // 分支名：唤醒消息里要显示（Gitee 侧对应 head.ref）
+  assert.equal(out.prs[0].headRef, 'fix/a')
+  // 缺 headRefName 时给 null，不能抛（fork 已删除 / 权限不足时上游可能不给）
+  assert.equal(parsePrSearch(JSON.stringify({ data: { search: { nodes: [{ number: 1, title: 't' }] } } })).prs[0].headRef, null)
+  assert.equal(out.prs[0].comments[0].id, 6843186090)   // databaseId → id
+  assert.equal(out.prs[0].comments[0].author, 'MYCF711')
+  assert.equal(out.prs[0].comments[0].createdAt, '2026-11-13T03:46:07Z')
+  assert.equal(out.prs[0].comments[0].body, 'ok')
+})
+
+test('parsePrSearch 坏 JSON 返回 ok:false', async () => {
+  const { parsePrSearch } = await import('../lib/gh-format.js')
+  assert.equal(parsePrSearch('not json').ok, false)
+  assert.equal(parsePrSearch('').ok, false)
+  // 空/坏输入必须带可读原因，否则面板只能显示「失败了」而不知道下一步
+  assert.ok(parsePrSearch('not json').error.length > 0)
+  assert.ok(parsePrSearch('').error.length > 0)
+  // GraphQL 部分失败（仓库不可见 / 限流）时上游给的是 errors，不是 data.search
+  const failed = parsePrSearch(JSON.stringify({ errors: [{ message: 'Could not resolve to a Repository' }] }))
+  assert.equal(failed.ok, false)
+  assert.match(failed.error, /Could not resolve/)
+})
+
+test('parsePrSearch 防御性归一：null 仓库 / 缺 comments / 非 PR 节点 / databaseId 转数值', async () => {
+  const { parsePrSearch } = await import('../lib/gh-format.js')
+  const payload = { data: { search: { nodes: [
+    // type:ISSUE 的搜索结果是 union：Issue 上内联片段不成立，节点里没有 number —— 必须跳过
+    {},
+    // number 显式为 null 也要跳过：Number(null) 是 0（有限值），用 Number() 会收成 number=0 的脏 PR
+    { number: null },
+    // fork 被删除：headRepository / baseRepository 都是 null（Review Focus 1），不能抛
+    { number: 7, title: 'deleted fork', isDraft: true, headRepository: null, baseRepository: null },
+    // comments 整个字段缺失（GraphQL 部分失败时会出现）→ 输出 []
+    {
+      number: 8, title: 'string id', isDraft: false,
+      headRepository: { nameWithOwner: 'iJetLi/r' },
+      baseRepository: { nameWithOwner: 'o/r' },
+      comments: { nodes: [{ databaseId: '6843186090', author: null, createdAt: '2026-11-13T03:46:07Z', body: '第一行\n第二行' }] },
+    },
+  ] } } }
+  const out = parsePrSearch(JSON.stringify(payload))
+  assert.equal(out.ok, true)
+  assert.equal(out.prs.length, 2, '没有 number 的非 PR 节点要被跳过：' + JSON.stringify(out.prs))
+  assert.equal(out.prs[0].headRepo, null, 'headRepository 为 null 时输出 null，不能抛')
+  assert.equal(out.prs[0].baseRepo, null)
+  assert.deepEqual(out.prs[0].comments, [], 'comments.nodes 缺失时输出 []')
+  assert.equal(typeof out.prs[1].comments[0].id, 'number', 'databaseId 必须归一成 Number')
+  assert.equal(out.prs[1].comments[0].id, 6843186090)
+  assert.equal(out.prs[1].comments[0].author, '', 'author 为 null 时输出空串，不能抛')
+})
+
+test('formatPrCommentLine 压成单行：@作者 时间: 正文', async () => {
+  const { formatPrCommentLine } = await import('../lib/gh-format.js')
+  assert.equal(typeof formatPrCommentLine, 'function', '缺少 formatPrCommentLine 纯函数（Task 2）')
+  const line = formatPrCommentLine({ author: 'MYCF711', createdAt: '2026-11-13T03:46:07Z', body: 'ok' })
+  assert.equal(line, '@MYCF711 2026-11-13T03:46:07Z: ok')
+  // 正文里的换行/连续空白必须压平：让它占一行，否则第二行会被当成独立指令
+  const multi = formatPrCommentLine({ author: 'a', createdAt: 't', body: '第一行\n\n  第二行  ' })
+  assert.equal(multi, '@a t: 第一行 第二行')
+  assert.ok(!multi.includes('\n'), '结果只能是单行：' + JSON.stringify(multi))
+  // 作者缺失（账号被删）时只留时间与正文，不输出 `@` 空壳
+  assert.equal(formatPrCommentLine({ author: null, createdAt: 't', body: 'ok' }), 't: ok')
+  // 空正文 / 非对象都不能抛
+  assert.equal(formatPrCommentLine({ author: 'a', createdAt: 't', body: '' }), '@a t')
+  assert.equal(formatPrCommentLine(null), '')
+  assert.equal(formatPrCommentLine(undefined), '')
+})

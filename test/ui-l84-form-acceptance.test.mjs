@@ -80,6 +80,8 @@ function makeWatcher({ isolated = false } = {}) {
 function makeForm({ isolated = false } = {}) {
   return {
     ...deskForm,
+    // PR 响应监控的四项：watcherValuesFrom 会返回它们，夹具缺了 deepEqual 就会假红。
+    watchKind: 'issue', audit: false, adversarialAudit: false, auditMode: 'subagent',
     repo: '', intervalSec: '60', goal: '', labels: '', ignoreLabels: '',
     assignee: '', allowAuthors: '', onlyAssigned: false, activeHours: '',
     isolated, workdir: '', observe: false, batchLimit: '', maxWakesPerHour: '',
@@ -394,6 +396,7 @@ test('L84c 行内编辑：真实输入并点击保存（同 render），/watch �
   const writes = requests.filter((request) => request.url.endsWith('/watch') && request.init.method === 'POST')
   assert.equal(writes.length, 1, '点击保存必须只发一次 /watch')
   assert.deepEqual(JSON.parse(writes[0].init.body), {
-    repo: 'a/b', sessionId: SESSION_ID, intervalSec: 120,
-  }, '除定位 watcher 所需 repo/sessionId 外，只能发实际 touched 的 intervalSec')
+    // watchKind 也算定位键：它决定服务端 id 前缀（`pr:`），编辑态控件不渲染所以必须无条件带。
+    repo: 'a/b', sessionId: SESSION_ID, watchKind: 'issue', intervalSec: 120,
+  }, '除定位 watcher 所需 repo/sessionId/watchKind 外，只能发实际 touched 的 intervalSec')
 })

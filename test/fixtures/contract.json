@@ -45,6 +45,55 @@
       "required": []
     },
     {
+      "name": "watch_pr_ack",
+      "params": [
+        "commentId",
+        "format",
+        "pr",
+        "repo"
+      ],
+      "required": [
+        "pr"
+      ]
+    },
+    {
+      "name": "watch_pr_start",
+      "params": [
+        "activeHours",
+        "adversarialAudit",
+        "audit",
+        "auditMode",
+        "format",
+        "goal",
+        "intervalSec",
+        "maxWakesPerHour",
+        "observe",
+        "repo",
+        "sessionMaxWakes"
+      ],
+      "required": [
+        "repo"
+      ]
+    },
+    {
+      "name": "watch_pr_status",
+      "params": [
+        "format"
+      ],
+      "required": []
+    },
+    {
+      "name": "watch_pr_stop",
+      "params": [
+        "delete",
+        "format",
+        "repo"
+      ],
+      "required": [
+        "repo"
+      ]
+    },
+    {
       "name": "watch_start",
       "params": [
         "ackLabel",

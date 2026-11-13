@@ -433,7 +433,7 @@ window.__ModuleLoader__.load({
     }
 
     // 客户端版本探针：每次模块加载写一次，用来确认浏览器里跑的是哪一版
-    const CLIENT_VERSION = '0.10.12'
+    const CLIENT_VERSION = '0.11.0'
     // SEMVER_COMPARATOR_SOURCE_START
     // This block is duplicated verbatim in client.js because the browser UMD cannot import ESM.
     // test/update-semver.test.mjs audits both copies and exercises their behavior.
@@ -1225,8 +1225,11 @@ window.__ModuleLoader__.load({
     // 这里刻意不引入 DSH InlineEditor：watcher 是多字段表单，不是单文本编辑器。
     const AUTHOR_LIST_PLACEHOLDER = 'GitHub 登录名，逗号分隔，留空 = 谁都算'
     const PRIORITY_LABEL = '优先级（在「单次最多唤醒条数」内先挑谁）'
+    // PR 响应监控：watchKind 决定后面三项显不显示，所以必须进初值 ——
+    // 否则新建表单的分段控件没有选中项（两个都不亮），dirty 比较也会漏掉这个键。
     const CREATE_WATCHER_VALUES = {
-      repo: '', intervalSec: '60', labels: '', ignoreLabels: '', assignee: '',
+      repo: '', watchKind: 'issue', audit: false, adversarialAudit: false, auditMode: 'subagent',
+      intervalSec: '60', labels: '', ignoreLabels: '', assignee: '',
       activeHours: '', goal: '', ackLabel: '', onlyAssigned: false, allowAuthors: '',
       observe: false, isolated: false, workdir: '', batchLimit: '', maxWakesPerHour: '',
       sessionMaxWakes: '', isolateKeepDays: '', maxIsolated: '',
@@ -1248,6 +1251,11 @@ window.__ModuleLoader__.load({
     }
     const watcherValuesFrom = (watcher, ackDefaults) => ({
       repo: watcher.repo || '',
+      // 服务端用 kind: 'pr' 表示 PR 响应监控（老 watcher 没有这个字段 → issue）。
+      watchKind: watcher.kind === 'pr' ? 'pr' : 'issue',
+      audit: watcher.audit === true,
+      adversarialAudit: watcher.adversarialAudit === true,
+      auditMode: watcher.auditMode === 'inline' ? 'inline' : 'subagent',
       intervalSec: watcherNumberText(watcher.intervalSec ?? 60),
       labels: (watcher.filters && Array.isArray(watcher.filters.labels) ? watcher.filters.labels : []).join(','),
       ignoreLabels: (watcher.filters && Array.isArray(watcher.filters.ignoreLabels) ? watcher.filters.ignoreLabels : []).join(','),
@@ -1277,6 +1285,19 @@ window.__ModuleLoader__.load({
     // label/hint/note/control 的顺序只在这里声明一次；两个调用点只负责提供值与回调。
     const WATCHER_FIELD_SCHEMA = [
       { key: 'repo', label: '仓库', kind: 'text', modes: ['create'], required: true, placeholder: 'owner/name，或 gitee:owner/name' },
+      // PR 响应监控（Task 6）：类型本身跟仓库走，所以不 advanced；后三项只在 PR 类型下出现。
+      { key: 'watchKind', label: '监控类型', kind: 'segmented', options: [
+        // 两条路的语义完全不同：左边是「别人提给我们、我们来处理」，右边是「我们提给别人、等别人回」。
+        // 只写 Issue / PR 会让人以为右边是「监控仓库里的 PR」，实际正好相反。
+        { value: 'issue', label: '收到的 Issue/PR' },
+        { value: 'pr', label: '对外发出的 PR' },
+      ] },
+      { key: 'audit', label: '审计', kind: 'switch', when: (value) => value.watchKind === 'pr', hint: '修改后先自审一遍再提交' },
+      { key: 'adversarialAudit', label: '对抗性审计', kind: 'switch', when: (value) => value.watchKind === 'pr', hint: '专门挑刺：假设这段代码一定有 bug' },
+      { key: 'auditMode', label: '执行方式', kind: 'segmented', when: (value) => value.watchKind === 'pr', options: [
+        { value: 'inline', label: '当前会话' },
+        { value: 'subagent', label: '子代理' },
+      ], disabledWhen: (value) => !value.audit && !value.adversarialAudit },
       { key: 'intervalSec', label: '间隔（秒）', kind: 'number', min: 30, max: 3600, required: true, hint: '多长时间检查一次这个仓库，最小 30 秒' },
       { key: 'labels', label: '只处理这些标签', kind: 'text', placeholder: '逗号分隔，留空 = 全部' },
       { key: 'ignoreLabels', label: '排除这些标签', kind: 'text', placeholder: '逗号分隔，留空 = 不排除', hint: '命中任意一个就跳过，优先级高于上面的白名单' },
@@ -1287,14 +1308,16 @@ window.__ModuleLoader__.load({
       { key: 'onlyAssigned', label: '只看已指派', kind: 'switch', hint: '只处理已指派给人的条目' },
       { key: 'assignee', label: '只看指派给谁', kind: 'text', when: (value) => !!value.onlyAssigned, placeholder: 'GitHub 登录名，留空 = 只要有指派就行' },
       { key: 'observe', label: '仅观察', kind: 'switch', hint: '仅观察（只记录本会唤醒哪几条，不真唤醒）' },
-      { key: 'isolated', label: '隔离执行', kind: 'switch', hint: ISOLATED_HINT },
+      // PR 守不做隔离执行：worktree 要建在本地仓库里，而 PR 在别人仓库，建出来的树没用。
+      // 所以这四个控件在「对外发出的 PR」类型下整个不渲染（2026-11-13 review B7）。
+      { key: 'isolated', label: '隔离执行', kind: 'switch', when: (value) => value.watchKind !== 'pr', hint: ISOLATED_HINT },
       { key: 'batchLimit', label: '单次最多唤醒条数', kind: 'number', advanced: true, min: 1, max: 20, placeholder: (defaults) => String(defaults.batchLimit ?? 5) + '（1-20）' },
       { key: 'maxWakesPerHour', label: '每小时最多唤醒次数', kind: 'number', advanced: true, min: 1, max: 60, placeholder: (defaults) => String(defaults.maxWakesPerHour ?? 6) + '（1-60）' },
       { key: 'sessionMaxWakes', label: '这条会话每小时最多被唤醒', kind: 'number', advanced: true, min: 1, max: 60, placeholder: (defaults) => String(defaults.sessionMaxWakes ?? 12) + '（1-60）', hint: '跨所有守累计：守 5 个仓库时，光有单守上限挡不住叠加' },
       { key: 'priority', label: PRIORITY_LABEL, kind: 'priority', advanced: true, hint: '全部关掉时按 GitHub 的「最近更新」顺序处理' },
-      { key: 'workdir', label: '隔离工作目录', kind: 'text', advanced: true, when: (value) => !!value.isolated, placeholder: '绝对路径，留空 = 当前工作目录' },
-      { key: 'isolateKeepDays', label: '隔离区保留天数', kind: 'number', advanced: true, when: (value) => !!value.isolated, min: 1, max: 30, placeholder: (defaults) => String(defaults.isolateKeepDays ?? 3) + '（1-30）', hint: '每次唤醒前回收这个天数之前的一次性工作区；留空用默认天数' },
-      { key: 'maxIsolated', label: '最多保留几个隔离区', kind: 'number', advanced: true, when: (value) => !!value.isolated, min: 1, max: 50, placeholder: '5（1-50）', hint: '天数之外的第二道线：超出就回收最旧的（不影响正在用的那个）' },
+      { key: 'workdir', label: '隔离工作目录', kind: 'text', advanced: true, when: (value) => value.watchKind !== 'pr' && !!value.isolated, placeholder: '绝对路径，留空 = 当前工作目录' },
+      { key: 'isolateKeepDays', label: '隔离区保留天数', kind: 'number', advanced: true, when: (value) => value.watchKind !== 'pr' && !!value.isolated, min: 1, max: 30, placeholder: (defaults) => String(defaults.isolateKeepDays ?? 3) + '（1-30）', hint: '每次唤醒前回收这个天数之前的一次性工作区；留空用默认天数' },
+      { key: 'maxIsolated', label: '最多保留几个隔离区', kind: 'number', advanced: true, when: (value) => value.watchKind !== 'pr' && !!value.isolated, min: 1, max: 50, placeholder: '5（1-50）', hint: '天数之外的第二道线：超出就回收最旧的（不影响正在用的那个）' },
     ]
 
     /** superagent Field 的 DOM：label 与 InfoTip 是兄弟节点，控件拿同一个唯一 id。 */
@@ -1474,17 +1497,27 @@ window.__ModuleLoader__.load({
         if (spec.modes && !spec.modes.includes(mode)) return null
         if (spec.when && !spec.when(values)) return null
         const id = idPrefix + '-' + spec.key
+        // 统一算一次：busy/disabled 是整表语义，disabledWhen 是字段自己的规则，两者取或。
+        // 以前三处各写一遍 `busy || disabled` —— 加第四种控件时漏一处就静默可点。
+        const specDisabled = busy || disabled || (typeof spec.disabledWhen === 'function' ? !!spec.disabledWhen(values) : false)
         if (spec.kind === 'switch') {
-          return h(WatcherSwitch, { key: spec.key, spec, value: values[spec.key], disabled: busy || disabled, id,
+          return h(WatcherSwitch, { key: spec.key, spec, value: values[spec.key], disabled: specDisabled, id,
             onChange: (next) => change(spec.key, next) })
         }
         if (spec.kind === 'priority') {
-          return h(WatcherPriority, { key: spec.key, value: values, disabled: busy || disabled, idPrefix,
+          return h(WatcherPriority, { key: spec.key, value: values, disabled: specDisabled, idPrefix,
             onChange: change })
+        }
+        if (spec.kind === 'segmented') {
+          return h(Field, { key: spec.key, id, label: spec.label, hint: spec.hint, note: spec.note },
+            h(SegmentedControl, {
+              id, label: spec.label, options: spec.options, value: values[spec.key],
+              disabled: specDisabled, onChange: (next) => change(spec.key, next),
+            }))
         }
         const common = {
           value: spec.kind === 'hours' ? (values[spec.key] || '') : watcherNumberText(values[spec.key]),
-          disabled: busy || disabled,
+          disabled: specDisabled,
           onChange: (next) => change(spec.key, next),
         }
         const control = spec.kind === 'hours'
@@ -1495,7 +1528,7 @@ window.__ModuleLoader__.load({
             min: spec.min, max: spec.max, step: spec.kind === 'number' ? 1 : undefined,
             required: !!spec.required,
             placeholder: typeof spec.placeholder === 'function' ? spec.placeholder(defaults) : spec.placeholder,
-            disabled: busy || disabled,
+            disabled: specDisabled,
             onChange: (event) => change(spec.key, event.target.value),
           })
         return h(Field, { key: spec.key, id, label: spec.label, hint: spec.hint, note: spec.note }, control)
@@ -1503,12 +1536,21 @@ window.__ModuleLoader__.load({
       const basic = WATCHER_FIELD_SCHEMA.filter((spec) => !spec.advanced).map(renderField)
       const advanced = WATCHER_FIELD_SCHEMA.filter((spec) => spec.advanced).map(renderField)
       const collapsedAdvanced = h('span', { className: 'dt-row-meta' },
-        h('span', { className: 'dt-hint' }, '限额、优先级与隔离保留策略'),
+        // 标题也要按类型分流：PR 守没有隔离配置，标题再写「隔离保留策略」就是误导
+        // （2026-11-13 真实 Chromium 复验 B7 最后一处）。
+        h('span', { className: 'dt-hint' },
+          values.watchKind === 'pr' ? '限额与优先级' : '限额、优先级与隔离保留策略'),
         // 收起时只展示默认值摘要，不挂载高级 input；默认值仍来自 /state.defaults。
-        WATCHER_FIELD_SCHEMA.filter((spec) => spec.advanced && spec.kind === 'number').map((spec) => {
-          const placeholder = typeof spec.placeholder === 'function' ? spec.placeholder(defaults) : spec.placeholder
-          return h('span', { key: spec.key, className: 'dt-hint', placeholder }, spec.label + ' ' + placeholder)
-        }))
+        // `when` 必须和 renderField 走同一套判断：只按 advanced+number 过滤时，
+        // 真正的高级 input 已经被隐藏，摘要却仍把「隔离区保留天数 / 最多保留几个隔离区」
+        // 显示出来（2026-11-13 真实 Chromium 复验 B7 遗漏）。
+        WATCHER_FIELD_SCHEMA
+          .filter((spec) => spec.advanced && spec.kind === 'number')
+          .filter((spec) => !spec.when || spec.when(values))
+          .map((spec) => {
+            const placeholder = typeof spec.placeholder === 'function' ? spec.placeholder(defaults) : spec.placeholder
+            return h('span', { key: spec.key, className: 'dt-hint', placeholder }, spec.label + ' ' + placeholder)
+          }))
       const submitFromClick = (event) => submit(event)
       return h('form', {
         id: idPrefix, ref: formRef, className: 'dt-form dt-card', 'data-mode': mode, onSubmit: submit,
@@ -3345,6 +3387,12 @@ window.__ModuleLoader__.load({
         touchedRef.current = new Set()
         editSnapshotRef.current = nextKey ? { key: nextKey, values } : null
         setDraft({
+          // PR 响应监控的四项必须一起进 draft：watcherDirty 只比较 snapshot 里有的键，
+          // 少一个键就等于「切了类型不算修改」，SaveBar 永远不出现。
+          watchKind: values.watchKind,
+          audit: values.audit,
+          adversarialAudit: values.adversarialAudit,
+          auditMode: values.auditMode,
           intervalSec: watcherNumberText(watcher.intervalSec ?? 60),
           labels: (watcher.filters && watcher.filters.labels ? watcher.filters.labels : []).join(','),
           ignoreLabels: (watcher.filters && watcher.filters.ignoreLabels ? watcher.filters.ignoreLabels : []).join(','),
@@ -3370,7 +3418,11 @@ window.__ModuleLoader__.load({
           priorityStale: Boolean(watcher.priority && watcher.priority.stale) === true,
         })
       }
-      const editingWatcher = watchers.find((watcher) => watcher.repo + '#' + watcher.sessionId === editing)
+      // 同仓库同会话的 issue 守与 PR 守 repo#sessionId 一模一样：编辑目标必须带上 kind 前缀，
+      // 否则点 PR 行会展开 issue 的表单（2026-11-13 review 实测 prClickEditingCalls=[{next:"o/r#s"}]、
+      // prEditForms:0 / issueEditForms:1）。与渲染时的行 key 保持同一套算法。
+      const watcherKeyOf = (watcher) => (watcher.kind === 'pr' ? 'pr:' : '') + (watcher.repo || '') + '#' + (watcher.sessionId || '')
+      const editingWatcher = watchers.find((watcher) => watcherKeyOf(watcher) === editing)
       const editingOpening = editSnapshotRef.current && editSnapshotRef.current.key === editing
         ? editSnapshotRef.current.values
         : editingWatcher ? watcherValuesFrom(editingWatcher, ACK_DEFAULTS) : null
@@ -3381,7 +3433,7 @@ window.__ModuleLoader__.load({
       // dirty 折叠在确认期间挂起 editing id，但原表单仍挂载；取消/确认之前绝不清它的 draft。
       const displayedEditing = editing || pendingCollapseKey
       const toggleWatcherEditor = (watcher) => {
-        const key = watcher.repo + '#' + watcher.sessionId
+        const key = watcherKeyOf(watcher)
         const nextKey = editing === key ? null : key
         if (editing && editingDirty) {
           watcherDraftConfirmedRef.current = false
@@ -3458,6 +3510,12 @@ window.__ModuleLoader__.load({
               //（0.10.12 真机踩到：Gitee 仓库改 600 秒保存后仍是 180 秒，面板里还多出一条 404 的孪生）。
               repo: (watcher.provider === 'gitee' ? 'gitee:' : '') + String(watcher.repo || ''),
               sessionId: watcher.sessionId,
+              // 类型决定服务端 id 前缀（`pr:`）。编辑时 `watchKind` 控件不渲染（modes: ['create']），
+              // 所以这里的值只用来让服务端认对 id，不是「用户改类型」的入口。
+              watchKind: watcher.kind === 'pr' ? 'pr' : 'issue',
+              audit: !!draft.audit,
+              adversarialAudit: !!draft.adversarialAudit,
+              auditMode: draft.auditMode === 'inline' ? 'inline' : 'subagent',
               intervalSec: numberOrUndefined(draft.intervalSec) ?? watcher.intervalSec,
               filters: {
                 labels: String(draft.labels ?? '').split(',').map((v) => v.trim()).filter(Boolean),
@@ -3504,6 +3562,9 @@ window.__ModuleLoader__.load({
               wanted.add(CONTROL_TO_FIELD[key] || key)
             }
             const out = { repo: full.repo, sessionId: full.sessionId }
+            // 类型必须无条件带上：编辑时 `watchKind` 控件不渲染，touchedRef 里永远没有它，
+            // 只发 touched 字段就会让服务端按「issue」算 id —— 改一条 PR 守会静默新建一条 issue 守。
+            out.watchKind = full.watchKind
             for (const key of wanted) {
               if (Object.prototype.hasOwnProperty.call(full, key)) out[key] = full[key]
             }
@@ -3541,6 +3602,14 @@ window.__ModuleLoader__.load({
           body: JSON.stringify((() => {
             const valueDirty = (key) => createTouchedRef.current.has(key) || !watcherSameValue(value[key], createSnapshotRef.current[key])
             const payload = { repo: value.repo.trim(), sessionId }
+            // 监控类型永远提交：它决定服务端 id 前缀（`pr:`），漏了就当 issue 建。
+            payload.watchKind = value.watchKind === 'pr' ? 'pr' : 'issue'
+            if (payload.watchKind === 'pr') {
+              // 审计三项只在 PR 类型下有意义；没碰过的项交给服务端保默认，别用假值覆盖。
+              if (valueDirty('audit')) payload.audit = !!value.audit
+              if (valueDirty('adversarialAudit')) payload.adversarialAudit = !!value.adversarialAudit
+              if (valueDirty('auditMode')) payload.auditMode = value.auditMode === 'inline' ? 'inline' : 'subagent'
+            }
             // 新建也必须只提交实际输入过的配置；服务端负责未提供项的默认值。
             if (valueDirty('intervalSec')) payload.intervalSec = numberOrUndefined(value.intervalSec) ?? 60
             if (valueDirty('goal')) payload.goal = value.goal || ''
@@ -3676,7 +3745,11 @@ window.__ModuleLoader__.load({
       // 标题本身是按钮 —— 官方就是点标题进详情，我们点标题展开行内编辑，交互更轻但不脱离这套结构。
       const STAGE_STATE = { active: undefined, paused: 'warning', error: 'error', dormant: 'warning' }
       const row = (watcher) => {
-        const key = watcher.repo + '#' + watcher.sessionId
+        // key 必须带 kind：同一个仓库同一个会话完全可以同时开一条 issue 守和一条 PR 守，
+        // 而它们的 `repo#sessionId` 一模一样 —— 只按 repo#session 生成的 key 会撞，
+        // React 会把两行当成同一条（重复 key），编辑态也会一起展开、改一个两个都动。
+        // 服务端的 id 前缀（`pr:`）本来就是为这个存在的，这里跟它对齐。
+        const key = (watcher.kind === 'pr' ? 'pr:' : '') + watcher.repo + '#' + watcher.sessionId
         const state = orbitStateOf(watcher)
         const rowBody = h('div', { className: 'dt-ticket-body' },
           h('div', { className: 'dt-row-title' },
