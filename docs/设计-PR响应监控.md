@@ -162,10 +162,14 @@ GET /repos/{base}/pulls?state=open&author={self}&per_page=100&sort=updated&direc
 评论：
 
 ```http
-GET /repos/{base}/pulls/{n}/comments?comment_type=pr_comment&direction=desc&per_page=10
+GET /repos/{base}/pulls/{n}/comments?comment_type=pr_comment&direction=desc&per_page=100
 ```
 
 - 返回 `id`（数值，可直接比大小）/ `user.login` / `created_at` / `body` / `path`
+- **`direction=desc` 意味着最新一条在首条**：取「最新评论 id」必须取 max，不能取末条
+  （`advanceSeen` 只许前进，取末条会让同一批评论每轮重报）
+- `per_page=100` 而不是 10：`pickNewComments` 只按 `id > 水位` 取，页越大越不容易漏掉
+  突发的一串评论；代价是唤醒消息侧必须自己限长（一条消息最多列 10 条）
 - **不支持 GraphQL**，无 `viewerDidAuthor`，用 `user.login === self` 判定
 - 无全局 PR 搜索，只能按仓库拉（已确认）
 
@@ -201,7 +205,9 @@ GET /repos/{base}/pulls/{n}/comments?comment_type=pr_comment&direction=desc&per_
 
 ### `watch_pr_status`
 
-无参数（或 `repo` 过滤），返回所有 PR watcher 的状态 + 每个 PR 的未处理评论数。
+只有 `format`（`text` / `json`），返回**当前会话**所有 PR watcher 的状态 + 每个 PR 的
+水位与未处理评论数。不做 `repo` 过滤：一个会话的守本来就不多，而 `repo` 过滤会让「有没有
+别的仓库在跑」这个问题在面板上答不出来。
 
 ### `watch_pr_stop`
 

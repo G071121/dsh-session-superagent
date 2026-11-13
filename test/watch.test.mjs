@@ -2124,10 +2124,13 @@ test('pollPrOnce 单 PR 评论超过 10 条时截断消息但水位推进到最�
     const mod = await prModule('truncate-gitee')
     const wake = fakeWake({ ok: true })
     const entry = prEntry({ provider: 'gitee', id: 'pr:gitee:o/r#session-pr' })
+    // 真实 Gitee 带 `direction=desc`：id 降序，最新一条在**首条**。
+    // 这里必须是降序 —— 曾经用升序 mock 把这个 bug 断言成「通过」了：
+    // 取末条拿到的是最旧 id，水位永远只前进一条，同一批评论每轮重报。
     const comments = Array.from({ length: 12 }, (_, i) => ({
-      id: String(i + 1),
+      id: String(12 - i),
       user: { login: 'alice' },
-      body: 'body ' + (i + 1),
+      body: 'body ' + (12 - i),
       created_at: '2026-11-13T00:00:0' + (i % 10) + 'Z',
     }))
     const fetchImpl = async (url) => ({
@@ -2168,7 +2171,7 @@ test('pollPrOnce 不在活跃时段时早退：不发请求、不唤醒、不推
   })
 })
 
-test('pollPrOnce 处于退避期时不发请求只记 defer', async () => {
+test('pollPrOnce 处于退避期时不发请求、不唤醒、不推水位', async () => {
   await withPrState(async () => {
     const mod = await prModule('pr-backoff')
     const wake = fakeWake({ ok: true })
@@ -2318,4 +2321,75 @@ test('watch_pr_stop 能用 gitee.com URL 停掉 start 建的守', async () => {
     if (previousNoPoll === undefined) delete process.env.DSH_SUPERAGENT_NO_POLL
     else process.env.DSH_SUPERAGENT_NO_POLL = previousNoPoll
   }
+})
+
+test('pollPrOnce 评论乱序时水位取最大 id（不依赖接口返回顺序）', async () => {
+  // GitHub 升序、Gitee 降序、分页拼接后可能整体乱序 —— 三种都不能让水位退回去
+  await withPrState(async () => {
+    const mod = await prModule('out-of-order')
+    const wake = fakeWake({ ok: true })
+    const entry = prEntry()
+    const comments = [prComment(5, 'alice'), prComment(9, 'bob'), prComment(2, 'carol')]
+    await mod.__test.pollPrOnce({}, entry, 300_000, null, { ...prDeps([{ number: 7, comments }]), wake })
+    assert.deepEqual(entry.seenComments, { 7: 9 }, '取最大 id，不是末条 id')
+    assert.equal(wake.calls.length, 1)
+  })
+})
+
+test('pollPrOnce 取不到当前账号时早退：不拉 PR、不唤醒、不推水位', async () => {
+  // self 为空时 Gitee 的 author 过滤会被跳过（返回仓库全部 open PR），
+  // 而「非本人」判定在 me='' 时恒真 —— 会指使会话去陌生人的 PR 下回评。
+  await withPrState(async () => {
+    const mod = await prModule('no-self')
+    const wake = fakeWake({ ok: true })
+    const entry = prEntry()
+    const deps = prDeps([{ number: 7, comments: [prComment(1, 'alice')] }], { selfLogin: '' })
+    await mod.__test.pollPrOnce({}, entry, 300_000, null, { ...deps, wake })
+    assert.equal(deps.calls.length, 0, '认不出自己是谁就不该发请求')
+    assert.equal(wake.calls.length, 0, '不能唤醒')
+    assert.deepEqual(entry.seenComments, {}, '不推进水位')
+    assert.match(String(entry.lastError), /取不到当前账号/)
+    assert.ok(entry.consecutiveFailures > 0, '算一次失败，走退避')
+  })
+})
+
+test('pollPrOnce 达到单守每小时上限时只记 defer，绝不动水位', async () => {
+  await withPrState(async () => {
+    const mod = await prModule('pr-cap-watcher')
+    const wake = fakeWake({ ok: true })
+    // 6 次都在最近一小时内 → 达到默认上限 6
+    const recent = Array.from({ length: 6 }, (_, i) => Date.now() - i * 1000)
+    const entry = prEntry({ wakeTimes: recent })
+    const deps = prDeps([{ number: 7, comments: [prComment(1, 'alice')] }])
+    await mod.__test.pollPrOnce({}, entry, 300_000, null, { ...deps, wake })
+    assert.equal(wake.calls.length, 0, '到上限不唤醒')
+    assert.deepEqual(entry.seenComments, {}, '攒着不能等于丢掉')
+    assert.equal(entry.deferReason, 'cap-watcher')
+    assert.match(String(entry.lastDeferred), /每小时最多唤醒 6 次/)
+    assert.match(String(entry.lastDeferred), /攒 1 条/)
+  })
+})
+
+test('pollPrOnce 达到会话级上限时只记 defer，绝不动水位', async () => {
+  await withPrState(async () => {
+    const mod = await prModule('pr-cap-session')
+    const wake = fakeWake({ ok: true })
+    // 同会话另一条守已经用掉 12 次（默认 sessionMaxWakes=12）—— 会话级预算跨守累计
+    const state = mod.__test.readState()
+    state.watchers = {
+      'pr:other/r#session-pr': prEntry({
+        id: 'pr:other/r#session-pr',
+        repo: 'other/r',
+        wakeTimes: Array.from({ length: 12 }, (_, i) => Date.now() - i * 1000),
+      }),
+    }
+    mod.__test.writeState(state)
+    const entry = prEntry()
+    const deps = prDeps([{ number: 7, comments: [prComment(1, 'alice')] }])
+    await mod.__test.pollPrOnce({}, entry, 300_000, null, { ...deps, wake })
+    assert.equal(wake.calls.length, 0, '会话预算用完不唤醒')
+    assert.deepEqual(entry.seenComments, {}, '水位不动')
+    assert.equal(entry.deferReason, 'cap-session')
+    assert.match(String(entry.lastDeferred), /上限 12/)
+  })
 })

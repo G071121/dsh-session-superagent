@@ -55,8 +55,10 @@
         "goal",
         "intervalSec",
         "isolated",
+        "maxWakesPerHour",
         "observe",
         "repo",
+        "sessionMaxWakes",
         "workdir"
       ],
       "required": [
