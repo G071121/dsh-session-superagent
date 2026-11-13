@@ -46,7 +46,11 @@ for (const name of docs) {
   for (const match of text.matchAll(/「([^」]{2,12})」/g)) mentionsSections.push({ doc: name, id: match[1] })
 }
 
-const badTools = [...new Set(mentionsTools.map((m) => m.id))].filter((id) => !tools.has(id))
+// 「`watch_pr_*`」这种通配写法指的是**一族**工具，不是某个具体名字：
+// 正则会在 `*` 前停下，留下 `watch_pr_`，直接按名字查必然查不到。
+// 只要存在以它开头的真实工具就算通过；一个都不存在仍然报错。
+const isKnownTool = (id) => tools.has(id) || (id.endsWith('_') && [...tools].some((name) => name.startsWith(id)))
+const badTools = [...new Set(mentionsTools.map((m) => m.id))].filter((id) => !isKnownTool(id))
 const badRoutes = [...new Set(mentionsRoutes.map((m) => m.id))].filter((id) => !routes.has(id))
 // 小节标题只警告不失败：文档里的「」多是引用概念，不一定是我们面板的标题
 const unknownSections = [...new Set(mentionsSections.map((m) => m.id))]

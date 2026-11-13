@@ -425,7 +425,7 @@ Expected: PASS
 
 ```bash
 git add lib/index.js test/watch.test.mjs
-git commit -m "feat(watch): PR 响应轮询与 watch_pr_* 工具"
+git commit -m "feat(watch): PR 响应轮询与 watch_pr_start 等三个工具"
 ```
 
 ---
@@ -514,7 +514,7 @@ Expected: 四项 PASS（含总数与板块合计一致）
 
 - [ ] **Step 4: 更新版本与 CHANGELOG**
 
-`package.json` → `0.11.0`；`CHANGELOG.md` 写条目（含「PR 响应监控」新增、`watch_pr_*` 三个工具、面板字段）。
+`package.json` → `0.11.0`；`CHANGELOG.md` 写条目（含「PR 响应监控」新增、`watch_pr_start` 等三个工具、面板字段）。
 
 - [ ] **Step 5: 全量门禁 + 提交**
 

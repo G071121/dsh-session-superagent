@@ -45,6 +45,43 @@
       "required": []
     },
     {
+      "name": "watch_pr_start",
+      "params": [
+        "activeHours",
+        "adversarialAudit",
+        "audit",
+        "auditMode",
+        "format",
+        "goal",
+        "intervalSec",
+        "isolated",
+        "observe",
+        "repo",
+        "workdir"
+      ],
+      "required": [
+        "repo"
+      ]
+    },
+    {
+      "name": "watch_pr_status",
+      "params": [
+        "format"
+      ],
+      "required": []
+    },
+    {
+      "name": "watch_pr_stop",
+      "params": [
+        "delete",
+        "format",
+        "repo"
+      ],
+      "required": [
+        "repo"
+      ]
+    },
+    {
       "name": "watch_start",
       "params": [
         "ackLabel",

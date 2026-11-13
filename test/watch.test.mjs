@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs'
 import assert from 'node:assert/strict'
 
 import { decodeBody } from '../lib/body.js'
+import { assertTempStateDir, tempDir } from './fixtures/tmpdir.mjs'
 import * as watchModule from '../lib/watch.js'
 import {
   linkedPrNote,
@@ -1752,7 +1753,8 @@ test('唤醒消息里要标出「上一轮提过，还没回执」', async () =>
 
 test('acked / pending 必须真的写进状态文件（白名单是手维护的，漏了会静默丢失）', async () => {
   const { POLL_RESULT_FIELDS } = await import('../lib/watch.js')
-  for (const key of ['acked', 'pending']) {
+  // seenComments 是 PR 守的水位：漏了它，唤醒成功了但一写盘就被旧值覆盖 → 同一条评论每轮重复叫醒
+  for (const key of ['acked', 'pending', 'seenComments']) {
     assert.ok(POLL_RESULT_FIELDS.includes(key), key + ' 必须在落盘白名单里，否则「算出来了但没存」')
   }
 })
@@ -1781,4 +1783,329 @@ test('唤醒质量：有动作率 / 开工时延 / 回执空白（《为什么�
   assert.equal(empty.actionRate, null, '没叫醒过不该显示 0%')
   // **关键**：不能有每次调用都变的时间戳，否则 /state 的 ETag 永远不命中
   assert.ok(!('computedAt' in q), 'quality 里不许放每次调用都变的时间戳')
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Task 5：PR 响应轮询（pollPrOnce）与 watch_pr_* 工具
+// ─────────────────────────────────────────────────────────────────────────────
+
+/** 一条 PR 评论（形状与 parsePrSearch 归一后的契约一致）。 */
+const prComment = (id, author, body = 'body ' + id) => ({
+  id,
+  author,
+  body,
+  createdAt: '2026-11-13T00:00:0' + (id % 10) + 'Z',
+})
+
+/** gh api graphql 的原始返回（parsePrSearch 的输入）。 */
+function prGraphql(rows) {
+  return {
+    data: {
+      search: {
+        nodes: rows.map((row) => ({
+          number: row.number,
+          title: row.title || 'PR ' + row.number,
+          isDraft: false,
+          headRefName: row.headRef || 'feature/' + row.number,
+          headRepository: { nameWithOwner: row.headRepo || 'fork/r' },
+          baseRepository: { nameWithOwner: row.baseRepo || 'o/r' },
+          comments: {
+            nodes: (row.comments || []).map((comment) => ({
+              databaseId: comment.id,
+              author: { login: comment.author },
+              createdAt: comment.createdAt,
+              body: comment.body,
+            })),
+          },
+        })),
+      },
+    },
+  }
+}
+
+function prEntry(over = {}) {
+  return {
+    id: 'pr:o/r#session-pr',
+    repo: 'o/r',
+    provider: 'github',
+    sessionId: 'session-pr',
+    kind: 'pr',
+    intervalSec: 300,
+    seenComments: {},
+    enabled: true,
+    audit: false,
+    adversarialAudit: false,
+    auditMode: 'subagent',
+    observe: false,
+    goal: null,
+    ...over,
+  }
+}
+
+/** 注入用的 gh runner：返回固定 GraphQL 载荷，并记录调用。 */
+function prDeps(rows, over = {}) {
+  const calls = []
+  return {
+    calls,
+    selfLogin: 'me',
+    ghRun: async (file, args) => {
+      calls.push({ file, args })
+      return { code: 0, stderr: '', stdout: JSON.stringify(prGraphql(rows)) }
+    },
+    ...over,
+  }
+}
+
+/** 假的 wakeMerged：立即用给定结果结算，并记录发出去的消息。 */
+function fakeWake(result) {
+  const calls = []
+  const wake = (ctx, sessionId, text, onSettled) => {
+    calls.push({ sessionId, text })
+    if (onSettled) onSettled(result)
+    return { ok: Boolean(result && result.ok) }
+  }
+  wake.calls = calls
+  return wake
+}
+
+/** 每个 pollPrOnce 用例都要一个临时状态目录：persistEntry 会真的写文件。 */
+async function withPrState(fn) {
+  const previous = process.env.DSH_SUPERAGENT_STATE
+  process.env.DSH_SUPERAGENT_STATE = tempDir('superagent-pr-')
+  assertTempStateDir('pollPrOnce')
+  try {
+    return await fn()
+  } finally {
+    if (previous === undefined) delete process.env.DSH_SUPERAGENT_STATE
+    else process.env.DSH_SUPERAGENT_STATE = previous
+  }
+}
+
+async function prModule(tag) {
+  return import('../lib/index.js?pr=' + tag + '=' + Date.now())
+}
+
+test('pollPrOnce 无新评论不唤醒也不推进水位', async () => {
+  await withPrState(async () => {
+    const mod = await prModule('no-new')
+    const wake = fakeWake({ ok: true })
+    const entry = prEntry({ seenComments: { 7: 100, 99: 5 } })
+    await mod.__test.pollPrOnce({}, entry, 300_000, null, {
+      ...prDeps([{ number: 7, comments: [prComment(100, 'alice')] }]),
+      wake,
+    })
+    assert.equal(wake.calls.length, 0, '没有 id 大于水位的评论，不该叫醒')
+    assert.deepEqual(entry.seenComments, { 7: 100 }, '水位必须原样保留，且关掉的 PR 被剪掉')
+    assert.ok(entry.lastPoll, '轮询成功要记 lastPoll')
+    assert.equal(entry.deferReason, 'unchanged')
+  })
+})
+
+test('pollPrOnce 自己发的最后一条不唤醒', async () => {
+  await withPrState(async () => {
+    const mod = await prModule('self')
+    const wake = fakeWake({ ok: true })
+    const entry = prEntry()
+    await mod.__test.pollPrOnce({}, entry, 300_000, null, {
+      ...prDeps([{ number: 7, comments: [prComment(1, 'me'), prComment(2, 'Me')] }]),
+      wake,
+    })
+    assert.equal(wake.calls.length, 0, '本人评论（大小写不同也是本人）不叫醒')
+    assert.deepEqual(entry.seenComments, {}, '没消费就不许推进水位')
+  })
+})
+
+test('pollPrOnce 唤醒成功后水位推进到最后一条', async () => {
+  await withPrState(async () => {
+    const mod = await prModule('advance')
+    const wake = fakeWake({ ok: true })
+    const entry = prEntry({ goal: '把 CI 修绿', audit: true })
+    // 生产里这条守已经在状态文件里（tick 拿着盘上同一份对象），这里先落盘再轮询
+    mod.__test.writeState({ watchers: { [entry.id]: entry } })
+    await mod.__test.pollPrOnce({}, entry, 300_000, null, {
+      ...prDeps([{ number: 7, title: 'T7', headRef: 'feat/x', comments: [prComment(11, 'alice'), prComment(12, 'bob')] }]),
+      wake,
+    })
+    assert.equal(wake.calls.length, 1)
+    const text = wake.calls[0].text
+    assert.match(text, /^【PR 响应】o\/r#7 有 2 条新评论/)
+    assert.match(text, /PR: T7/)
+    assert.match(text, /分支: feat\/x/)
+    assert.match(text, /评论者: alice（非本人）/)
+    assert.match(text, /目标: 把 CI 修绿/)
+    assert.match(text, /审计: 开启（subagent 模式）/, '审计说明段要拼在消息末尾')
+    assert.deepEqual(entry.seenComments, { 7: 12 }, '真正发出去之后才推进水位')
+    // 内存里推进还不够：persistEntry 走 mergePollResult 的白名单，漏字段就「算出来了但没存」
+    const stored = mod.__test.readState().watchers['pr:o/r#session-pr']
+    assert.deepEqual(stored.seenComments, { 7: 12 }, '水位必须真的落盘')
+    assert.ok(entry.lastWake)
+  })
+})
+
+test('pollPrOnce 唤醒失败不推进水位', async () => {
+  await withPrState(async () => {
+    const mod = await prModule('failed')
+    const rows = [{ number: 7, comments: [prComment(11, 'alice')] }]
+
+    // 会话忙：这轮本来就不该消费，水位不动、也不该退避（下一轮立刻重试）
+    const busyEntry = prEntry()
+    await mod.__test.pollPrOnce({}, busyEntry, 300_000, null, { ...prDeps(rows), wake: fakeWake({ ok: false, reason: '会话正忙（agent busy）' }) })
+    assert.deepEqual(busyEntry.seenComments, {})
+    assert.equal(busyEntry.consecutiveFailures || 0, 0, '会话忙不是失败，不该退避')
+    assert.match(String(busyEntry.lastDeferred), /会话正忙/)
+
+    // 真正的投递失败：要退避，但同样不许推进水位
+    const brokenEntry = prEntry()
+    await mod.__test.pollPrOnce({}, brokenEntry, 300_000, null, { ...prDeps(rows), wake: fakeWake({ ok: false, reason: '宿主没给这个会话提供投递入口' }) })
+    assert.deepEqual(brokenEntry.seenComments, {})
+    assert.equal(brokenEntry.consecutiveFailures, 1)
+    assert.ok(brokenEntry.nextAt, '失败要排下一次退避时间')
+  })
+})
+
+test('pollPrOnce 跳过非 fork PR', async () => {
+  await withPrState(async () => {
+    const mod = await prModule('fork')
+    const wake = fakeWake({ ok: true })
+    const entry = prEntry()
+    await mod.__test.pollPrOnce({}, entry, 300_000, null, {
+      ...prDeps([
+        { number: 8, headRepo: 'o/r', baseRepo: 'o/r', comments: [prComment(1, 'alice')] },
+        { number: 9, headRepo: 'fork/r', baseRepo: 'o/r', comments: [prComment(2, 'alice')] },
+      ]),
+      wake,
+    })
+    const text = wake.calls[0].text
+    assert.match(text, /#9/)
+    assert.doesNotMatch(text, /#8/, '同仓库的分支不是 fork PR，不跟')
+    assert.deepEqual(entry.seenComments, { 9: 2 })
+  })
+})
+
+test('pollPrOnce 仅观察模式不推进水位', async () => {
+  await withPrState(async () => {
+    const mod = await prModule('observe')
+    const wake = fakeWake({ ok: true })
+    const entry = prEntry({ observe: true })
+    await mod.__test.pollPrOnce({}, entry, 300_000, null, {
+      ...prDeps([{ number: 7, comments: [prComment(11, 'alice')] }]),
+      wake,
+    })
+    assert.equal(wake.calls.length, 0, '仅观察不真唤醒')
+    assert.deepEqual(entry.seenComments, {}, '仅观察不推进水位')
+    assert.equal(entry.deferReason, 'observe')
+    assert.match(String(entry.lastDeferred), /仅观察/)
+  })
+})
+
+test('pollPrOnce 超过 10 条评论时截断消息但水位推进到最后一条', async () => {
+  await withPrState(async () => {
+    const mod = await prModule('truncate')
+    const wake = fakeWake({ ok: true })
+    const entry = prEntry()
+    const comments = Array.from({ length: 12 }, (_, i) => prComment(i + 1, 'alice'))
+    await mod.__test.pollPrOnce({}, entry, 300_000, null, { ...prDeps([{ number: 7, comments }]), wake })
+    const text = wake.calls[0].text
+    assert.equal(text.split('评论者:').length - 1, 10, '一条消息最多列 10 条评论')
+    assert.match(text, /还有 2 条/, '其余要给出条数，不能静默丢掉')
+    assert.deepEqual(entry.seenComments, { 7: 12 }, '水位推进到最新一条')
+  })
+})
+
+test('pollPrOnce 走 Gitee：fetchImpl 注入，评论按 id 归一', async () => {
+  await withPrState(async () => {
+    const mod = await prModule('gitee')
+    const wake = fakeWake({ ok: true })
+    const entry = prEntry({ provider: 'gitee', id: 'pr:gitee:o/r#session-pr' })
+    const fetchImpl = async (url) => ({
+      ok: true,
+      status: 200,
+      text: async () => (String(url).includes('/comments')
+        ? JSON.stringify([{ id: '31', user: { login: 'alice' }, body: '这里还有问题', created_at: '2026-11-13T02:00:00Z' }])
+        : JSON.stringify([{
+          number: 5,
+          title: 'Gitee PR',
+          draft: false,
+          head: { repo: { full_name: 'fork/r' }, user: { login: 'me' }, ref: 'b1' },
+          base: { repo: { full_name: 'o/r' } },
+        }])),
+    })
+    await mod.__test.pollPrOnce({}, entry, 300_000, null, { fetchImpl, selfLogin: 'me', wake })
+    const text = wake.calls[0].text
+    assert.match(text, /o\/r#5/)
+    assert.match(text, /评论者: alice（非本人）/)
+    assert.deepEqual(entry.seenComments, { 5: 31 }, '字符串 id 必须转成数字再比水位')
+  })
+})
+
+test('watch_pr_start 存 kind:pr 与 seenComments，并注册成 pr: 前缀', async () => {
+  const previousNoPoll = process.env.DSH_SUPERAGENT_NO_POLL
+  process.env.DSH_SUPERAGENT_NO_POLL = '1'
+  try {
+    await withPrState(async () => {
+      const mod = await prModule('start')
+      const tools = []
+      const ctx = {
+        tools: { register: (tool) => tools.push(tool) },
+        webServer: { register: () => () => {} },
+        agents: { currentInitiator: () => ({ id: 'session-pr' }), get: () => null },
+        get: () => null,
+        effect: (fn) => fn(),
+        inject: () => {},
+      }
+      mod.apply(ctx)
+      const start = tools.find((tool) => tool.name === 'watch_pr_start')
+      assert.ok(start, '没注册 watch_pr_start')
+      const out = JSON.parse(await start.execute({ repo: 'o/r', format: 'json' }))
+      assert.equal(out.ok, true)
+      assert.equal(out.id, 'pr:o/r#session-pr')
+      assert.equal(out.kind, 'pr')
+      assert.deepEqual(out.seenComments, {})
+      const state = mod.__test.readState()
+      assert.equal(state.watchers['pr:o/r#session-pr'].kind, 'pr')
+      assert.deepEqual(state.watchers['pr:o/r#session-pr'].seenComments, {})
+      assert.equal(state.watchers['pr:o/r#session-pr'].auditMode, 'subagent')
+      // 收尾：清掉定时器，别让测试进程吊着
+      const stop = tools.find((tool) => tool.name === 'watch_pr_stop')
+      await stop.execute({ repo: 'o/r', delete: true })
+    })
+  } finally {
+    if (previousNoPoll === undefined) delete process.env.DSH_SUPERAGENT_NO_POLL
+    else process.env.DSH_SUPERAGENT_NO_POLL = previousNoPoll
+  }
+})
+
+test('watch_pr_start auditMode 非法值被拒', async () => {
+  const previousNoPoll = process.env.DSH_SUPERAGENT_NO_POLL
+  process.env.DSH_SUPERAGENT_NO_POLL = '1'
+  try {
+    await withPrState(async () => {
+      const mod = await prModule('audit-mode')
+      const tools = []
+      mod.apply({
+        tools: { register: (tool) => tools.push(tool) },
+        webServer: { register: () => () => {} },
+        agents: { currentInitiator: () => ({ id: 'session-pr' }), get: () => null },
+        get: () => null,
+        effect: (fn) => fn(),
+        inject: () => {},
+      })
+      const start = tools.find((tool) => tool.name === 'watch_pr_start')
+      const out = await start.execute({ repo: 'o/r', auditMode: 'parallel' })
+      assert.match(out, /auditMode/)
+      assert.match(out, /inline/)
+      assert.match(out, /subagent/)
+      assert.equal(mod.__test.readState().watchers['pr:o/r#session-pr'], undefined, '非法参数不该落状态')
+    })
+  } finally {
+    if (previousNoPoll === undefined) delete process.env.DSH_SUPERAGENT_NO_POLL
+    else process.env.DSH_SUPERAGENT_NO_POLL = previousNoPoll
+  }
+})
+
+test('watch_pr_start 的 key 带 pr: 前缀（与 issue 守同名仓库也不冲突）', async () => {
+  const source = readFileSync(new URL('../lib/index.js', import.meta.url), 'utf8')
+  assert.match(source, /'pr:' \+ \(provider === 'gitee' \? 'gitee:' : ''\)/, 'PR 守的 id 必须带 pr: 前缀')
+  // issue 守的 id 仍是不带前缀的写法：两条规则同时存在时不能互相覆盖
+  assert.match(source, /const id = \(provider === 'gitee' \? 'gitee:' : ''\) \+ `\$\{repo\}#\$\{sessionId\}`/)
 })
