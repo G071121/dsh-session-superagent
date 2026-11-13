@@ -131,7 +131,7 @@ node scripts/render-preview.mjs preview.html
 
 ## 十、当前基线
 
-0.10.12；全量 **1016/1016**、preflight **43 项**（贡献归属仅 PR CI 执行，本地 / main push 为 SKIP）、UI **11/11**、真实 Chromium **75/75**（截图通道 SKIP 时总数，含 4 项小视口回归）。
+0.10.12；全量 **1021/1021**、preflight **43 项**（贡献归属仅 PR CI 执行，本地 / main push 为 SKIP）、UI **11/11**、真实 Chromium **75/75**（截图通道 SKIP 时总数，含 4 项小视口回归）。
 未验：真实 DSH WebView 重载后的读屏 / 触摸 / IME、真实 GitHub/Gitee 写操作。没有实测不得写成通过。
 
 ## 十一、Issue/PR 回复边界
