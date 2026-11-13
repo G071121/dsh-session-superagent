@@ -3707,7 +3707,11 @@ window.__ModuleLoader__.load({
       // 标题本身是按钮 —— 官方就是点标题进详情，我们点标题展开行内编辑，交互更轻但不脱离这套结构。
       const STAGE_STATE = { active: undefined, paused: 'warning', error: 'error', dormant: 'warning' }
       const row = (watcher) => {
-        const key = watcher.repo + '#' + watcher.sessionId
+        // key 必须带 kind：同一个仓库同一个会话完全可以同时开一条 issue 守和一条 PR 守，
+        // 而它们的 `repo#sessionId` 一模一样 —— 只按 repo#session 生成的 key 会撞，
+        // React 会把两行当成同一条（重复 key），编辑态也会一起展开、改一个两个都动。
+        // 服务端的 id 前缀（`pr:`）本来就是为这个存在的，这里跟它对齐。
+        const key = (watcher.kind === 'pr' ? 'pr:' : '') + watcher.repo + '#' + watcher.sessionId
         const state = orbitStateOf(watcher)
         const rowBody = h('div', { className: 'dt-ticket-body' },
           h('div', { className: 'dt-row-title' },

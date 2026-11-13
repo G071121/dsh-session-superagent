@@ -1709,7 +1709,7 @@ test('编辑 PR 守：保存体必须带 watchKind=pr，id 仍能解析回 pr: �
       })],
     },
   }
-  const nodes = walk(render(desk, deskQueue(snap, repo + '#' + sessionId, { intervalSec: '600' })))
+  const nodes = walk(render(desk, deskQueue(snap, id, { intervalSec: '600' })))
   const labelOf = (node) => walk(node).filter((n) => typeof n.text === 'string').map((n) => n.text).join('')
   const save = nodes.find((n) => n.type === 'button' && labelOf(n).includes('保存'))
   assert.ok(save, 'PR 守编辑器里要有保存按钮')
@@ -3160,7 +3160,7 @@ test('PR 面板：打开已有 PR 类型 watcher 时四项的值来自服务端�
     loading: false, error: null,
     body: { sessionGoal: null, sessionTitle: '会话', credentials: {}, watchers: [item] },
   }
-  const nodes = walk(render(desk, deskQueue(snapshot, 'a/b#session-a/b'), { sessionId: 'session-a/b' }))
+  const nodes = walk(render(desk, deskQueue(snapshot, 'pr:a/b#session-a/b'), { sessionId: 'session-a/b' }))
   // 值初始化在 watcherValuesFrom：kind/audit/auditMode 必须原样映射到四个字段。
   assert.deepEqual(segmentButtons(segmented(nodes, '监控类型'), '监控类型').map((node) => node.props['aria-checked']),
     [false, true], 'watcher.kind=pr 必须选中「对外发出的 PR」')

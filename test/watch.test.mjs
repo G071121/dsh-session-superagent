@@ -1850,6 +1850,26 @@ function prDeps(rows, over = {}) {
     selfLogin: 'me',
     ghRun: async (file, args) => {
       calls.push({ file, args })
+      const joined = (args || []).join(' ')
+      // 首次同步（seenComments 里还没有这个 PR）会走 REST 分页把评论拉全：
+      // `repos/o/r/issues/7/comments?per_page=100&page=1`。这里必须回数组，
+      // 回 GraphQL 形状会让 pollPrOnce 判「评论列表不是数组」→ 整轮跳过。
+      const rest = joined.match(/repos\/([^/\s]+)\/([^/\s]+)\/issues\/(\d+)\/comments/)
+      if (rest) {
+        const number = Number(rest[3])
+        const row = rows.find((item) => item.number === number)
+        const list = (row && row.comments) || []
+        return {
+          code: 0,
+          stderr: '',
+          stdout: JSON.stringify(list.map((c) => ({
+            id: c.id,
+            user: { login: c.author },
+            body: c.body || '',
+            created_at: c.createdAt || '',
+          }))),
+        }
+      }
       return { code: 0, stderr: '', stdout: JSON.stringify(prGraphql(rows)) }
     },
     ...over,
@@ -2606,4 +2626,120 @@ test('watch_pr_ack：不传 commentId 且拿不到最新 → 报错而不是瞎�
     if (previousNoPoll === undefined) delete process.env.DSH_SUPERAGENT_NO_POLL
     else process.env.DSH_SUPERAGENT_NO_POLL = previousNoPoll
   }
+})
+
+test('pollPrOnce：Gitee 单个 PR 评论失败只跳过该 PR，其他 PR 照常叫醒（A2）', async () => {
+  await withPrState(async () => {
+    const mod = await prModule('pr-gitee-one-fail')
+    const wake = fakeWake({ ok: true })
+    const entry = prEntry({ provider: 'gitee' })
+    const list = [
+      { number: 7, title: '七', state: 'open', head: { repo: { full_name: 'x/r' }, user: { login: 'me' }, ref: 'b7' }, base: { repo: { full_name: 'o/r' } } },
+      { number: 8, title: '八', state: 'open', head: { repo: { full_name: 'x/r' }, user: { login: 'me' }, ref: 'b8' }, base: { repo: { full_name: 'o/r' } } },
+    ]
+    const fetchImpl = async (url) => {
+      if (/\/pulls\?/.test(url)) return { ok: true, status: 200, text: async () => JSON.stringify(list) }
+      if (/\/pulls\/7\/comments/.test(url)) return { ok: false, status: 500, text: async () => 'boom' }
+      if (/\/pulls\/8\/comments/.test(url)) return { ok: true, status: 200, text: async () => JSON.stringify([{ id: 200, user: { login: 'bob' }, body: '有新意见', created_at: '2026-01-01T00:00:00Z' }]) }
+      return { ok: false, status: 404, text: async () => '' }
+    }
+    await mod.__test.pollPrOnce({}, entry, 300_000, null, { fetchImpl, wake, selfLogin: 'me' })
+    assert.equal(wake.calls.length, 1, 'PR#7 的 500 不该把 PR#8 的新评论一起拖住')
+    assert.match(wake.calls[0].text, /#8/, '叫醒消息必须指向 PR#8')
+    assert.deepEqual(entry.seenComments, { 8: 200 }, 'PR#7 的水位不许动，PR#8 推进到 200')
+    assert.equal(entry.consecutiveFailures, 0, '单个 PR 的错不该让整个 watcher 退避')
+  })
+})
+
+test('pollPrOnce：Gitee 列表拿满一页（可能截断）时不剪水位（A4）', async () => {
+  await withPrState(async () => {
+    const mod = await prModule('pr-gitee-truncated')
+    const wake = fakeWake({ ok: true })
+    const entry = prEntry({ provider: 'gitee', seenComments: { 7: 10, 200: 20 } })
+    const list = []
+    for (let i = 1; i <= 100; i += 1) {
+      list.push({ number: i, title: 't' + i, state: 'open', head: { repo: { full_name: 'x/r' }, user: { login: 'me' }, ref: 'b' + i }, base: { repo: { full_name: 'o/r' } } })
+    }
+    const fetchImpl = async (url) => {
+      if (/\/pulls\?/.test(url)) return { ok: true, status: 200, text: async () => JSON.stringify(list) }
+      if (/\/pulls\/\d+\/comments/.test(url)) return { ok: true, status: 200, text: async () => '[]' }
+      return { ok: false, status: 404, text: async () => '' }
+    }
+    await mod.__test.pollPrOnce({}, entry, 300_000, null, { fetchImpl, wake, selfLogin: 'me' })
+    assert.deepEqual(entry.seenComments, { 7: 10, 200: 20 }, '列表可能被截断时，离窗的 PR#200 水位必须保留（否则回窗后旧评论重报）')
+    assert.equal(wake.calls.length, 0, '没有新评论')
+  })
+})
+
+test('watch_pr_status：只返回本会话的 PR 守，不抖出别的会话（B8）', async () => {
+  await withPrState(async () => {
+    const mod = await prModule('pr-status-session')
+    const tools = []
+    mod.apply({
+      tools: { register: (tool) => tools.push(tool) },
+      webServer: { register: () => () => {} },
+      agents: { currentInitiator: () => ({ id: 'session-a' }), get: () => null },
+      get: () => null,
+      effect: (fn) => fn(),
+      inject: () => {},
+    })
+    const state = mod.__test.readState()
+    state.watchers = {
+      'pr:o/r#session-a': prEntry({ id: 'pr:o/r#session-a', sessionId: 'session-a', seenComments: { 7: 3 } }),
+      'pr:o/r#session-b': prEntry({ id: 'pr:o/r#session-b', sessionId: 'session-b', repo: 'other/private', goal: 'B 的私有目标', seenComments: { 8: 5 } }),
+    }
+    mod.__test.writeState(state)
+    const status = tools.find((tool) => tool.name === 'watch_pr_status')
+    const out = JSON.parse(await status.execute({ format: 'json' }))
+    assert.equal(out.schemaVersion, 1)
+    const ids = out.watchers.map((w) => w.id)
+    assert.deepEqual(ids, ['pr:o/r#session-a'], '别的会话的 PR 守不许出现')
+    assert.equal(out.session.id, 'session-a')
+    assert.ok(!JSON.stringify(out).includes('B 的私有目标'), '不许泄露别的会话的 goal')
+  })
+})
+
+test('watch_ack：只有 PR 守时明确报「这是 PR 守」，不去改 issue 水位（B9）', async () => {
+  await withPrState(async () => {
+    const mod = await prModule('ack-pr-only')
+    const tools = []
+    mod.apply({
+      tools: { register: (tool) => tools.push(tool) },
+      webServer: { register: () => () => {} },
+      agents: { currentInitiator: () => ({ id: 'session-pr' }), get: () => null },
+      get: () => null,
+      effect: (fn) => fn(),
+      inject: () => {},
+    })
+    const state = mod.__test.readState()
+    state.watchers = { 'pr:o/r#session-pr': prEntry({ seenComments: { 7: 3 } }) }
+    mod.__test.writeState(state)
+    const ack = tools.find((tool) => tool.name === 'watch_ack')
+    const out = JSON.parse(await ack.execute({ repo: 'o/r', numbers: 7, format: 'json' }))
+    assert.equal(out.ok, false, '只有 PR 守时 watch_ack 必须拒绝')
+    assert.match(String(out.error), /PR 守/, '错误要说清是 PR 守，而不是「没有守」')
+    assert.deepEqual(mod.__test.readState().watchers['pr:o/r#session-pr'].seenComments, { 7: 3 }, '不许把 PR 的评论水位写进 issue 水位')
+  })
+})
+
+test('pollPrOnce：首次同步走 REST 全量拉评论，之后走列表自带的 comments（A3）', async () => {
+  await withPrState(async () => {
+    const mod = await prModule('pr-a3-rest')
+    const wake = fakeWake({ ok: true })
+    const rows = [{ number: 7, comments: [{ id: 100, author: 'me' }, { id: 101, author: 'alice' }] }]
+    const deps = prDeps(rows, { selfLogin: 'me', wake })
+    const entry = prEntry({ seenComments: {} })
+    await mod.__test.pollPrOnce({}, entry, 300_000, null, deps)
+    const firstRest = deps.calls.filter((c) => (c.args || []).join(' ').includes('issues/7/comments'))
+    assert.equal(firstRest.length, 1, '首次同步（seenId=0）必须走 REST 分页把评论拉全，否则更早的评论永久漏报')
+    assert.deepEqual(entry.seenComments, { 7: 101 })
+    assert.equal(wake.calls.length, 1)
+
+    // 第二轮：水位已建，走列表里带回来的 comments，不再打 REST
+    deps.calls.length = 0
+    await mod.__test.pollPrOnce({}, entry, 300_000, null, deps)
+    const secondRest = deps.calls.filter((c) => (c.args || []).join(' ').includes('issues/7/comments'))
+    assert.equal(secondRest.length, 0, '增量轮不该再打 REST')
+    assert.equal(wake.calls.length, 1, '没有新评论不重复叫醒')
+  })
 })

@@ -251,27 +251,28 @@ test('buildPrSearchQuery 带 repo 与 author:@me', async () => {
   assert.equal(
     q,
     'query{search(query:"repo:MYCF711/repo is:pr is:open author:@me",type:ISSUE,first:20)'
-      + '{nodes{... on PullRequest{number title isDraft headRefName headRepository{nameWithOwner}'
-      + ' baseRepository{nameWithOwner} comments(last:10){nodes{databaseId author{login}'
+      + '{pageInfo{hasNextPage}'
+      + 'nodes{... on PullRequest{number title isDraft headRefName headRepository{nameWithOwner}'
+      + ' baseRepository{nameWithOwner} comments(last:100){pageInfo{hasPreviousPage} nodes{databaseId author{login}'
       + ' createdAt body}}}}}}',
     '查询串与实测形状不一致：' + q,
   )
   // first 默认 20（搜索页一次够用），传了就用传的
   assert.equal(buildPrSearchQuery({ base: 'a/b' }), buildPrSearchQuery({ base: 'a/b', first: 20 }))
-  assert.match(buildPrSearchQuery({ base: 'a/b', first: 5 }), /first:5\)\{nodes/)
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: 5 }), /first:5\)\{pageInfo\{hasNextPage\}nodes/)
 })
 
 test('buildPrSearchQuery 夹取 first 并转义仓库名', async () => {
   const { buildPrSearchQuery } = await import('../lib/gh-format.js')
   // GitHub 搜索一页上限 100，超了直接 400 —— 整轮轮询会因此失败，必须夹住
-  assert.match(buildPrSearchQuery({ base: 'a/b', first: 500 }), /first:100\)\{nodes/, '超上限要夹到 100')
-  assert.match(buildPrSearchQuery({ base: 'a/b', first: 0 }), /first:1\)\{nodes/, '下限夹到 1')
-  assert.match(buildPrSearchQuery({ base: 'a/b', first: -3 }), /first:1\)\{nodes/, '负数也夹到 1')
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: 500 }), /first:100\)\{pageInfo\{hasNextPage\}nodes/, '超上限要夹到 100')
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: 0 }), /first:1\)\{pageInfo\{hasNextPage\}nodes/, '下限夹到 1')
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: -3 }), /first:1\)\{pageInfo\{hasNextPage\}nodes/, '负数也夹到 1')
   // 非数字回落 20：传了 NaN / 字符串时不能拼出 `first:NaN` 让整条查询语法错
-  assert.match(buildPrSearchQuery({ base: 'a/b', first: Number.NaN }), /first:20\)\{nodes/)
-  assert.match(buildPrSearchQuery({ base: 'a/b', first: 'abc' }), /first:20\)\{nodes/)
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: Number.NaN }), /first:20\)\{pageInfo\{hasNextPage\}nodes/)
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: 'abc' }), /first:20\)\{pageInfo\{hasNextPage\}nodes/)
   // 小数截断：GraphQL Int 不收 2.5
-  assert.match(buildPrSearchQuery({ base: 'a/b', first: 2.9 }), /first:2\)\{nodes/)
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: 2.9 }), /first:2\)\{pageInfo\{hasNextPage\}nodes/)
   // 仓库名里的 `"` 与 `\` 会把 GraphQL 字符串字面量提前闭合，gh 只回一句 "Expected Name"
   const escaped = buildPrSearchQuery({ base: 'a"b\\c' })
   assert.ok(escaped.includes('a\\"b\\\\c'), '双引号与反斜杠都要转义：' + escaped)
