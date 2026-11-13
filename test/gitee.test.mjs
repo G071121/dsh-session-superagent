@@ -12,6 +12,7 @@ import * as giteeModule from '../lib/gitee.js'
 import {
   normalizeGiteeItem, normalizeGiteeList, normalizeGiteeState,
   listGiteeItems, fetchGiteeLastComment, addGiteeLabel,
+  listGiteePrs, fetchGiteePrComments,
 } from '../lib/gitee.js'
 
 test('仓库写法：owner/name、gitee: 前缀、Gitee URL 都能认', () => {
@@ -352,4 +353,139 @@ test('issue_state 也要参与判定（T22 B4：resolved/rejected 以前一直�
   assert.equal(normalizeGiteeItem({ number: '3', state: 'open', issue_state: 'progressing' }).state, 'open')
   assert.equal(normalizeGiteeItem({ number: '4', state: 'closed' }).state, 'closed')
   assert.equal(normalizeGiteeItem({ number: '5', state: 'open' }).state, 'open')
+})
+
+// ── PR 响应监控（Task 3）：Gitee PR 列表与讨论评论 ──────────────────────────
+// 为什么值得单独钉：PR 响应监控的「哪条评论算新」全靠这两个函数的输出。
+// 这里错一处都是静默错误 —— fork 仓库名少归一 → 候选 PR 全被过滤掉；
+// 评论 id 不转数值 → `'999' > 1000` 成立（字符串比较），同一批评论每轮重复叫醒。
+
+test('listGiteePrs 把 head/base 仓库、作者、分支归一成下游认识的形状', async () => {
+  const urls = []
+  const fetchImpl = async (url) => {
+    urls.push(url)
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify([{
+        number: 9, title: 't', draft: false,
+        head: { repo: { full_name: 'iJetLi/r' }, user: { login: 'iJetLi' }, ref: 'b' },
+        base: { repo: { full_name: 'o/r' } },
+      }]),
+    }
+  }
+  const out = await listGiteePrs({ repo: 'o/r', token: 'x', author: 'iJetLi', fetchImpl })
+  assert.equal(out.ok, true)
+  // 形状整体钉死：多一个字段、少一个字段都要在评审时看见，别让 Task 5 猜
+  assert.deepEqual(out.prs, [{
+    number: 9,
+    title: 't',
+    draft: false,
+    headRepo: 'iJetLi/r',
+    baseRepo: 'o/r',
+    headLogin: 'iJetLi',
+    headRef: 'b',
+  }])
+  assert.ok(urls[0].startsWith('https://gitee.com/api/v5/repos/o/r/pulls?'), urls[0])
+  assert.ok(urls[0].includes('state=open'), '只要开着的 PR：' + urls[0])
+  // author 是服务端过滤（真机实测有效）；换成 head={user} 不带分支会返回 0 条，别改回去
+  assert.ok(urls[0].includes('author=iJetLi'), 'author 过滤不能漏：' + urls[0])
+  assert.ok(urls[0].includes('per_page=100'), urls[0])
+})
+
+test('listGiteePrs：head.repo 为 null 时不崩（fork 被删的 PR 仍在列表里）', async () => {
+  const fetchImpl = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify([{ number: 12, title: 'x', draft: true, head: {}, base: { repo: null } }]),
+  })
+  const out = await listGiteePrs({ repo: 'o/r', fetchImpl })
+  assert.equal(out.ok, true)
+  assert.equal(out.prs[0].headRepo, null, '拿不到就输出 null，绝不抛')
+  assert.equal(out.prs[0].baseRepo, null)
+  assert.equal(out.prs[0].headLogin, null)
+  assert.equal(out.prs[0].headRef, null)
+  assert.equal(out.prs[0].draft, true, 'draft 是布尔，不是字符串')
+})
+
+test('listGiteePrs：失败时把状态码与原因带回来（429 限流 / 404 无权要能区分）', async () => {
+  const fetchImpl = async () => ({ ok: false, status: 429, text: async () => 'rate limit' })
+  const out = await listGiteePrs({ repo: 'o/r', fetchImpl })
+  assert.equal(out.ok, false)
+  assert.equal(out.status, 429)
+  assert.equal(out.prs, undefined, '失败时不能给空数组，否则调用方以为「一条 PR 都没有」')
+  assert.ok(out.error.includes('rate limit'))
+})
+
+test('fetchGiteePrComments 把字符串 id 转数字（否则水位比较会错）', async () => {
+  const urls = []
+  const fetchImpl = async (url) => {
+    urls.push(url)
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify([
+        { id: '123', user: { login: 'iJetLi' }, created_at: '2026-11-13T10:00:00+08:00', body: '看一下\n第二行' },
+        { id: 456, user: null, created_at: null, body: null },
+      ]),
+    }
+  }
+  const out = await fetchGiteePrComments({ repo: 'o/r', token: 't', number: 9, fetchImpl })
+  assert.equal(out.ok, true)
+  assert.deepEqual(out.comments[0], {
+    id: 123,
+    author: 'iJetLi',
+    body: '看一下\n第二行',
+    createdAt: '2026-11-13T10:00:00+08:00',
+  })
+  assert.equal(out.comments[1].id, 456, '本来就是数字的原样保留')
+  assert.equal(out.comments[1].author, null, '账号被删（user:null）不能崩')
+  assert.equal(out.comments[1].body, '', 'body 缺失时给空串，别给 undefined')
+  assert.ok(urls[0].includes('/repos/o/r/pulls/9/comments?'), urls[0])
+  // PR 讨论走 pulls/{n}/comments；issues/{n}/comments 对 PR 是 404，别混用
+  assert.ok(urls[0].includes('comment_type=pr_comment'), '只取 PR 讨论评论：' + urls[0])
+  assert.ok(urls[0].includes('direction=desc'), urls[0])
+})
+
+test('fetchGiteePrComments：404 返回 ok:false，不是「空评论」', async () => {
+  const fetchImpl = async () => ({ ok: false, status: 404, text: async () => '{"message":"Not Found"}' })
+  const out = await fetchGiteePrComments({ repo: 'o/r', token: 't', number: 404, fetchImpl })
+  assert.equal(out.ok, false)
+  assert.equal(out.status, 404)
+  assert.equal(out.comments, undefined, '失败还回空数组的话，调用方会以为是「没人评论」')
+  assert.ok(out.error.includes('Not Found'))
+})
+
+test('fetchGiteePrComments：缺 number 直接拒，别拼出 /pulls/undefined/comments', async () => {
+  let calls = 0
+  const fetchImpl = async () => { calls += 1; return { ok: true, status: 200, text: async () => '[]' } }
+  const out = await fetchGiteePrComments({ repo: 'o/r', fetchImpl })
+  assert.equal(out.ok, false)
+  assert.equal(calls, 0, '参数不合法时不该发请求')
+})
+
+test('perPage 夹在 1..100（Gitee 超过 100 回 400，0 会退回默认值）', async () => {
+  const urls = []
+  const f = async (url) => { urls.push(url); return { ok: true, status: 200, text: async () => '[]' } }
+  await listGiteePrs({ repo: 'o/r', perPage: 500, fetchImpl: f })
+  await fetchGiteePrComments({ repo: 'o/r', number: 1, perPage: 0, fetchImpl: f })
+  assert.ok(urls[0].includes('per_page=100'), '上限 100：' + urls[0])
+  assert.ok(urls[1].includes('per_page=100'), '非法值回落到默认 100：' + urls[1])
+})
+
+test('200 但正文不是数组时给空列表（不抛 TypeError）', async () => {
+  const f = async () => ({ ok: true, status: 200, text: async () => '{}' })
+  assert.deepEqual(await listGiteePrs({ repo: 'o/r', fetchImpl: f }), { ok: true, prs: [] })
+  assert.deepEqual(await fetchGiteePrComments({ repo: 'o/r', number: 1, fetchImpl: f }), { ok: true, comments: [] })
+})
+
+test('listGiteePrs：没有编号的条目跳过（别收成 number=0 的脏 PR）', async () => {
+  const f = async () => ({
+    ok: true,
+    status: 200,
+    text: async () => JSON.stringify([{ number: null, title: 'x' }, { number: '14', title: 'ok' }]),
+  })
+  const out = await listGiteePrs({ repo: 'o/r', fetchImpl: f })
+  assert.equal(out.prs.length, 1)
+  assert.equal(out.prs[0].number, 14, '字符串编号也能收，统一成数字')
 })
