@@ -3089,12 +3089,12 @@ const toggleOf = (nodes, label) => nodes.find((node) => node.type === 'button'
 
 test('PR 面板：监控类型是原生分段控件，选中值跟 watchKind 走', () => {
   const segments = segmentButtons(segmented(renderPrFormFields({ intervalSec: '60', watchKind: 'pr' }), '监控类型'))
-  assert.deepEqual(segments.map((node) => a11yText(node)), ['Issue', 'PR 响应'])
-  assert.deepEqual(segments.map((node) => node.props['aria-checked']), [false, true], 'watchKind=pr 必须选中「PR 响应」')
+  assert.deepEqual(segments.map((node) => a11yText(node)), ['收到的 Issue/PR', '对外发出的 PR'])
+  assert.deepEqual(segments.map((node) => node.props['aria-checked']), [false, true], 'watchKind=pr 必须选中「对外发出的 PR」')
   assert.deepEqual(segments.map((node) => node.props.tabIndex), [-1, 0], 'roving tab stop 只能落在选中项')
 
   const issue = segmentButtons(segmented(renderPrFormFields({ intervalSec: '60', watchKind: 'issue' }), '监控类型'))
-  assert.deepEqual(issue.map((node) => node.props['aria-checked']), [true, false], 'watchKind=issue 必须选中「Issue」')
+  assert.deepEqual(issue.map((node) => node.props['aria-checked']), [true, false], 'watchKind=issue 必须选中「收到的 Issue/PR」')
 })
 
 test('PR 面板：PR 类型显示审计与对抗性审计开关（默认关，hint 可读）', () => {
@@ -3163,7 +3163,7 @@ test('PR 面板：打开已有 PR 类型 watcher 时四项的值来自服务端�
   const nodes = walk(render(desk, deskQueue(snapshot, 'a/b#session-a/b'), { sessionId: 'session-a/b' }))
   // 值初始化在 watcherValuesFrom：kind/audit/auditMode 必须原样映射到四个字段。
   assert.deepEqual(segmentButtons(segmented(nodes, '监控类型'), '监控类型').map((node) => node.props['aria-checked']),
-    [false, true], 'watcher.kind=pr 必须选中「PR 响应」')
+    [false, true], 'watcher.kind=pr 必须选中「对外发出的 PR」')
   assert.equal(toggleOf(nodes, '审计').props['aria-checked'], true, 'audit:true 必须点亮「审计」')
   assert.equal(toggleOf(nodes, '对抗性审计').props['aria-checked'], false, 'adversarialAudit 缺省必须关闭')
   const mode = segmentButtons(segmented(nodes, '执行方式'), '执行方式')

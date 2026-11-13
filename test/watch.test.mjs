@@ -1942,6 +1942,28 @@ test('pollPrOnce 唤醒成功后水位推进到最后一条', async () => {
   })
 })
 
+test('pollPrOnce：审计与对抗性审计都开时两条说明都在（旧实现 else if 只剩一条）', async () => {
+  await withPrState(async () => {
+    const mod = await prModule('both-audits')
+    const wake = fakeWake({ ok: true })
+    const entry = prEntry({ audit: true, adversarialAudit: true, auditMode: 'inline' })
+    mod.__test.writeState({ watchers: { [entry.id]: entry } })
+    await mod.__test.pollPrOnce({}, entry, 300_000, null, {
+      ...prDeps([{ number: 7, title: 'T7', headRef: 'feat/x', comments: [prComment(11, 'alice')] }]),
+      wake,
+    })
+    assert.equal(wake.calls.length, 1)
+    const text = wake.calls[0].text
+    const auditLines = text.split('\n').filter((line) => line.startsWith('审计:') || line.startsWith('对抗性审计:'))
+    // 严格相等：2026-11-13 实测两项都开时消息里只有「对抗性审计」——
+    // 当时是 `if (adversarialAudit) ... else if (audit) ...`，对抗性审计把审计吞掉了。
+    assert.deepEqual(auditLines, [
+      '审计: 开启（inline 模式）',
+      '对抗性审计: 开启（inline 模式）',
+    ], '两项都开必须各占一行，顺序是「先审计、后对抗性」')
+  })
+})
+
 test('pollPrOnce 唤醒失败不推进水位', async () => {
   await withPrState(async () => {
     const mod = await prModule('failed')

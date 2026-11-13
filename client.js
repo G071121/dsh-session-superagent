@@ -1285,8 +1285,10 @@ window.__ModuleLoader__.load({
       { key: 'repo', label: '仓库', kind: 'text', modes: ['create'], required: true, placeholder: 'owner/name，或 gitee:owner/name' },
       // PR 响应监控（Task 6）：类型本身跟仓库走，所以不 advanced；后三项只在 PR 类型下出现。
       { key: 'watchKind', label: '监控类型', kind: 'segmented', options: [
-        { value: 'issue', label: 'Issue' },
-        { value: 'pr', label: 'PR 响应' },
+        // 两条路的语义完全不同：左边是「别人提给我们、我们来处理」，右边是「我们提给别人、等别人回」。
+        // 只写 Issue / PR 会让人以为右边是「监控仓库里的 PR」，实际正好相反。
+        { value: 'issue', label: '收到的 Issue/PR' },
+        { value: 'pr', label: '对外发出的 PR' },
       ] },
       { key: 'audit', label: '审计', kind: 'switch', when: (value) => value.watchKind === 'pr', hint: '修改后先自审一遍再提交' },
       { key: 'adversarialAudit', label: '对抗性审计', kind: 'switch', when: (value) => value.watchKind === 'pr', hint: '专门挑刺：假设这段代码一定有 bug' },
