@@ -1516,6 +1516,8 @@ test('白名单必须覆盖所有「轮询结果」字段（M1：漏一个就是
     'etag', 'needsReauth', 'lastErrorAt', 'deferReason', 'silentWakes', 'prevWakeAt',
     'dailyWakes', 'absorbedLog', 'filterCounts', 'repoAccess', 'sessionMissingSince',
     'minIntervalSec', 'lastCleanupAt', 'lastReopened', 'lastStates',
+    // 弹层「最近唤醒的是哪一条」：只在内存里算、漏了白名单就永远写不进状态文件
+    'lastWakeItem',
   ]
   const missing = must.filter((f) => !POLL_RESULT_FIELDS.includes(f))
   assert.deepEqual(missing, [], '白名单漏了：' + missing.join(','))
@@ -1612,6 +1614,36 @@ test('真正发出去之后才推进水位，且记账（T20：入队即记账�
   assert.match(ok.eventText, /#42/)
 })
 
+test('水位只推「这次列出去的」：没列出的条目下一轮还要能提（T38：整批 fresh 全进水位 = 静默丢弃）', async () => {
+  const { planWakeSettlement } = await import('../lib/watch.js')
+  const fresh = [
+    { number: 11, updated_at: '2026-11-05T00:01:00.000Z' },
+    { number: 12, updated_at: '2026-11-05T00:02:00.000Z' },
+    { number: 13, updated_at: '2026-11-05T00:03:00.000Z' },
+  ]
+  const listed = fresh.slice(0, 2)
+  const entry = { seen: {}, cursor: '2026-11-01T00:00:00.000Z', wakeTimes: [], history: [], silentWakes: 0 }
+  const ok = planWakeSettlement(entry, { ok: true, fresh, listed, now: 1770000000000 })
+  assert.deepEqual(Object.keys(ok.seen).sort(), ['11', '12'], '只有列出去的进 seen')
+  assert.equal(ok.cursor, entry.cursor, '没全列出时全局水位不许前移（否则 #13 被 floor 挡住）')
+  // 全部列出去时才推全局水位
+  const all = planWakeSettlement(entry, { ok: true, fresh: listed, listed, now: 1770000000000 })
+  assert.equal(all.cursor, '2026-11-05T00:02:00.000Z', '全列出时水位推到这批最新')
+})
+
+test('「静默丢弃」回归：只列了 2/3 条时，第 3 条下一轮仍是 fresh', async () => {
+  const { planWakeSettlement, partitionItems } = await import('../lib/watch.js')
+  const items = [
+    { number: 21, updated_at: '2026-11-05T00:01:00.000Z' },
+    { number: 22, updated_at: '2026-11-05T00:02:00.000Z' },
+    { number: 23, updated_at: '2026-11-05T00:03:00.000Z' },
+  ]
+  const entry = { seen: {}, cursor: '2026-11-01T00:00:00.000Z', wakeTimes: [], history: [], silentWakes: 0 }
+  const settled = planWakeSettlement(entry, { ok: true, fresh: items, listed: items.slice(0, 2), now: 1770000000000 })
+  const { fresh } = partitionItems(items, { seen: settled.seen, cursor: settled.cursor }, {})
+  assert.deepEqual(fresh.map((item) => item.number), [23], '没列出的 #23 必须还能被提，不能静默消失')
+})
+
 test('失败的唤醒也要进 history（客户能看到「叫过但没叫醒」）', async () => {
   const { planWakeSettlement } = await import('../lib/watch.js')
   const res = planWakeSettlement({ history: [] }, { ok: false, reason: 'session not live', fresh: [{ number: 7 }] })
@@ -1619,6 +1651,46 @@ test('失败的唤醒也要进 history（客户能看到「叫过但没叫醒」
   assert.equal(res.history[0].ok, false)
   assert.match(res.history[0].reason, /session not live/)
   assert.deepEqual(res.lastBatch, [7])
+})
+
+test('fresh 为空时水位不许清空（T39：pending 非空但本轮没新增 → cursor 被写成 null，下一轮重复唤醒）', async () => {
+  const { planWakeSettlement } = await import('../lib/watch.js')
+  const entry = { cursor: '2026-11-01T00:00:00.000Z', seen: {}, wakeTimes: [], history: [], silentWakes: 0 }
+  const out = planWakeSettlement(entry, {
+    ok: true,
+    fresh: [],
+    listed: [{ number: 41, updated_at: '2026-10-01T00:00:00.000Z' }],
+  })
+  // 纯函数层的防线：正常路径根本走不到这里（调用方 `fresh.length === 0` 就早退了），
+  // 但一旦有人再放开那个早退，这里必须挡住 —— newestUpdatedAt([]) 是 null，
+  // 写回等于把水位清空，下一轮旧内容会被当成「首次同步」重提。
+  assert.equal(out.cursor, entry.cursor, 'fresh 为空时 newestUpdatedAt 返回 null，不许写回')
+  assert.deepEqual(Object.keys(out.seen), ['41'], 'listed 里的条目照常进 seen')
+})
+
+test('batchLimit=1 连续两轮：先提第 1 条、下轮提第 2 条，且不重复第 1 条', async () => {
+  const { planWakeSettlement, partitionItems } = await import('../lib/watch.js')
+  // 真实 API 是 sort=updated&direction=desc（新→旧）：fixture 必须降序，
+  // 否则「batchLimit=1 时第一轮列哪条」会和真机反着来（desc 下先列 #32）。
+  const items = [
+    { number: 32, updated_at: '2026-11-05T00:02:00.000Z' },
+    { number: 31, updated_at: '2026-11-05T00:01:00.000Z' },
+  ]
+  // 旧水位必须**非 null**：`cursor: null` 会让「保留」与「清空」同值，断言等于空转。
+  const entry = { seen: {}, cursor: '2026-10-01T00:00:00.000Z', wakeTimes: [], history: [], silentWakes: 0 }
+  // 第一轮：只列第 1 条（batchLimit=1 的等价形状）
+  const round1 = planWakeSettlement(entry, { ok: true, fresh: items, listed: items.slice(0, 1) })
+  assert.deepEqual(Object.keys(round1.seen), ['32'], '第一轮只记列出去的第 1 条')
+  assert.equal(round1.cursor, entry.cursor, '没全列出时全局水位不动（保持旧水位，不是 null）')
+  // 第二轮：第 2 条仍是 fresh，第 1 条不能重复
+  const r2 = partitionItems(items, { seen: round1.seen, cursor: round1.cursor }, {})
+  assert.deepEqual(r2.fresh.map((i) => i.number), [31], '第 2 条要能被提，第 1 条不能重复')
+  const round2 = planWakeSettlement(
+    { ...entry, seen: round1.seen, cursor: round1.cursor },
+    { ok: true, fresh: r2.fresh, listed: r2.fresh },
+  )
+  assert.deepEqual(Object.keys(round2.seen).sort(), ['31', '32'], '两轮之后两条都记过')
+  assert.equal(round2.cursor, '2026-11-05T00:01:00.000Z', '全部列出时才推全局水位')
 })
 
 test('实际间隔 = 自己配置与 x-poll-interval 取大者（T23：以前测试在算自己的算术）', async () => {

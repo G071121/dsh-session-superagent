@@ -8,6 +8,8 @@ on:
 # 顶层只读：job 需要写权限时再单独提权（默认权限可能是 write，这是最常见的过度授权）
 permissions:
   contents: read
+  # 贡献归属门禁只读 PR / commits / issue 评论，不写 PR、标签或仓库内容。
+  pull-requests: read
 
 # 同一分支的旧运行直接取消：省 runner，也避免"旧结果盖新结果"
 concurrency:
@@ -17,6 +19,10 @@ concurrency:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # preflight 的贡献归属门禁通过 gh api 只读查询；local / main push 为 SKIP。
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     strategy:
       matrix:
         node: [22, 24]

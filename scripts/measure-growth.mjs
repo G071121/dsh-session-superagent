@@ -16,7 +16,7 @@ const now0 = Date.now() - DAYS * DAY_MS
 
 const state = {}
 for (let w = 0; w < WATCHERS; w += 1) {
-  state['acme/r' + w + '#s'] = { repo: 'acme/r' + w, events: [], history: [], filteredLog: [], absorbedLog: [], seen: {}, wakeTimes: [], dailyWakes: null }
+  state['acme/r' + w + '#s'] = { repo: 'acme/r' + w, events: [], history: [], filteredLog: [], absorbedLog: [], seen: {}, wakeTimes: [], dailyWakes: null, lastWakeItem: null }
 }
 
 const kb = (value) => (Buffer.byteLength(JSON.stringify(value)) / 1024).toFixed(1)
@@ -51,6 +51,8 @@ for (let day = 1; day <= DAYS; day += 1) {
         entry.history = pushHistory(entry.history, { at, numbers: [issue], ok: true })
         entry.dailyWakes = bumpDailyWakes(entry.dailyWakes, at)
         entry.wakeTimes = pruneWakeTimes([...entry.wakeTimes, at], at)
+        // 每次唤醒覆盖成最新一条（恒定单条，不随天数增长）
+        entry.lastWakeItem = { number: String(issue), title: '汉'.repeat(60), kind: 'issue' }
       }
     }
   }

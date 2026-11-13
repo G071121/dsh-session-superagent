@@ -26,6 +26,13 @@
   `intervalSec: 30` 时评论风暴也不会变成一小时叫醒 120 次。
 - **面板**：设置 → 来源 → 监控类型里多一个「PR 响应」，与「Issue」「Gitee」并列；选它才会渲染审计三项
   （`when: watchKind === 'pr'`）。编辑已有 PR 守时类型不可改（类型决定 id 前缀 `pr:`，改类型等于换一条守）。
+- **贡献归属进入插件默认 preflight**（PR CI 执行，本地 / main push 为 SKIP，不强制日常联网）：
+  维护者 PR 与客户原 PR 共享外部非 merge 提交时直接失败并指回原 PR，避免重复功能入口掩盖贡献者；
+  提交声明修复 issue 时，采用外部正文 / 评论中的 diff、JS / TS 代码必须有对应 `Co-authored-by`，
+  仅引用现状源码的复现块不误报，未采用代码可用 `Attribution-Skip: @login #N` 显式排除。
+  新增 `scripts/check-pr-attribution.mjs` 与 **23** 条离线 / 传输 / 误判回归；真实复核能拦截
+  PR #49 的三个 @iJetLi 共享提交、放行原 PR #41，并在 PR #43 精确指出 fixriver 的代码署名缺失。
+
 - **页签名称可设置**（只改 `conversation.view` 的 label，不动会话标题 / 插件包名 / 唤醒抬头 / ack 标签）：
   会话头第二个 row 上「对话 / 轨迹 / **主理鱼**」这一排里，主理鱼注册的那个页签名称现在可在
   设置 → 来源 → 「页签名称」里改；保存后当前 GUI 的页签立即变，刷新后仍保持。
@@ -52,6 +59,8 @@
 
 ### Fixed
 
+- **POSIX 凭证权限收紧静默失败**：`hardenSecretsFile` 现在从 `node:fs` 导入 `chmodSync`，避免 Linux 等 POSIX 平台的
+  `ReferenceError` 被捕获后仅返回 `failed`；跨平台回归覆盖 Windows 模拟 POSIX 与真实 POSIX 的 `0600` 权限位。
 - **外部改了页签名后，面板里的草稿还是旧名，再点保存会把别人的新名覆盖回去**（终审 M1）：订阅者现在收到
   `(next, previous)`，面板用既有 `useEffect` 订阅，只有**干净草稿**（仍等于变化前的名字）才跟随新生效的名字，
   用户正在编辑的脏草稿不动；`brandName` 晚到同样同步。
@@ -97,6 +106,15 @@
   `scripts/verify-panel-chromium.mjs` 增加 8 条真实 Chromium 场景（64 → **72**：窄屏 390 / 桌面 1440
   几何、footer 真实可点、Escape 关闭并回焦、确认只发一次 `delete` 且 403 留在确认层、取消、深浅截图），
   证据目录默认仓库内 `tmp-artifacts/issue-35`，可用 `DSH_ISSUE35_ARTIFACTS` 重定向。
+- **Orbit 删除确认在小 / 矮视口中 footer 被裁且无法滚动**（用户实拍约 520×415；#45 portal 修复后仍存在）：
+  真实 Chromium 量得 portal 已挂到 `document.body`、dialog `transform:none`、`max-height:100%` 正常生效；
+  根因是 `.dt-modal` 的 `overflow:hidden`，而普通删除确认没有 `.dt-modal-body`，内容超高时没有可滚动容器。
+  最小修复为 dialog 自身 `overflow-x:hidden; overflow-y:auto`，并固定 header / description / footer `flex-shrink:0`；
+  既有 body 滚动、portal、焦点圈与 Escape 均保持不变。新增 1 条单测和 4 档真实 DOM 几何回归
+  （520×415 / 320 / 180 / 140）：修前 140 高度下按钮 `bottom=152 > 140` 且 wheel 后 `scrollTop=0`；
+  修后 wheel 滚到 48，按钮完整可见、可命中，Escape / 取消回焦圆环。全量 **993/993**、UI **11/11**、
+  Chromium **75/75**（当前 minimized 截图通道 SKIP 时总数；条件截图检查未注册）。真实 DSH WebView 未验，
+  Chromium + loopback 不等同 WebView。
 
 ## [0.10.12] - 2026-11-09 —— 门禁 v6（锁回收计龄、profile 真原子、模型证据入库）
 
