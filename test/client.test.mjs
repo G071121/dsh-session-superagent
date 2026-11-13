@@ -1661,21 +1661,69 @@ test('保存体的 repo 必须能被服务端 parseRepoSpec 原样解析回同�
     assert.equal(posts.length, 1, provider + '：一次保存只能发一条 /watch')
     assert.equal(posts[0].options.method, 'POST')
     const body = JSON.parse(posts[0].options.body)
-    // 严格相等：只允许「定位键 + touched 字段」这三项。
+    // 严格相等：只允许「定位键 + touched 字段」。
+    // watchKind 算定位键的一部分 —— 它决定服务端 id 前缀（`pr:`），和 repo/sessionId 一样
+    // 必须无条件带；而它在编辑态不渲染，touchedRef 里永远没有它。
     assert.deepEqual(body, {
       repo: (provider === 'gitee' ? 'gitee:' : '') + repo,
       sessionId,
+      watchKind: 'issue',
       intervalSec: 600,
     }, provider + '：保存体只能是定位键 + touched 字段（全量 PUT 会写回旧快照）')
 
-    // 服务端契约（lib/index.js POST /watch）：id = (gitee:?)+repo+'#'+sessionId。
+    // 服务端契约（lib/index.js POST /watch）：id = (pr:?)+(gitee:?)+repo+'#'+sessionId。
     const spec = parseRepoSpec(body.repo)
     assert.equal(spec.ok, true, provider + '：repo 必须是服务端认得的写法')
     assert.equal(spec.provider, provider, provider + '：provider 被解析错了')
     assert.equal(spec.repo, repo, provider + '：规范化后的 owner/name 必须原样')
-    assert.equal((spec.provider === 'gitee' ? 'gitee:' : '') + spec.repo + '#' + body.sessionId, id,
+    assert.equal((body.watchKind === 'pr' ? 'pr:' : '') + (spec.provider === 'gitee' ? 'gitee:' : '') + spec.repo + '#' + body.sessionId, id,
       provider + '：解析出的 id 与 /state 里的守不一致 ⇒ 保存会静默新建一条孪生守')
   }
+})
+
+test('编辑 PR 守：保存体必须带 watchKind=pr，id 仍能解析回 pr: 前缀', async () => {
+  // 回归用例：`watchKind` 控件在编辑态不渲染（modes: ['create']），touchedRef 里永远没有它。
+  // 如果保存体只发 touched 字段，服务端会把 id 算成 `owner/name#session`（没有 `pr:`）——
+  // 于是「保存」变成静默新建一条 issue 守，原来那条 PR 守的参数分毫不动。
+  const { parseRepoSpec } = await import('../lib/watch.js')
+  const { loadClient, walk, watcher, deskQueue } = await import('./fixtures/panel-harness.mjs')
+  const repo = 'MYCF711/dsh-session-superagent'
+  const sessionId = 'session-pr'
+  const id = 'pr:' + repo + '#' + sessionId
+  const requests = []
+  const { registrations, render } = loadClient({
+    fetch: async (url, options = {}) => {
+      requests.push({ url, options })
+      return { ok: true, status: 200, text: async () => JSON.stringify({ ok: true }) }
+    },
+  })
+  const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
+  const snap = {
+    loading: false, error: null,
+    body: {
+      credentials: { token: 'none', sshKeyPath: 'none', ghConfigDir: 'none', giteeToken: 'none' },
+      gh: { ok: true, version: '2.0' }, defaults: {},
+      watchers: [watcher(repo, {
+        id, sessionId, intervalSec: 180, kind: 'pr',
+        audit: true, adversarialAudit: false, auditMode: 'inline',
+      })],
+    },
+  }
+  const nodes = walk(render(desk, deskQueue(snap, repo + '#' + sessionId, { intervalSec: '600' })))
+  const labelOf = (node) => walk(node).filter((n) => typeof n.text === 'string').map((n) => n.text).join('')
+  const save = nodes.find((n) => n.type === 'button' && labelOf(n).includes('保存'))
+  assert.ok(save, 'PR 守编辑器里要有保存按钮')
+  await save.props.onClick()
+
+  const posts = requests.filter((r) => String(r.url).endsWith('/watch'))
+  assert.equal(posts.length, 1, '一次保存只能发一条 /watch')
+  const body = JSON.parse(posts[0].options.body)
+  assert.equal(body.watchKind, 'pr', '编辑 PR 守必须带 watchKind=pr，否则服务端按 issue 算 id')
+  assert.equal(body.repo, repo, 'PR 守的 repo 不带 pr: 前缀（前缀只进 id）')
+  const spec = parseRepoSpec(body.repo)
+  assert.equal(spec.ok, true)
+  assert.equal((body.watchKind === 'pr' ? 'pr:' : '') + (spec.provider === 'gitee' ? 'gitee:' : '') + spec.repo + '#' + body.sessionId, id,
+    '解析出的 id 必须与 /state 里的 PR 守一致')
 })
 
 test('行内编辑保存必须真的带上 filters / priority（T24 M1：控件名与字段名对不上，改了发不出去）', async () => {

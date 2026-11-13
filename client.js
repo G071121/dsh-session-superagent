@@ -433,7 +433,7 @@ window.__ModuleLoader__.load({
     }
 
     // 客户端版本探针：每次模块加载写一次，用来确认浏览器里跑的是哪一版
-    const CLIENT_VERSION = '0.10.12'
+    const CLIENT_VERSION = '0.11.0'
     // SEMVER_COMPARATOR_SOURCE_START
     // This block is duplicated verbatim in client.js because the browser UMD cannot import ESM.
     // test/update-semver.test.mjs audits both copies and exercises their behavior.
@@ -3470,6 +3470,12 @@ window.__ModuleLoader__.load({
               //（0.10.12 真机踩到：Gitee 仓库改 600 秒保存后仍是 180 秒，面板里还多出一条 404 的孪生）。
               repo: (watcher.provider === 'gitee' ? 'gitee:' : '') + String(watcher.repo || ''),
               sessionId: watcher.sessionId,
+              // 类型决定服务端 id 前缀（`pr:`）。编辑时 `watchKind` 控件不渲染（modes: ['create']），
+              // 所以这里的值只用来让服务端认对 id，不是「用户改类型」的入口。
+              watchKind: watcher.kind === 'pr' ? 'pr' : 'issue',
+              audit: !!draft.audit,
+              adversarialAudit: !!draft.adversarialAudit,
+              auditMode: draft.auditMode === 'inline' ? 'inline' : 'subagent',
               intervalSec: numberOrUndefined(draft.intervalSec) ?? watcher.intervalSec,
               filters: {
                 labels: String(draft.labels ?? '').split(',').map((v) => v.trim()).filter(Boolean),
@@ -3516,6 +3522,9 @@ window.__ModuleLoader__.load({
               wanted.add(CONTROL_TO_FIELD[key] || key)
             }
             const out = { repo: full.repo, sessionId: full.sessionId }
+            // 类型必须无条件带上：编辑时 `watchKind` 控件不渲染，touchedRef 里永远没有它，
+            // 只发 touched 字段就会让服务端按「issue」算 id —— 改一条 PR 守会静默新建一条 issue 守。
+            out.watchKind = full.watchKind
             for (const key of wanted) {
               if (Object.prototype.hasOwnProperty.call(full, key)) out[key] = full[key]
             }
@@ -3553,6 +3562,14 @@ window.__ModuleLoader__.load({
           body: JSON.stringify((() => {
             const valueDirty = (key) => createTouchedRef.current.has(key) || !watcherSameValue(value[key], createSnapshotRef.current[key])
             const payload = { repo: value.repo.trim(), sessionId }
+            // 监控类型永远提交：它决定服务端 id 前缀（`pr:`），漏了就当 issue 建。
+            payload.watchKind = value.watchKind === 'pr' ? 'pr' : 'issue'
+            if (payload.watchKind === 'pr') {
+              // 审计三项只在 PR 类型下有意义；没碰过的项交给服务端保默认，别用假值覆盖。
+              if (valueDirty('audit')) payload.audit = !!value.audit
+              if (valueDirty('adversarialAudit')) payload.adversarialAudit = !!value.adversarialAudit
+              if (valueDirty('auditMode')) payload.auditMode = value.auditMode === 'inline' ? 'inline' : 'subagent'
+            }
             // 新建也必须只提交实际输入过的配置；服务端负责未提供项的默认值。
             if (valueDirty('intervalSec')) payload.intervalSec = numberOrUndefined(value.intervalSec) ?? 60
             if (valueDirty('goal')) payload.goal = value.goal || ''

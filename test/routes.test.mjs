@@ -145,6 +145,53 @@ test('建 → 查 → 暂停 → 恢复 → 删，全链路', async () => {
   assert.equal((await call('GET', '/session-superagent/state')).json().watchers.length, 0)
 })
 
+test('POST /watch：watchKind=pr 建出 PR 守，与同仓库的 issue 守并存', async () => {
+  // 面板的「监控类型」分段控件提交的就是 watchKind。它必须落成 `pr:` 前缀的 id ——
+  // 否则同一仓库的两条守（issue 一条、PR 一条）会互相覆盖，后建的把先建的顶掉。
+  const issue = await call('POST', '/session-superagent/watch', { repo: 'o/both', sessionId: 's1' })
+  assert.equal(issue.statusCode, 200)
+  assert.equal(issue.json().id, 'o/both#s1', 'issue 守的 id 不带前缀')
+
+  const pr = await call('POST', '/session-superagent/watch', {
+    repo: 'o/both',
+    sessionId: 's1',
+    watchKind: 'pr',
+    intervalSec: 300,
+    audit: true,
+    adversarialAudit: true,
+    auditMode: 'inline',
+  })
+  assert.equal(pr.statusCode, 200)
+  assert.equal(pr.json().id, 'pr:o/both#s1', 'PR 守的 id 要带 pr: 前缀')
+
+  const state = (await call('GET', '/session-superagent/state')).json()
+  const ids = state.watchers.map((w) => w.id).sort()
+  assert.deepEqual(ids, ['o/both#s1', 'pr:o/both#s1'], '两条守必须并存')
+  const prView = state.watchers.find((w) => w.id === 'pr:o/both#s1')
+  assert.equal(prView.kind, 'pr', '/state 要回 kind，面板靠它决定审计三项显不显示')
+  assert.equal(prView.audit, true)
+  assert.equal(prView.adversarialAudit, true)
+  assert.equal(prView.auditMode, 'inline')
+  assert.equal(prView.intervalSec, 300)
+
+  // seenComments 不经过 /state 投影（它是轮询内部水位），直接读状态文件
+  const raw = JSON.parse(readFileSync(join(STATE_DIR, 'watchers.json'), 'utf8'))
+  assert.deepEqual(raw.watchers['pr:o/both#s1'].seenComments, {}, 'PR 守新建时水位是空对象')
+  assert.equal(raw.watchers['pr:o/both#s1'].kind, 'pr')
+  assert.equal('seenComments' in raw.watchers['o/both#s1'], false, 'issue 守不该带 PR 字段')
+
+  // 编辑已有 PR 守时只改间隔：审计配置不能因为「没传」被重置
+  await call('POST', '/session-superagent/watch', { repo: 'o/both', sessionId: 's1', watchKind: 'pr', intervalSec: 600 })
+  const afterEdit = JSON.parse(readFileSync(join(STATE_DIR, 'watchers.json'), 'utf8')).watchers['pr:o/both#s1']
+  assert.equal(afterEdit.intervalSec, 600)
+  assert.equal(afterEdit.audit, true, '没传 audit 不能清空')
+  assert.equal(afterEdit.adversarialAudit, true)
+  assert.equal(afterEdit.auditMode, 'inline')
+  assert.deepEqual(afterEdit.seenComments, {}, '编辑不能重置水位')
+
+  for (const id of ids) await call('POST', '/session-superagent/watch', { action: 'delete', id })
+})
+
 test('非法 action / 未知 id / 非 POST 都有明确响应', async () => {
   const badAction = await call('POST', '/session-superagent/watch', { action: 'explode', id: 'x/y#z' })
   assert.equal(badAction.statusCode, 400)

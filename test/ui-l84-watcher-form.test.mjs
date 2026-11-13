@@ -284,7 +284,8 @@ test('L84c 编辑只提交 touched 字段，保留定位键而不伪造 revision
   await one(saveBar(tree), (node) => node.type === 'button' && text(node) === '保存', '缺保存').props.onClick()
   const writes = requests.filter((request) => request.url.endsWith('/watch') && request.init.method === 'POST')
   assert.equal(writes.length, 1)
-  assert.deepEqual(JSON.parse(writes[0].init.body), { repo: 'a/b', sessionId: SESSION_ID, intervalSec: 120 })
+  // watchKind 是定位键的一部分（决定服务端 id 的 `pr:` 前缀），编辑态控件不渲染所以必须无条件带。
+  assert.deepEqual(JSON.parse(writes[0].init.body), { repo: 'a/b', sessionId: SESSION_ID, watchKind: 'issue', intervalSec: 120 })
   assert.ok(!SOURCE.includes('h(InlineEditor'))
   assert.ok(!SOURCE.includes('merge3('))
 })

@@ -19,7 +19,14 @@ const claimsDisagree = new Set(claims).size > 1
 
 let actual = process.argv[2]
 if (!actual) {
-  const out = execFileSync('node', ['--test'], { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+  // 与 scripts/test.mjs 同口径：单测不许出网，也不许真的探测更新。
+  // 少了这几个变量，routes.test.mjs 里那几条会真的 spawn gh（30s 超时起步），
+  // 于是这里拿到 status 1 崩掉，看起来像「README 数字写错了」。
+  const env = { ...process.env, DSH_SUPERAGENT_OFFLINE: '1', DSH_SUPERAGENT_UPDATE_OFFLINE: '1' }
+  for (const key of ['DSH_SUPERAGENT_STATE', 'DSH_SUPERAGENT_NO_POLL', 'DSH_SUPERAGENT_TRIGGER', 'DSH_GATE_LOCK_TOKEN']) {
+    delete env[key]
+  }
+  const out = execFileSync('node', ['--test'], { cwd: ROOT, env, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
   actual = (out.match(/^ℹ tests (\d+)/m) || out.match(/# tests (\d+)/) || [])[1]
 }
 

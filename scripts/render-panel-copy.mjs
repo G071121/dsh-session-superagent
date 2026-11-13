@@ -11,7 +11,7 @@ import { existsSync, writeFileSync } from 'node:fs'
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { deskQueue, loadClient, walk, watcher } from '../test/fixtures/panel-harness.mjs'
+import { deskForm, deskQueue, loadClient, walk, watcher } from '../test/fixtures/panel-harness.mjs'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const target = join(root, 'docs', '面板文案.md')
@@ -45,6 +45,11 @@ const snap = {
 
 const { registrations, render } = loadClient()
 const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
+
+// 「监控类型」切到 PR：审计 / 对抗性审计 / 执行方式三项的 `when` 是 `watchKind === 'pr'`，
+// 停在默认的 issue 上就永远不会渲染，文案快照里也就看不到它们。
+// 只在本脚本里改（deskForm 是模块级对象，独立进程跑完即弃），不动测试夹具的默认形态。
+deskForm.watchKind = 'pr'
 
 const TABS = [
   ['overview', '总览'],
