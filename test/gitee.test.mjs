@@ -439,7 +439,8 @@ test('fetchGiteePrComments 把字符串 id 转数字（否则水位比较会错�
     createdAt: '2026-11-13T10:00:00+08:00',
   })
   assert.equal(out.comments[1].id, 456, '本来就是数字的原样保留')
-  assert.equal(out.comments[1].author, null, '账号被删（user:null）不能崩')
+  assert.equal(out.comments[1].author, '', '账号被删（user:null）给空串，与 GitHub 侧同类型，不能崩')
+  assert.equal(out.comments[1].createdAt, '', 'created_at 缺失时给空串，别给 null 让下游做类型分支')
   assert.equal(out.comments[1].body, '', 'body 缺失时给空串，别给 undefined')
   assert.ok(urls[0].includes('/repos/o/r/pulls/9/comments?'), urls[0])
   // PR 讨论走 pulls/{n}/comments；issues/{n}/comments 对 PR 是 404，别混用
@@ -473,10 +474,37 @@ test('perPage 夹在 1..100（Gitee 超过 100 回 400，0 会退回默认值）
   assert.ok(urls[1].includes('per_page=100'), '非法值回落到默认 100：' + urls[1])
 })
 
-test('200 但正文不是数组时给空列表（不抛 TypeError）', async () => {
+test('200 但正文不是数组时明确失败（别当成「没有 PR / 没有评论」）', async () => {
+  // 网关把错误包成 {"message":"..."} 也回 200：当成空列表的话，下游会把这轮记成
+  // 「没新 PR」，静默漏掉一次唤醒
   const f = async () => ({ ok: true, status: 200, text: async () => '{}' })
-  assert.deepEqual(await listGiteePrs({ repo: 'o/r', fetchImpl: f }), { ok: true, prs: [] })
-  assert.deepEqual(await fetchGiteePrComments({ repo: 'o/r', number: 1, fetchImpl: f }), { ok: true, comments: [] })
+  const listOut = await listGiteePrs({ repo: 'o/r', fetchImpl: f })
+  assert.equal(listOut.ok, false)
+  assert.equal(listOut.prs, undefined, '失败不能回空数组')
+  const commentOut = await fetchGiteePrComments({ repo: 'o/r', number: 1, fetchImpl: f })
+  assert.equal(commentOut.ok, false)
+  assert.equal(commentOut.comments, undefined)
+})
+
+test('fetchGiteePrComments：number 为 0 / 负数也要早退', async () => {
+  let calls = 0
+  const fetchImpl = async () => { calls += 1; return { ok: true, status: 200, text: async () => '[]' } }
+  for (const bad of [0, -1, Number.NaN, '', null, undefined]) {
+    const out = await fetchGiteePrComments({ repo: 'o/r', number: bad, fetchImpl })
+    assert.equal(out.ok, false, '非法 number=' + String(bad) + ' 应早退')
+  }
+  assert.equal(calls, 0, '参数不合法时一个请求都不该发')
+})
+
+test('两个端点都带 authorization 头（私有仓库无 token 会 404）', async () => {
+  const inits = []
+  const f = async (url, init) => { inits.push(init); return { ok: true, status: 200, text: async () => '[]' } }
+  await listGiteePrs({ repo: 'o/r', token: 'tk', fetchImpl: f })
+  await fetchGiteePrComments({ repo: 'o/r', token: 'tk', number: 1, fetchImpl: f })
+  assert.equal(inits.length, 2)
+  for (const init of inits) {
+    assert.match(String(init.headers.authorization || ''), /tk/, 'token 必须进 authorization 头')
+  }
 })
 
 test('listGiteePrs：没有编号的条目跳过（别收成 number=0 的脏 PR）', async () => {
