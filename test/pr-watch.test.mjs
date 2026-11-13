@@ -89,7 +89,7 @@ test('buildPrWakeText 带 PR 号、评论者、正文', () => {
   assert.ok(lines.includes('评论者: MYCF711（非本人）'))
   assert.ok(lines.includes('时间: 2026-11-13T04:32:15Z'))
   assert.ok(lines.includes('> 这里漏了边界'))
-  assert.ok(lines.includes('处理建议: 阅读评论 → 修改代码 → 自审 → 提交 → 回评'))
+  assert.ok(lines.includes('处理建议: 阅读评论 → 从 remote 同步代码 → 修改代码 → 自审 → 提交 → 回评'))
   // 没有 goal 时不能出现空的「目标:」行
   const noGoal = buildPrWakeText({
     base: 'MYCF711/repo', number: 48, title: 'fix: xxx', branch: 'fix/a',
@@ -108,21 +108,21 @@ test('buildPrWakeText：处理建议里的「自审」按设置带上驱动方�
   // 两项都开：必须写清「subagent 驱动的审计和对抗性审计」，否则会话只做一次普通自查
   assert.equal(
     suggestion(base({ audit: true, adversarialAudit: true, auditMode: 'subagent' })),
-    '处理建议: 阅读评论 → 修改代码 → 自审（subagent 驱动的审计和对抗性审计） → 提交 → 回评',
+    '处理建议: 阅读评论 → 从 remote 同步代码 → 修改代码 → 自审（subagent 驱动的审计和对抗性审计） → 提交 → 回评',
   )
   // 只开一项：只写那一项，且驱动方式跟着 auditMode 走
   assert.equal(
     suggestion(base({ audit: true, auditMode: 'inline' })),
-    '处理建议: 阅读评论 → 修改代码 → 自审（inline 驱动的审计） → 提交 → 回评',
+    '处理建议: 阅读评论 → 从 remote 同步代码 → 修改代码 → 自审（inline 驱动的审计） → 提交 → 回评',
   )
   assert.equal(
     suggestion(base({ adversarialAudit: true, auditMode: 'subagent' })),
-    '处理建议: 阅读评论 → 修改代码 → 自审（subagent 驱动的对抗性审计） → 提交 → 回评',
+    '处理建议: 阅读评论 → 从 remote 同步代码 → 修改代码 → 自审（subagent 驱动的对抗性审计） → 提交 → 回评',
   )
   // 都没开：退回原来的「自审」，不凭空造调解模式
   assert.equal(
     suggestion(base({})),
-    '处理建议: 阅读评论 → 修改代码 → 自审 → 提交 → 回评',
+    '处理建议: 阅读评论 → 从 remote 同步代码 → 修改代码 → 自审 → 提交 → 回评',
   )
 })
 
