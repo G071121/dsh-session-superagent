@@ -22,9 +22,11 @@ const sectionTitles = new Set([...client.matchAll(/title: '([^']{2,24})'/g)].map
 // 要检查的文档
 // 审核 T25：以前清单写死 5 份文档 —— 其余 40+ 份里的死工具名 / 死路由完全看不见。
 // 改成扫描**全部** Markdown；只跳过 CHANGELOG（它记录历史，允许出现已经删掉的名字）与报告类（历史快照）。
+// 点号开头的目录（`.git` / `.superpowers` / `.tmp-*` 之类）一律不扫：
+// 那是本地工作区，里面的 task 报告会写 `watch_pr_*` 这类通配占位，不是客户会照着敲的文档。
 const collectDocs = (dir, out = []) => {
   for (const name of readdirSync(dir)) {
-    if (name === 'node_modules' || name === '.git') continue
+    if (name === 'node_modules' || name.startsWith('.')) continue
     const full = join(dir, name)
     if (statSync(full).isDirectory()) { collectDocs(full, out); continue }
     if (!name.endsWith('.md')) continue
@@ -46,11 +48,7 @@ for (const name of docs) {
   for (const match of text.matchAll(/「([^」]{2,12})」/g)) mentionsSections.push({ doc: name, id: match[1] })
 }
 
-// 「`watch_pr_*`」这种通配写法指的是**一族**工具，不是某个具体名字：
-// 正则会在 `*` 前停下，留下 `watch_pr_`，直接按名字查必然查不到。
-// 只要存在以它开头的真实工具就算通过；一个都不存在仍然报错。
-const isKnownTool = (id) => tools.has(id) || (id.endsWith('_') && [...tools].some((name) => name.startsWith(id)))
-const badTools = [...new Set(mentionsTools.map((m) => m.id))].filter((id) => !isKnownTool(id))
+const badTools = [...new Set(mentionsTools.map((m) => m.id))].filter((id) => !tools.has(id))
 const badRoutes = [...new Set(mentionsRoutes.map((m) => m.id))].filter((id) => !routes.has(id))
 // 小节标题只警告不失败：文档里的「」多是引用概念，不一定是我们面板的标题
 const unknownSections = [...new Set(mentionsSections.map((m) => m.id))]
