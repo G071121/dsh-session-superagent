@@ -76,6 +76,8 @@
 3. **署名 + 重编号** —— CHANGELOG 写明是谁的 PR、我改了什么、为什么改；
 4. **有问题就不合** —— 把要改的点写成可直接抄的代码，让对方自己改（不代改、不关 PR）。
 
+贡献归属由 preflight 的「贡献归属」检查实际执行，不只靠文字约定：维护者重复功能 PR、采用 issue 评论代码却缺 `Co-authored-by` 都会在 PR CI 失败。手动复核：`node scripts/check-pr-attribution.mjs --pr N --repo owner/name`。
+
 ---
 
 ## 四、可以做 / 不可以做
@@ -99,7 +101,7 @@
 
 ```sh
 npm test                    # 全量单测（必须离线开关；裸 node --test 会真去 spawn gh）
-node scripts/preflight.mjs  # 42 项门禁（全量；--fast 跳过门禁自检与冒烟）
+node scripts/preflight.mjs  # 43 项门禁（全量；--fast 跳过门禁自检与冒烟）
 node scripts/ui-audit.mjs   # UI 11 项
 node scripts/render-preview.mjs preview.html
 ```
@@ -129,7 +131,7 @@ node scripts/render-preview.mjs preview.html
 
 ## 十、当前基线
 
-0.10.12；全量 **992/992**、preflight **42 项 = 41 PASS / 1 SKIP**、UI **11/11**、真实 Chromium **72/72**。
+0.10.12；全量 **1015/1015**、preflight **43 项**（贡献归属仅 PR CI 执行，本地 / main push 为 SKIP）、UI **11/11**、真实 Chromium **72/72**。
 未验：真实 DSH WebView 重载后的读屏 / 触摸 / IME、真实 GitHub/Gitee 写操作。没有实测不得写成通过。
 
 ## 十一、Issue/PR 回复边界
