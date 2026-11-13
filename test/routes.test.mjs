@@ -480,6 +480,28 @@ test('新增守会回传 warnings 字段（添加前体检的结论；测试环�
   assert.ok(Array.isArray(body.warnings), 'warnings 必须始终是数组：' + res.body.slice(0, 120))
 })
 
+test('/state 回传 lastWakeItem（弹层靠它显示「最近唤醒的是哪一条」）', async () => {
+  // 上面那条契约测试只认 `watcher.X` 字面量；弹层里写的是 `w.lastWakeItem`，
+  // 提取不到，所以这里显式钉住两件事：从未唤醒给 null；写过之后对象原样回传。
+  const created = (await call('POST', '/session-superagent/watch', {
+    repo: 'o/wakeitems', sessionId: 's13', intervalSec: 60,
+  })).json()
+  const before = (await call('GET', '/session-superagent/state')).json()
+  assert.equal(before.watchers.find((w) => w.id === created.id).lastWakeItem, null, '从没唤醒过要给 null')
+
+  // 真实写入路径在 test/wake-items.test.mjs 覆盖；这里只钉投影：写进去必须能读出来
+  const { __test } = await import('../lib/index.js')
+  const state = __test.readState()
+  state.watchers[created.id].lastWakeItem = { number: '128', title: '插件 0.2.3 下报 tool already registered', kind: 'issue' }
+  __test.writeState(state)
+
+  const after = (await call('GET', '/session-superagent/state')).json()
+  assert.deepEqual(after.watchers.find((w) => w.id === created.id).lastWakeItem,
+    { number: '128', title: '插件 0.2.3 下报 tool already registered', kind: 'issue' },
+    '/state 必须把条目原样回传，否则弹层永远显示不出标题')
+  await call('POST', '/session-superagent/watch', { action: 'delete', id: created.id })
+})
+
 test('/state 不回传客户端从不读的字段（面板每 5 秒拉一次，省的是真流量）', async () => {
   await call('POST', '/session-superagent/watch', { repo: 'o/lean', sessionId: 's11', intervalSec: 60 })
   const res = await call('GET', '/session-superagent/state')

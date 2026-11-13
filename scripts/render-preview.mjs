@@ -337,7 +337,8 @@ const scenarios = [
 ]
 
 const orbitWatchers = [
-  { repo: 'MYCF711/dsh-go', sessionId: 'session-c0a5847a-d34c-4281-8521-54384849d956', title: '用 Go 实现 DSH 插件化方案', enabled: true, intervalSec: 120, lastPoll: new Date(Date.now() - 83000).toISOString(), lastWake: new Date(Date.now() - 3600000).toISOString(), activeHours: '09:00-23:00', isolated: true, workdir: 'E:/temp/iso' },
+  // 第一条带 lastWakeItem：预览图要能看出「最近唤醒的是哪一条」（编号 + 标题 + 时间）
+  { repo: 'MYCF711/dsh-go', sessionId: 'session-c0a5847a-d34c-4281-8521-54384849d956', title: '用 Go 实现 DSH 插件化方案', enabled: true, intervalSec: 120, lastPoll: new Date(Date.now() - 83000).toISOString(), lastWake: new Date(Date.now() - 3600000).toISOString(), lastWakeCount: 2, lastWakeItem: { number: '128', title: '插件在 0.2.3 下报 tool already registered', kind: 'issue' }, activeHours: '09:00-23:00', isolated: true, workdir: 'E:/temp/iso' },
   { repo: 'MYCF711/dsh-go', sessionId: 'session-685dfadb-f641-4a4f-95d7-6b659ee238d6', title: '询问当前情况', enabled: false, intervalSec: 120, lastPoll: new Date(Date.now() - 3 * 3600000).toISOString(), activeHours: '09:00-23:00' },
   { repo: 'acme/web', sessionId: 'session-7f7155cf-20f0-4d9a', title: '前端修 bug', enabled: true, intervalSec: 60, lastPoll: new Date(Date.now() - 5000).toISOString(), consecutiveFailures: 2, nextAt: new Date(Date.now() + 45000).toISOString(), lastError: 'GitHub API 请求: 401（gh 登录失效：跑 gh auth login，或在面板填 token）' },
 ]

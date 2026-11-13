@@ -1515,6 +1515,8 @@ test('白名单必须覆盖所有「轮询结果」字段（M1：漏一个就是
     'etag', 'needsReauth', 'lastErrorAt', 'deferReason', 'silentWakes', 'prevWakeAt',
     'dailyWakes', 'absorbedLog', 'filterCounts', 'repoAccess', 'sessionMissingSince',
     'minIntervalSec', 'lastCleanupAt', 'lastReopened', 'lastStates',
+    // 弹层「最近唤醒的是哪一条」：只在内存里算、漏了白名单就永远写不进状态文件
+    'lastWakeItem',
   ]
   const missing = must.filter((f) => !POLL_RESULT_FIELDS.includes(f))
   assert.deepEqual(missing, [], '白名单漏了：' + missing.join(','))
