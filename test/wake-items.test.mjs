@@ -91,15 +91,15 @@ test('标题按码点截断，不会切出半个 emoji', async () => {
   const longEntry = persist(makeEntry('o/long#s1'))
   await __test.pollWithItems(ctx, longEntry, 60000, parsed([issue(7, { title: 'x'.repeat(500) })]))
   await wait(80)
-  assert.equal(longEntry.lastWakeItem.title.length, 120, '标题截到 120 字')
+  assert.equal(longEntry.lastWakeItem.title.length, 60, '标题截到 60 字')
 
-  // 119 个 ASCII + 1 个 emoji（2 个 UTF-16 单元）：按 UTF-16 截 120 会剩下孤立高位代理，
+  // 59 个 ASCII + 1 个 emoji（2 个 UTF-16 单元）：按 UTF-16 截 60 会剩下孤立高位代理，
   // 渲染出来是 �（客户看到的是乱码，不是标题）
   const emojiEntry = persist(makeEntry('o/emoji#s1'))
-  await __test.pollWithItems(ctx, emojiEntry, 60000, parsed([issue(8, { title: 'x'.repeat(119) + '😀' })]))
+  await __test.pollWithItems(ctx, emojiEntry, 60000, parsed([issue(8, { title: 'x'.repeat(59) + '😀' })]))
   await wait(80)
   const title = emojiEntry.lastWakeItem.title
-  assert.equal(Array.from(title).length, 120, '按码点截到 120：' + title.length)
+  assert.equal(Array.from(title).length, 60, '按码点截到 60：' + title.length)
   assert.ok(title.endsWith('😀'), 'emoji 不能被切成半个') 
 })
 

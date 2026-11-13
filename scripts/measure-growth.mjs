@@ -52,7 +52,7 @@ for (let day = 1; day <= DAYS; day += 1) {
         entry.dailyWakes = bumpDailyWakes(entry.dailyWakes, at)
         entry.wakeTimes = pruneWakeTimes([...entry.wakeTimes, at], at)
         // 每次唤醒覆盖成最新一条（恒定单条，不随天数增长）
-        entry.lastWakeItem = { number: String(issue), title: '插件安装后工具同名重复注册（示例标题，接近真实长度）', kind: 'issue' }
+        entry.lastWakeItem = { number: String(issue), title: '汉'.repeat(60), kind: 'issue' }
       }
     }
   }

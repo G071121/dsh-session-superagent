@@ -8,7 +8,7 @@ import { statusView } from '../lib/watch.js'
 const counts = process.argv.slice(2).map(Number).filter((n) => n > 0)
 const sizes = counts.length > 0 ? counts : [1, 5, 20, 50, 100]
 
-function makeWatcher(index) {
+function makeWatcher(index, titleUnit) {
   const now = Date.now()
   return {
     id: 'acme/repo-' + index + '#session-1',
@@ -35,20 +35,26 @@ function makeWatcher(index) {
   }
 }
 
-console.log('守数量 | statusView JSON | 每守平均')
-console.log('---|---|---')
+console.log('守数量 | 标题 | statusView JSON | 每守平均')
+console.log('---|---|---|---')
 const rows = []
+const GROUPS = [['中文', '汉'], ['emoji', '😀']]
 for (const count of sizes) {
-  const list = Array.from({ length: count }, (_, i) => makeWatcher(i))
+  for (const [group, titleUnit] of GROUPS) {
+  const list = Array.from({ length: count }, (_, i) => makeWatcher(i, titleUnit))
   // 模拟 /state 的真实形状：比 statusView 还多 filteredLog(5) / history(5) / events(20)
   const view = statusView(list)
   view.watchers = view.watchers.map((w, index) => ({
     ...w,
     // 弹层「最近唤醒的是哪一条」：只有 /state 投影有（statusView 不带给工具），
     // 单条对象；不放进 fixture 就量不出它对请求体积的真实贡献
-    lastWakeItem: index % 2 === 0
-      ? { number: String(100 + index), title: '插件安装后工具同名重复注册（示例标题，接近真实长度）', kind: index % 3 === 0 ? 'pr' : 'issue' }
-      : null,
+    // 维护者要求：夹具必须用代码允许的最坏输入 —— 全部守都带条目、标题取上限 60 码点，
+    // 中文与 emoji 各跑一组；「一半守带 26 字标题」的绿灯不覆盖真实上限。
+    lastWakeItem: {
+      number: String(100 + index),
+      title: titleUnit.repeat(60),
+      kind: index % 3 === 0 ? 'pr' : 'issue',
+    },
     filteredLog: list[index].filteredLog.slice(-5),
     history: list[index].history.slice(-5),
     // 按新的预算算：每守 min(6, 240/N) 条
@@ -62,22 +68,25 @@ for (const count of sizes) {
   const json = JSON.stringify(view)
   const ms = performance.now() - t0
   const bytes = Buffer.byteLength(json, 'utf8')
-  rows.push({ count, bytes, ms })
-  console.log(count + ' | ' + (bytes / 1024).toFixed(1) + ' KB | ' + (bytes / count / 1024).toFixed(2) + ' KB')
+  rows.push({ count, group, bytes, ms })
+  console.log(count + ' | ' + group + ' | ' + (bytes / 1024).toFixed(1) + ' KB | ' + (bytes / count / 1024).toFixed(2) + ' KB')
+  }
 }
 
 // 判据按"现实上限"定：面板是会话级的，一个会话挂 20 条守已经很极端（100 条不是目标）。
 // 100 条守时靠"每守事件数随总数收缩"控制增长率，不是零成本。
 const LIMIT_KB = 50
 const REALISTIC = 20
-const realistic = rows.find((row) => row.count === REALISTIC) || rows[rows.length - 1]
-const worst = realistic
+// 取「20 条守」里最坏的那组（emoji 标题字节更大）；两组都必须落在预算内。
+const realisticRows = rows.filter((row) => row.count === REALISTIC)
+const worst = realisticRows.reduce((a, b) => (b.bytes > a.bytes ? b : a), realisticRows[0] || rows[rows.length - 1])
+const label = worst.count + ' 条守（' + worst.group + '标题）'
 if (worst.bytes / 1024 > LIMIT_KB) {
   console.log('---')
-  console.log('FAIL ' + worst.count + ' 条守时 ' + (worst.bytes / 1024).toFixed(1) + ' KB，超过 ' + LIMIT_KB + ' KB 上限（现实上限）—— 需要裁剪字段')
+  console.log('FAIL ' + label + ' ' + (worst.bytes / 1024).toFixed(1) + ' KB，超过 ' + LIMIT_KB + ' KB 上限（现实上限）—— 需要裁剪字段')
   process.exitCode = 1
 } else {
   console.log('---')
-  console.log('PASS ' + worst.count + ' 条守（现实上限）' + (worst.bytes / 1024).toFixed(1) + ' KB ≤ ' + LIMIT_KB + ' KB；' +
+  console.log('PASS ' + label + ' ' + (worst.bytes / 1024).toFixed(1) + ' KB ≤ ' + LIMIT_KB + ' KB；' +
     '生成耗时 ' + worst.ms.toFixed(1) + ' ms')
 }
