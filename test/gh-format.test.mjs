@@ -261,6 +261,24 @@ test('buildPrSearchQuery 带 repo 与 author:@me', async () => {
   assert.match(buildPrSearchQuery({ base: 'a/b', first: 5 }), /first:5\)\{nodes/)
 })
 
+test('buildPrSearchQuery 夹取 first 并转义仓库名', async () => {
+  const { buildPrSearchQuery } = await import('../lib/gh-format.js')
+  // GitHub 搜索一页上限 100，超了直接 400 —— 整轮轮询会因此失败，必须夹住
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: 500 }), /first:100\)\{nodes/, '超上限要夹到 100')
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: 0 }), /first:1\)\{nodes/, '下限夹到 1')
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: -3 }), /first:1\)\{nodes/, '负数也夹到 1')
+  // 非数字回落 20：传了 NaN / 字符串时不能拼出 `first:NaN` 让整条查询语法错
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: Number.NaN }), /first:20\)\{nodes/)
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: 'abc' }), /first:20\)\{nodes/)
+  // 小数截断：GraphQL Int 不收 2.5
+  assert.match(buildPrSearchQuery({ base: 'a/b', first: 2.9 }), /first:2\)\{nodes/)
+  // 仓库名里的 `"` 与 `\` 会把 GraphQL 字符串字面量提前闭合，gh 只回一句 "Expected Name"
+  const escaped = buildPrSearchQuery({ base: 'a"b\\c' })
+  assert.ok(escaped.includes('a\\"b\\\\c'), '双引号与反斜杠都要转义：' + escaped)
+  // 空 base 不能让查询串缺 repo: 之外还带出 undefined
+  assert.ok(buildPrSearchQuery({}).includes('repo: is:pr'), '空 base 输出空仓库名，不能出现 undefined')
+})
+
 test('parsePrSearch 解析真实返回形状', async () => {
   const { parsePrSearch } = await import('../lib/gh-format.js')
   assert.equal(typeof parsePrSearch, 'function', '缺少 parsePrSearch 纯函数（Task 2）')
@@ -302,6 +320,8 @@ test('parsePrSearch 防御性归一：null 仓库 / 缺 comments / 非 PR 节点
   const payload = { data: { search: { nodes: [
     // type:ISSUE 的搜索结果是 union：Issue 上内联片段不成立，节点里没有 number —— 必须跳过
     {},
+    // number 显式为 null 也要跳过：Number(null) 是 0（有限值），用 Number() 会收成 number=0 的脏 PR
+    { number: null },
     // fork 被删除：headRepository / baseRepository 都是 null（Review Focus 1），不能抛
     { number: 7, title: 'deleted fork', isDraft: true, headRepository: null, baseRepository: null },
     // comments 整个字段缺失（GraphQL 部分失败时会出现）→ 输出 []
