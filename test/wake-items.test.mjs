@@ -117,13 +117,17 @@ test('发送真失败时保留上一批（不能把没发出去的说成处理�
   const failCtx = makeCtx({ status: 'idle', followup: () => { throw new Error('gh: HTTP 502（网关）') } })
   apply(failCtx)
   await __test.pollWithItems(failCtx, entry, 60000, parsed([
-    issue(21, { title: '新的那批', updated_at: new Date(Date.now() + 60000).toISOString() }),
+    issue(21, { title: '新的那批 1', updated_at: new Date(Date.now() + 60000).toISOString() }),
+    issue(22, { title: '新的那批 2', updated_at: new Date(Date.now() + 90000).toISOString() }),
+    issue(23, { title: '新的那批 3', updated_at: new Date(Date.now() + 120000).toISOString() }),
   ]))
   await wait(80)
 
   assert.deepEqual(entry.lastWakeItem, firstBatch, '失败那一轮不能覆盖上一批')
   assert.equal(String(entry.lastWake).indexOf('failed'), 0, '失败要如实记：' + entry.lastWake)
-  assert.equal(entry.lastWakeCount, 1, '条数仍记的是这一轮新增（失败也不瞒）')
+  // 两轮条数必须不同（1 vs 3）：上一版用例让成功/失败各 1 条，count 被失败批次
+  // 覆盖也看不出来 —— 那正是外部 review 指出的「手工保持一致掩盖真实先后两轮」。
+  assert.equal(entry.lastWakeCount, 1, '条数跟着 lastWakeItem 一起保留上一批（失败批次不覆盖）')
 })
 
 test('没唤醒过时是 null（老状态文件 / 新条目），客户端据此不渲染', async () => {
