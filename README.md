@@ -149,7 +149,17 @@ Gitee 没有 ETag，每轮会真读一次列表；私有仓库需要在面板里
 
 ## 验证
 
-993 项单测、42 项 preflight（41 PASS / 1 SKIP，`smoke:observe` 需真机宿主）、11 项 UI、75 项 Chromium 全绿（0.10.12；截图通道 SKIP 时总数，含 4 项小视口回归）。
+1016 项单测、43 项 preflight（贡献归属仅 PR CI 执行，本地 / main push 为 SKIP）、11 项 UI、75 项 Chromium 全绿（0.10.12；截图通道 SKIP 时总数，含 4 项小视口回归）。
+
+### 贡献归属门禁
+
+PR CI 默认运行 `scripts/check-pr-attribution.mjs`：维护者 PR 若与客户原 PR 携带同一批外部非 merge 提交，会失败并指回原 PR；提交声明修复某条 issue 时，若采用了外部评论中的代码，则必须有对应的 `Co-authored-by`。仅引用现状源码的复现块不误报；未采用某段代码可显式写 `Attribution-Skip: @login #N`。
+
+本地或 main push 不联网，显示 SKIP。需要手动复核时运行：
+
+```sh
+node scripts/check-pr-attribution.mjs --pr 49 --against 41 --repo MYCF711/dsh-session-superagent
+```
 
 ## 数据来源
 

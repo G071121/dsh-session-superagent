@@ -66,6 +66,7 @@ const WHY = {
   '双主题预览可渲染': ['面板在另一套主题下渲染失败', 'KB `information-density.md`'],
   'UI 体检': ['写死颜色 / 裸 div 可点 / 弹层键盘不可用', 'KB `information-density.md`'],
   '维护一致性': ['版本 bump 了但没打 tag / 没进 CHANGELOG / 徽章没改 —— 用户拿不到新版', 'MAINTENANCE.md 四.5'],
+  '贡献归属': ['维护者另开同功能 PR 抢走客户入口，或采用 issue 评论代码却不计贡献者署名', 'PR #49 重复集成拦截 / PR #43 的 fixriver 代码署名复核'],
   '冒烟 smoke:observe': ['真机 observe 模式跑不起来', 'README 验收节'],
   '验收清单': ['门禁项没有解释（新增检查忘了写“防止什么”）', 'KB `explainable-gates.md`'],
   '面板文案快照': ['面板上那几十条提示被悄悄改坏', 'KB `copy-snapshot.md`'],
