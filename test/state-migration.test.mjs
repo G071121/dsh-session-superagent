@@ -25,6 +25,22 @@ test('当前版本不重复迁移；未来版本与非法版本明确拒绝', ()
   assert.throws(() => migrateState({ schemaVersion: 'abc' }), /invalid state schemaVersion/)
 })
 
+test('当前版本也会补齐 watcher 字段（手改 watchers.json 的主路径）', () => {
+  const current = {
+    schemaVersion: CURRENT_STATE_SCHEMA,
+    watchers: {
+      'pr:o/r#s1': { repo: 'o/r' },
+      'o/r#s2': { repo: 'o/r', kind: 'issue' },
+    },
+  }
+  const result = migrateState(current)
+  assert.equal(result.changed, false, '字段补齐不算版本迁移')
+  assert.equal(result.state.watchers['pr:o/r#s1'].kind, 'pr')
+  assert.deepEqual(result.state.watchers['pr:o/r#s1'].seenComments, {})
+  assert.equal(result.state.watchers['o/r#s2'].kind, 'issue')
+  assert.equal(current.watchers['pr:o/r#s1'].kind, undefined, '迁移不能原地篡改调用方对象')
+})
+
 const STATE_DIR = tempDir('zhuli-state-migration-')
 process.env.DSH_SUPERAGENT_STATE = STATE_DIR
 process.env.DSH_SUPERAGENT_NO_POLL = '1'
