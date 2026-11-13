@@ -3529,6 +3529,24 @@ test('Issue #35：dock 内删除确认层必须 portal 到 document.body（取�
   assert.equal(modalRoots(nodes).length, 0, '确认成功后确认层必须关闭')
 })
 
+test('Orbit 小视口删除确认 Modal 自身可滚动且 header/description/footer 不收缩', () => {
+  // DOM 几何红→绿证据在 verify-panel-chromium.mjs；这里钉住同源 CSS，防止以后又改回 hidden。
+  const source = readFileSync(new URL('../client.js', import.meta.url), 'utf8')
+  const marker = '    const PORTED_CSS = '
+  const start = source.indexOf(marker) + marker.length
+  const end = source.indexOf(';\n\n    /** 把移植', start)
+  assert.ok(start >= marker.length && end > start, '必须读到真实 PORTED_CSS')
+  const rules = JSON.parse(source.slice(start, end)).split('\n')
+  const modal = rules.find((rule) => rule.startsWith('.dt-modal {'))
+  assert.ok(modal, '缺 .dt-modal 规则')
+  assert.ok(modal.includes('overflow-y: auto'), '无 body 的删除确认必须能滚动整个 dialog')
+  assert.ok(!modal.includes('overflow: hidden'), 'overflow:hidden 会把 footer 裁出小视口且不可滚动')
+  const fixed = rules.find((rule) => rule.startsWith('.dt-modal-header, .dt-modal-description, .dt-modal-footer {'))
+  assert.ok(fixed?.includes('flex-shrink: 0'), 'header/description/footer 不得被 flex 压缩后裁掉')
+  const body = rules.find((rule) => rule.startsWith('.dt-modal-body {'))
+  assert.ok(body?.includes('min-height: 0') && body.includes('overflow: auto'), '既有 body 滚动语义必须保留')
+})
+
 test('W17：fallback Toast 以 item.id 为 key，连续通知重新挂载且 hold 与 timer 对齐', () => {
   const { registrations, render } = loadClient()
   const desk = registrations.find((item) => item.opts.id === 'session-superagent-desk')
