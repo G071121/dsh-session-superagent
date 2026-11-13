@@ -6,6 +6,13 @@
 
 ### Added
 
+- **贡献归属进入插件默认 preflight**（PR CI 执行，本地 / main push 为 SKIP，不强制日常联网）：
+  维护者 PR 与客户原 PR 共享外部非 merge 提交时直接失败并指回原 PR，避免重复功能入口掩盖贡献者；
+  提交声明修复 issue 时，采用外部正文 / 评论中的 diff、JS / TS 代码必须有对应 `Co-authored-by`，
+  仅引用现状源码的复现块不误报，未采用代码可用 `Attribution-Skip: @login #N` 显式排除。
+  新增 `scripts/check-pr-attribution.mjs` 与 **23** 条离线 / 传输 / 误判回归；真实复核能拦截
+  PR #49 的三个 @iJetLi 共享提交、放行原 PR #41，并在 PR #43 精确指出 fixriver 的代码署名缺失。
+
 - **页签名称可设置**（只改 `conversation.view` 的 label，不动会话标题 / 插件包名 / 唤醒抬头 / ack 标签）：
   会话头第二个 row 上「对话 / 轨迹 / **主理鱼**」这一排里，主理鱼注册的那个页签名称现在可在
   设置 → 来源 → 「页签名称」里改；保存后当前 GUI 的页签立即变，刷新后仍保持。
