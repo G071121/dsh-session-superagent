@@ -45,6 +45,18 @@
       "required": []
     },
     {
+      "name": "watch_pr_ack",
+      "params": [
+        "commentId",
+        "format",
+        "pr",
+        "repo"
+      ],
+      "required": [
+        "pr"
+      ]
+    },
+    {
       "name": "watch_pr_start",
       "params": [
         "activeHours",

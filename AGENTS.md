@@ -32,7 +32,7 @@
 
 | 你在做什么 | 必读（按顺序） | 做完的判据 |
 |---|---|---|
-| **刚接手**，只知道有这么一个插件 | [README](./README.md) → [MAINTENANCE](./MAINTENANCE.md) | 能说清「7 个工具各干什么」「服务端改动要重启才生效」 |
+| **刚接手**，只知道有这么一个插件 | [README](./README.md) → [MAINTENANCE](./MAINTENANCE.md) | 能说清「11 个工具各干什么」「服务端改动要重启才生效」 |
 | **查现状 / 交接** | [MAINTENANCE](./MAINTENANCE.md) 的「二、当前状态」 | `git status` + `node --test` 复跑，数字与本文件对得上 |
 | **改轮询 / 唤醒 / 水位逻辑** | [docs/01-架构.md](./docs/01-架构.md) → `lib/watch.js` → [docs/回归清单.md](./docs/回归清单.md) | `node --test` 全绿 + **至少加一条反向用例** |
 | **改面板 / 弹层 / 状态栏 UI** | 本文件「〇、UI 硬约束」→ DSH 官方主库 → [docs/design-system.md](./docs/design-system.md) → [docs/面板文案.md](./docs/面板文案.md) | 原生结构/素材已复用 + `ui-audit` 100 分 + 深浅两套各一张图 + 文案快照已 `--write` |
@@ -129,7 +129,7 @@ node scripts/render-preview.mjs preview.html
 
 ## 十、当前基线
 
-0.11.0；全量 **1055/1055**、preflight **42 项 = 41 PASS / 1 SKIP**、UI **11/11**。
+0.11.0；全量 **1061/1061**、preflight **42 项 = 41 PASS / 1 SKIP**、UI **11/11**。
 未验：真实 Chromium 交互（本机缺 `ego-browser` 沙箱，`verify-panel-chromium.mjs` 直接 `node` 跑会 `taskSpace is not defined`）、
 真实 DSH WebView 重载后的读屏 / 触摸 / IME、真实 GitHub/Gitee 写操作。没有实测不得写成通过。
 

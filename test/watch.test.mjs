@@ -2415,3 +2415,195 @@ test('pollPrOnce 达到会话级上限时只记 defer，绝不动水位', async 
     assert.match(String(entry.lastDeferred), /上限 12/)
   })
 })
+
+// watch_pr_ack：手动把某个 PR 的评论水位推到指定 id（「这条我看过了，别再叫我」）
+test('watch_pr_ack：显式 commentId 直接推水位，不调 API', async () => {
+  const previousNoPoll = process.env.DSH_SUPERAGENT_NO_POLL
+  process.env.DSH_SUPERAGENT_NO_POLL = '1'
+  try {
+    await withPrState(async () => {
+      const mod = await prModule('pr-ack-explicit')
+      const tools = []
+      mod.apply({
+        tools: { register: (tool) => tools.push(tool) },
+        webServer: { register: () => () => {} },
+        agents: { currentInitiator: () => ({ id: 'session-pr' }), get: () => null },
+        get: () => null,
+        effect: (fn) => fn(),
+        inject: () => {},
+      })
+      const state = mod.__test.readState()
+      state.watchers = { 'pr:o/r#session-pr': prEntry({ seenComments: { 7: 3, 9: 5 } }) }
+      mod.__test.writeState(state)
+      const ack = tools.find((tool) => tool.name === 'watch_pr_ack')
+      assert.ok(ack, '没注册 watch_pr_ack')
+      const out = JSON.parse(await ack.execute({ repo: 'o/r', pr: 7, commentId: 12, format: 'json' }))
+      assert.equal(out.ok, true)
+      assert.equal(out.pr, 7)
+      assert.equal(out.before, 3)
+      assert.equal(out.seenCommentId, 12)
+      assert.equal(out.moved, true)
+      const after = mod.__test.readState().watchers['pr:o/r#session-pr']
+      assert.deepEqual(after.seenComments, { 7: 12, 9: 5 }, '只动指定 PR 的水位')
+    })
+  } finally {
+    if (previousNoPoll === undefined) delete process.env.DSH_SUPERAGENT_NO_POLL
+    else process.env.DSH_SUPERAGENT_NO_POLL = previousNoPoll
+  }
+})
+
+test('watch_pr_ack：给更旧的 id 不回退（advanceSeen 只许前进）', async () => {
+  const previousNoPoll = process.env.DSH_SUPERAGENT_NO_POLL
+  process.env.DSH_SUPERAGENT_NO_POLL = '1'
+  try {
+    await withPrState(async () => {
+      const mod = await prModule('pr-ack-backwards')
+      const tools = []
+      mod.apply({
+        tools: { register: (tool) => tools.push(tool) },
+        webServer: { register: () => () => {} },
+        agents: { currentInitiator: () => ({ id: 'session-pr' }), get: () => null },
+        get: () => null,
+        effect: (fn) => fn(),
+        inject: () => {},
+      })
+      const state = mod.__test.readState()
+      state.watchers = { 'pr:o/r#session-pr': prEntry({ seenComments: { 7: 12 } }) }
+      mod.__test.writeState(state)
+      const ack = tools.find((tool) => tool.name === 'watch_pr_ack')
+      const out = JSON.parse(await ack.execute({ repo: 'o/r', pr: 7, commentId: 5, format: 'json' }))
+      assert.equal(out.ok, true)
+      assert.equal(out.before, 12)
+      assert.equal(out.seenCommentId, 12, '仍停在 12，不回退')
+      assert.equal(out.moved, false)
+      assert.deepEqual(mod.__test.readState().watchers['pr:o/r#session-pr'].seenComments, { 7: 12 })
+    })
+  } finally {
+    if (previousNoPoll === undefined) delete process.env.DSH_SUPERAGENT_NO_POLL
+    else process.env.DSH_SUPERAGENT_NO_POLL = previousNoPoll
+  }
+})
+
+test('watch_pr_ack：省略 repo 且只有一条 PR 守时自动匹配', async () => {
+  const previousNoPoll = process.env.DSH_SUPERAGENT_NO_POLL
+  process.env.DSH_SUPERAGENT_NO_POLL = '1'
+  try {
+    await withPrState(async () => {
+      const mod = await prModule('pr-ack-autorepo')
+      const tools = []
+      mod.apply({
+        tools: { register: (tool) => tools.push(tool) },
+        webServer: { register: () => () => {} },
+        agents: { currentInitiator: () => ({ id: 'session-pr' }), get: () => null },
+        get: () => null,
+        effect: (fn) => fn(),
+        inject: () => {},
+      })
+      const state = mod.__test.readState()
+      state.watchers = {
+        'pr:o/r#session-pr': prEntry({ seenComments: {} }),
+        'o/r#session-pr': { id: 'o/r#session-pr', repo: 'o/r', sessionId: 'session-pr', enabled: true, seen: [] },
+      }
+      mod.__test.writeState(state)
+      const ack = tools.find((tool) => tool.name === 'watch_pr_ack')
+      const out = JSON.parse(await ack.execute({ pr: 41, commentId: 6844038761, format: 'json' }))
+      assert.equal(out.ok, true)
+      assert.equal(out.repo, 'o/r')
+      assert.deepEqual(mod.__test.readState().watchers['pr:o/r#session-pr'].seenComments, { 41: 6844038761 })
+    })
+  } finally {
+    if (previousNoPoll === undefined) delete process.env.DSH_SUPERAGENT_NO_POLL
+    else process.env.DSH_SUPERAGENT_NO_POLL = previousNoPoll
+  }
+})
+
+test('watch_pr_ack：多条 PR 守没给 repo → 要求指定', async () => {
+  const previousNoPoll = process.env.DSH_SUPERAGENT_NO_POLL
+  process.env.DSH_SUPERAGENT_NO_POLL = '1'
+  try {
+    await withPrState(async () => {
+      const mod = await prModule('pr-ack-ambiguous')
+      const tools = []
+      mod.apply({
+        tools: { register: (tool) => tools.push(tool) },
+        webServer: { register: () => () => {} },
+        agents: { currentInitiator: () => ({ id: 'session-pr' }), get: () => null },
+        get: () => null,
+        effect: (fn) => fn(),
+        inject: () => {},
+      })
+      const state = mod.__test.readState()
+      state.watchers = {
+        'pr:o/r#session-pr': prEntry({ seenComments: {} }),
+        'pr:o/r2#session-pr': prEntry({ id: 'pr:o/r2#session-pr', repo: 'o/r2', seenComments: {} }),
+      }
+      mod.__test.writeState(state)
+      const ack = tools.find((tool) => tool.name === 'watch_pr_ack')
+      const out = JSON.parse(await ack.execute({ pr: 1, commentId: 9, format: 'json' }))
+      assert.equal(out.ok, false)
+      assert.match(String(out.error), /repo/)
+      assert.match(String(out.error), /o\/r/)
+      assert.match(String(out.error), /o\/r2/)
+    })
+  } finally {
+    if (previousNoPoll === undefined) delete process.env.DSH_SUPERAGENT_NO_POLL
+    else process.env.DSH_SUPERAGENT_NO_POLL = previousNoPoll
+  }
+})
+
+test('watch_pr_ack：没有 PR 守 → 报错', async () => {
+  const previousNoPoll = process.env.DSH_SUPERAGENT_NO_POLL
+  process.env.DSH_SUPERAGENT_NO_POLL = '1'
+  try {
+    await withPrState(async () => {
+      const mod = await prModule('pr-ack-noagent')
+      const tools = []
+      mod.apply({
+        tools: { register: (tool) => tools.push(tool) },
+        webServer: { register: () => () => {} },
+        agents: { currentInitiator: () => ({ id: 'session-pr' }), get: () => null },
+        get: () => null,
+        effect: (fn) => fn(),
+        inject: () => {},
+      })
+      const ack = tools.find((tool) => tool.name === 'watch_pr_ack')
+      const out = JSON.parse(await ack.execute({ repo: 'o/r', pr: 1, commentId: 9, format: 'json' }))
+      assert.equal(out.ok, false)
+      assert.match(String(out.error), /PR 守/)
+    })
+  } finally {
+    if (previousNoPoll === undefined) delete process.env.DSH_SUPERAGENT_NO_POLL
+    else process.env.DSH_SUPERAGENT_NO_POLL = previousNoPoll
+  }
+})
+
+test('watch_pr_ack：不传 commentId 且拿不到最新 → 报错而不是瞎推', async () => {
+  const previousNoPoll = process.env.DSH_SUPERAGENT_NO_POLL
+  process.env.DSH_SUPERAGENT_NO_POLL = '1'
+  try {
+    await withPrState(async () => {
+      const mod = await prModule('pr-ack-nofetch')
+      const tools = []
+      mod.apply({
+        tools: { register: (tool) => tools.push(tool) },
+        webServer: { register: () => () => {} },
+        agents: { currentInitiator: () => ({ id: 'session-pr' }), get: () => null },
+        get: () => null,
+        effect: (fn) => fn(),
+        inject: () => {},
+      })
+      const state = mod.__test.readState()
+      state.watchers = { 'pr:o/r#session-pr': prEntry({ seenComments: { 7: 3 } }) }
+      mod.__test.writeState(state)
+      const ack = tools.find((tool) => tool.name === 'watch_pr_ack')
+      // offline 下 gh 返回的对象不是数组 → 拿不到最新评论 → 必须报错，不能把水位推到 undefined
+      const out = JSON.parse(await ack.execute({ repo: 'o/r', pr: 7, format: 'json' }))
+      assert.equal(out.ok, false)
+      assert.match(String(out.error), /最新评论/)
+      assert.deepEqual(mod.__test.readState().watchers['pr:o/r#session-pr'].seenComments, { 7: 3 }, '失败不动水位')
+    })
+  } finally {
+    if (previousNoPoll === undefined) delete process.env.DSH_SUPERAGENT_NO_POLL
+    else process.env.DSH_SUPERAGENT_NO_POLL = previousNoPoll
+  }
+})

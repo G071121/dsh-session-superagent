@@ -215,6 +215,18 @@ GET /repos/{base}/pulls/{n}/comments?comment_type=pr_comment&direction=desc&per_
 { "repo": "…", "delete": false }
 ```
 
+### `watch_pr_ack`
+
+```jsonc
+{ "repo": "…", "pr": 41, "commentId": 6844038761, "format": "text" }
+```
+
+把某个 PR 的评论水位推到指定 id（`commentId` 省略 = 现查最新一条）。
+
+- 只前进不回退（`advanceSeen` 的 max 语义）；
+- 只动本会话在该仓库的 PR 守；多条守且没给 `repo` 时报错要求指定；
+- 失败（拿不到最新评论 / 守已被删）不动水位，返回 `ok: false`。
+
 ---
 
 ## 七、面板 UI
