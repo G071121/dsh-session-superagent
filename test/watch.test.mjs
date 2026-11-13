@@ -1611,6 +1611,36 @@ test('真正发出去之后才推进水位，且记账（T20：入队即记账�
   assert.match(ok.eventText, /#42/)
 })
 
+test('水位只推「这次列出去的」：没列出的条目下一轮还要能提（T38：整批 fresh 全进水位 = 静默丢弃）', async () => {
+  const { planWakeSettlement } = await import('../lib/watch.js')
+  const fresh = [
+    { number: 11, updated_at: '2026-11-05T00:01:00.000Z' },
+    { number: 12, updated_at: '2026-11-05T00:02:00.000Z' },
+    { number: 13, updated_at: '2026-11-05T00:03:00.000Z' },
+  ]
+  const listed = fresh.slice(0, 2)
+  const entry = { seen: {}, cursor: '2026-11-01T00:00:00.000Z', wakeTimes: [], history: [], silentWakes: 0 }
+  const ok = planWakeSettlement(entry, { ok: true, fresh, listed, now: 1770000000000 })
+  assert.deepEqual(Object.keys(ok.seen).sort(), ['11', '12'], '只有列出去的进 seen')
+  assert.equal(ok.cursor, entry.cursor, '没全列出时全局水位不许前移（否则 #13 被 floor 挡住）')
+  // 全部列出去时才推全局水位
+  const all = planWakeSettlement(entry, { ok: true, fresh: listed, listed, now: 1770000000000 })
+  assert.equal(all.cursor, '2026-11-05T00:02:00.000Z', '全列出时水位推到这批最新')
+})
+
+test('「静默丢弃」回归：只列了 2/3 条时，第 3 条下一轮仍是 fresh', async () => {
+  const { planWakeSettlement, partitionItems } = await import('../lib/watch.js')
+  const items = [
+    { number: 21, updated_at: '2026-11-05T00:01:00.000Z' },
+    { number: 22, updated_at: '2026-11-05T00:02:00.000Z' },
+    { number: 23, updated_at: '2026-11-05T00:03:00.000Z' },
+  ]
+  const entry = { seen: {}, cursor: '2026-11-01T00:00:00.000Z', wakeTimes: [], history: [], silentWakes: 0 }
+  const settled = planWakeSettlement(entry, { ok: true, fresh: items, listed: items.slice(0, 2), now: 1770000000000 })
+  const { fresh } = partitionItems(items, { seen: settled.seen, cursor: settled.cursor }, {})
+  assert.deepEqual(fresh.map((item) => item.number), [23], '没列出的 #23 必须还能被提，不能静默消失')
+})
+
 test('失败的唤醒也要进 history（客户能看到「叫过但没叫醒」）', async () => {
   const { planWakeSettlement } = await import('../lib/watch.js')
   const res = planWakeSettlement({ history: [] }, { ok: false, reason: 'session not live', fresh: [{ number: 7 }] })
