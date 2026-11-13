@@ -3,7 +3,7 @@ import test from 'node:test'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tempDir, assertTempStateDir } from './fixtures/tmpdir.mjs'
-import { migrateState, CURRENT_STATE_SCHEMA } from '../lib/state-migration.js'
+import { migrateState, migratePrWatchers, CURRENT_STATE_SCHEMA } from '../lib/state-migration.js'
 
 test('v0 历史状态只补 schemaVersion，已有 watcher 与扩展字段原样保留', () => {
   const legacy = { watchers: { 'a/b#s1': { repo: 'a/b', enabled: true } }, custom: { keep: 1 } }
@@ -52,4 +52,26 @@ test('主文件是未来版本时退回可读备份，并把迁移后的备份�
   const repaired = JSON.parse(readFileSync(file, 'utf8'))
   assert.equal(repaired.schemaVersion, CURRENT_STATE_SCHEMA)
   assert.equal(repaired.watchers['a/b#s1'].repo, 'a/b')
+})
+
+test('migratePrWatchers 给老 watcher 补 kind:issue', () => {
+  const out = migratePrWatchers({ watchers: { 'o/r#s1': { repo: 'o/r' } } })
+  assert.equal(out.watchers['o/r#s1'].kind, 'issue')
+})
+
+test('migratePrWatchers 给 pr: 前缀补 kind:pr 与 seenComments', () => {
+  const out = migratePrWatchers({ watchers: { 'pr:o/r#s1': { repo: 'o/r' } } })
+  assert.equal(out.watchers['pr:o/r#s1'].kind, 'pr')
+  assert.deepEqual(out.watchers['pr:o/r#s1'].seenComments, {})
+})
+
+test('migratePrWatchers 幂等', () => {
+  const once = migratePrWatchers({ watchers: { 'pr:o/r#s1': { repo: 'o/r', kind: 'pr', seenComments: { 1: 2 } } } })
+  const twice = migratePrWatchers(once)
+  assert.deepEqual(twice, once)
+})
+
+test('migratePrWatchers 保留未知字段', () => {
+  const out = migratePrWatchers({ watchers: { 'o/r#s1': { repo: 'o/r', custom: 1 } } })
+  assert.equal(out.watchers['o/r#s1'].custom, 1)
 })
