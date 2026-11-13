@@ -66,7 +66,7 @@ const TARGETS = [
   'bin/check.mjs',
   'package.json', 'cordis.patch.yml', 'README.md', 'CHANGELOG.md', 'LICENSE',
   'assets/icon-180.png', 'assets/icon-app.png',
-  'lib/index.js', 'lib/watch.js', 'lib/gh-format.js', 'lib/gitee.js', 'lib/gates.js', 'lib/redact.js', 'lib/body.js', 'lib/state-migration.js', 'lib/update.js', 'lib/semver.js',
+  'lib/index.js', 'lib/watch.js', 'lib/gh-format.js', 'lib/pr-watch.js', 'lib/gitee.js', 'lib/gates.js', 'lib/redact.js', 'lib/body.js', 'lib/state-migration.js', 'lib/update.js', 'lib/semver.js',
 ]
 
 // 反向守卫（S1）：TARGETS 里的每一条都必须真的在仓库里。

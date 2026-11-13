@@ -489,7 +489,10 @@ test('profile 里整个 lib/ 目录缺失：--check 点名并 exit 1（旧实现
 
   const check = runSync('--check', '--dir', DEST)
   assert.equal(check.code, 1, 'profile 缺整个 lib 目录（--repair 能修）：' + check.out)
-  assert.match(check.out, /缺失 10 \/ 断链 0 \/ 陈旧 0 \/ 门禁子包漂移 0/, '10 个 lib 文件都要计入缺失：' + check.out)
+  // 数量从 TARGETS 派生，不写死：新增一个 lib/ 模块就要改常量，这条用例会以「改清单的人没改这里」为由变红，
+  // 而它真正要证明的是「整个 lib 目录下每一条都计入了缺失」。
+  const libCount = scriptTargets().filter((rel) => rel.startsWith('lib/')).length
+  assert.match(check.out, new RegExp('缺失 ' + libCount + ' \\/ 断链 0 \\/ 陈旧 0 \\/ 门禁子包漂移 0'), libCount + ' 个 lib 文件都要计入缺失：' + check.out)
   assert.match(check.out, /缺失\s+lib\/（profile 里没有整个 lib 目录/, '要点名缺的是整个目录：' + check.out)
   assert.doesNotMatch(check.out, /ENOENT/, '旧实现在这里 readdirSync 抛 ENOENT 栈：' + check.out)
 
