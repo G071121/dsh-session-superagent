@@ -2,6 +2,100 @@
 
 格式参照 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Added
+
+- **贡献归属进入插件默认 preflight**（PR CI 执行，本地 / main push 为 SKIP，不强制日常联网）：
+  维护者 PR 与客户原 PR 共享外部非 merge 提交时直接失败并指回原 PR，避免重复功能入口掩盖贡献者；
+  提交声明修复 issue 时，采用外部正文 / 评论中的 diff、JS / TS 代码必须有对应 `Co-authored-by`，
+  仅引用现状源码的复现块不误报，未采用代码可用 `Attribution-Skip: @login #N` 显式排除。
+  新增 `scripts/check-pr-attribution.mjs` 与 **23** 条离线 / 传输 / 误判回归；真实复核能拦截
+  PR #49 的三个 @iJetLi 共享提交、放行原 PR #41，并在 PR #43 精确指出 fixriver 的代码署名缺失。
+
+- **页签名称可设置**（只改 `conversation.view` 的 label，不动会话标题 / 插件包名 / 唤醒抬头 / ack 标签）：
+  会话头第二个 row 上「对话 / 轨迹 / **主理鱼**」这一排里，主理鱼注册的那个页签名称现在可在
+  设置 → 来源 → 「页签名称」里改；保存后当前 GUI 的页签立即变，刷新后仍保持。
+- **名称只有一份品牌语义**（复用 issue #11 的 `brandName` 链，不另造字段）：
+  本地显示覆盖（本浏览器 `localStorage`）> `/state.brandName` > 默认「主理鱼」。
+  未设覆盖时页签跟随插件配置的 `brandName`；`/state` 响应在客户端唯一出口 `call()` 里同步，不额外发请求。
+- 归一化复用 `normalizeBrandName` 的规则（trim / 压平换行 / 空值回落），再按**码点**截断到 24 个字符 ——
+  `😀` 这类增补平面字符不会被劈成半个代理对；留空（含全空格）= 恢复默认并真的删掉本地覆盖。
+- 更新方式：宿主只在 `register()`/`dispose()` 时重算页签文案（`viewTabs()` 读
+  `resolveSlotLabel(options.label)`，由 `slots.subscribe('conversation.view')` 驱动），
+  所以改名走「先释放、再按同 id / 同 order / 同 component 重注册」，列表里始终只有一条
+  `session-superagent-desk`。
+- **作用域**：`localStorage` 是**本浏览器 profile** 级（同一浏览器的所有会话共用），不同步服务端、
+  不同步其他设备。存储不可用（隐私模式 / 配额满 / 写入或删除抛错）时如实提示
+  「本次会话内有效，刷新后回到默认」—— 保存与恢复默认两条路径都**不伪称已持久化**。
+- **跨页面同步**：同一浏览器的另一个标签页改了名字，本页收到 `storage` 事件后**回 `localStorage` 读最新值**
+  再决定要不要重注册 —— 别人设了**新的自定义名就跟随新名**（不是回退到品牌名），只有删除覆盖才回品牌名；
+  与本键无关的写入不动页签。
+- 门禁：新增 **17** 条用例（新增功能 12 条：默认 / 跟随 brandName / 覆盖优先级 / 立即更新 / 空值回退 /
+  读异常回退 / 写失败回退 / 恢复默认删除失败回退 / 跨页面 storage 新名与删除 / 码点截断 /
+  与 `normalizeBrandName` 同源 / 重注册不重复；M1 修复 5 条见 Fixed），全量 **992/992**；
+  UI 体检 **11/11 = 100**；浅色不达组 16 组、深色 13 组，与基线持平
+  （新字段复用 `p.dt-hint`，没有新增对比度组）。
+
+### Fixed
+
+- **POSIX 凭证权限收紧静默失败**：`hardenSecretsFile` 现在从 `node:fs` 导入 `chmodSync`，避免 Linux 等 POSIX 平台的
+  `ReferenceError` 被捕获后仅返回 `failed`；跨平台回归覆盖 Windows 模拟 POSIX 与真实 POSIX 的 `0600` 权限位。
+- **外部改了页签名后，面板里的草稿还是旧名，再点保存会把别人的新名覆盖回去**（终审 M1）：订阅者现在收到
+  `(next, previous)`，面板用既有 `useEffect` 订阅，只有**干净草稿**（仍等于变化前的名字）才跟随新生效的名字，
+  用户正在编辑的脏草稿不动；`brandName` 晚到同样同步。
+- **`localStorage.clear()` 被忽略**：`storage` 事件的 `key === null` 现在按「删除覆盖」处理（回品牌名），
+  无关 key 仍然忽略。
+- M1 的五条回归（全量 992 里的一部分）：① 外部改名后**干净草稿**跟随新名，且再点保存不会把旧名写回去；
+  ② **脏草稿**不被外部事件覆盖；③ `brandName` 晚到同样只同步干净草稿；④ `localStorage.clear()`
+  （`key === null`）回默认且草稿跟随；⑤ 无关 key 的 `storage` 事件既不换页签也不动草稿。
+
+- **面板里编辑 Gitee 守「保存」会静默新建一条 GitHub 孪生守**（PR #42，@iJetLi 报告；0.10.12 真机）：`saveEdit` 提交的
+  `repo` 直接取 `/state` 的 `watcher.repo`，而那是**规范化后**的 `owner/name`（provider 单独一个字段），
+  没有 `gitee:` 前缀；服务端 `parseRepoSpec` 只认 `gitee:` 前缀 / `gitee.com` URL 定 provider，
+  其余一律判成 GitHub ⇒ id 从 `gitee:owner/name#session` 变成 `owner/name#session`，
+  匹配不到已有守 ⇒ 走**新建**分支（`created = !state.watchers[id]`），于是静默多出一条每轮
+  `gh: Not Found (HTTP 404)` 的孪生守，而原来那条的间隔/过滤分毫不动 —— 症状是「改 600 秒保存后
+  仍是 180 秒」；暂停的同样只是 Gitee 那条，孪生守仍 `enabled: true` 在跑 ⇒「暂停了改也没用」。
+  修法：提交前按 `watcher.provider` 把 `gitee:` 前缀补回去（`watcherId(w)` 本来就带前缀，
+  暂停 / 删除 / 立刻一直是对的）。补行为级用例：编辑 Gitee 守保存时 `body.repo` 必须等于
+  `'gitee:' + repo`。
+  维护者复核（PR #42）：另补一条结构级用例 —— 保存体必须严格等于「定位键 + touched 字段」，
+  且 `parseRepoSpec(body.repo)` 解析出的 id 必须与 `/state` 里那条守逐字相同（GitHub 不加前缀、
+  Gitee 加前缀两种输入都钉住），复制了「静默新建孪生守」的真实服务端契约；旧实现变异
+  （改回 `repo: watcher.repo`）下作者用例与维护者用例同时红。单测数 969 → 970
+  （README / AGENTS 的基线数字待合并时同步）。
+- **REST 兜底把「最后一条评论」取成了最早一条**（Issue #39 Bug 2，PR #43）：GitHub 的 issue comments
+  接口**不认** `sort` / `direction`（那是 issue 列表的参数，传了会被静默忽略），旧兜底
+  `comments?per_page=1&sort=created&direction=desc` + `.[0]` 于是恒返回**最早**一条 —— 唤醒消息里的
+  「最后评论」从上线起一直停在第一条，会话误判成「对方没回复」后继续 ack 掉。修法：`lib/gh-format.js`
+  新增纯函数 `lastCommentArgs()` / `parseLastComment()`，改成 `per_page=100`（接口上限）+ `--paginate` +
+  `--jq '.[-1] | {login: .user.login, at: .created_at}'`；`--paginate` 下 `--jq` 是**逐页**执行的，
+  stdout 每页一行，解析取**最后一行有效记录**（跳过空行与空页的 `null`），空 / 坏 JSON / `login` 为空
+  一律 `null`，不阻断唤醒。`lib/index.js` 的 GraphQL 失败兜底改用它，删掉整段 `JSON.parse`。补 4 条用例
+  （严格参数形状 / 反向锁 `sort`·`direction`·`per_page=1`·`.[0]` 四种旧写法 / 多页 + CRLF + 空行 + 空页
+  `null` / 空与坏 JSON），旧实现 4 条全红，`.[0]` 与「取第一行」两次变异也各自变红；**Bug 1（ack 后同条
+  永不唤醒）按任务书未改语义**。
+- **卫星环删除确认层被 composer dock 裁剪、footer 点不到**（Issue #35，PR #45）：本地回退 `Modal`
+  （`dt-modal-root`，`position: fixed; inset: 0; z-index: 1000`）渲染在 `StatusOrbit` 子树里；
+  `conversation.composer.dock` 的祖先带 `transform` / `contain: layout paint` / `overflow: hidden` 时，
+  `fixed` 以该祖先为包含块，确认层的「取消 / 确认删除」被裁出视口。修法：回退 `Modal` 根节点改由宿主的
+  `require('react-dom').createPortal(root, document.body)` 渲染；`createPortal` 不可用或 `body` 不可挂载时
+  保持内联；宿主 DSH `Modal` 路径（主面板删除）不变，**没有自造第三套 Modal、没有建第二个 React root**。
+  补 1 条单测（portal 到 `document.body` + 取消 / 确认 / Escape / Tab 焦点圈 / 防重入）；
+  `scripts/verify-panel-chromium.mjs` 增加 8 条真实 Chromium 场景（64 → **72**：窄屏 390 / 桌面 1440
+  几何、footer 真实可点、Escape 关闭并回焦、确认只发一次 `delete` 且 403 留在确认层、取消、深浅截图），
+  证据目录默认仓库内 `tmp-artifacts/issue-35`，可用 `DSH_ISSUE35_ARTIFACTS` 重定向。
+- **Orbit 删除确认在小 / 矮视口中 footer 被裁且无法滚动**（用户实拍约 520×415；#45 portal 修复后仍存在）：
+  真实 Chromium 量得 portal 已挂到 `document.body`、dialog `transform:none`、`max-height:100%` 正常生效；
+  根因是 `.dt-modal` 的 `overflow:hidden`，而普通删除确认没有 `.dt-modal-body`，内容超高时没有可滚动容器。
+  最小修复为 dialog 自身 `overflow-x:hidden; overflow-y:auto`，并固定 header / description / footer `flex-shrink:0`；
+  既有 body 滚动、portal、焦点圈与 Escape 均保持不变。新增 1 条单测和 4 档真实 DOM 几何回归
+  （520×415 / 320 / 180 / 140）：修前 140 高度下按钮 `bottom=152 > 140` 且 wheel 后 `scrollTop=0`；
+  修后 wheel 滚到 48，按钮完整可见、可命中，Escape / 取消回焦圆环。全量 **993/993**、UI **11/11**、
+  Chromium **75/75**（当前 minimized 截图通道 SKIP 时总数；条件截图检查未注册）。真实 DSH WebView 未验，
+  Chromium + loopback 不等同 WebView。
+
 ## [0.10.12] - 2026-11-09 —— 门禁 v6（锁回收计龄、profile 真原子、模型证据入库）
 
 - 门禁子包 `@mycf711/dsh-gate` `0.1.4` → **`0.1.5`**：残留证据按「搬走时间」计龄，不再继承源锁 mtime。
