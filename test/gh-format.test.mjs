@@ -251,7 +251,7 @@ test('buildPrSearchQuery 带 repo 与 author:@me', async () => {
   assert.equal(
     q,
     'query{search(query:"repo:MYCF711/repo is:pr is:open author:@me",type:ISSUE,first:20)'
-      + '{nodes{... on PullRequest{number title isDraft headRepository{nameWithOwner}'
+      + '{nodes{... on PullRequest{number title isDraft headRefName headRepository{nameWithOwner}'
       + ' baseRepository{nameWithOwner} comments(last:10){nodes{databaseId author{login}'
       + ' createdAt body}}}}}}',
     '查询串与实测形状不一致：' + q,
@@ -283,7 +283,7 @@ test('parsePrSearch 解析真实返回形状', async () => {
   const { parsePrSearch } = await import('../lib/gh-format.js')
   assert.equal(typeof parsePrSearch, 'function', '缺少 parsePrSearch 纯函数（Task 2）')
   const stdout = JSON.stringify({ data: { search: { nodes: [{
-    number: 48, title: 'fix', isDraft: false,
+    number: 48, title: 'fix', isDraft: false, headRefName: 'fix/a',
     headRepository: { nameWithOwner: 'iJetLi/repo' },
     baseRepository: { nameWithOwner: 'MYCF711/repo' },
     comments: { nodes: [{ databaseId: 6843186090, author: { login: 'MYCF711' }, createdAt: '2026-11-13T03:46:07Z', body: 'ok' }] },
@@ -296,6 +296,10 @@ test('parsePrSearch 解析真实返回形状', async () => {
   assert.equal(out.prs[0].isDraft, false)
   assert.equal(out.prs[0].headRepo, 'iJetLi/repo')
   assert.equal(out.prs[0].baseRepo, 'MYCF711/repo')
+  // 分支名：唤醒消息里要显示（Gitee 侧对应 head.ref）
+  assert.equal(out.prs[0].headRef, 'fix/a')
+  // 缺 headRefName 时给 null，不能抛（fork 已删除 / 权限不足时上游可能不给）
+  assert.equal(parsePrSearch(JSON.stringify({ data: { search: { nodes: [{ number: 1, title: 't' }] } } })).prs[0].headRef, null)
   assert.equal(out.prs[0].comments[0].id, 6843186090)   // databaseId → id
   assert.equal(out.prs[0].comments[0].author, 'MYCF711')
   assert.equal(out.prs[0].comments[0].createdAt, '2026-11-13T03:46:07Z')
