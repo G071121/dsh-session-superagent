@@ -98,8 +98,6 @@ const hasOther = fresh.some(c => c.author.login !== self)
     "intervalSec": 120,
     "enabled": true,
     "observe": false,
-    "isolated": true,
-    "workdir": null,
     "activeHours": null,
     "audit": {
       "enabled": false,          // checkbox 1：审计
@@ -195,8 +193,6 @@ GET /repos/{base}/pulls/{n}/comments?comment_type=pr_comment&direction=desc&per_
   "adversarialAudit": false,                 // 可选，默认 false
   "auditMode": "subagent",                   // 可选，inline | subagent，默认 subagent
   "observe": false,                          // 可选，只记录不唤醒
-  "isolated": true,                          // 可选，默认 true
-  "workdir": null,                           // 可选
   "activeHours": null,                       // 可选，如 "09:00-23:00"
   "goal": null,                              // 可选，追加到唤醒消息
   "format": "text"                           // 可选，text | json
@@ -251,8 +247,12 @@ watcher 列表里新增类型徽标：
 | 对抗性审计 | switch | off | checkbox 2 |
 | 执行方式 | 分段 `inline` / `subagent` | subagent | **两个 switch 都关时 disabled** |
 | 观察模式 | switch | off | |
-| 隔离 worktree | switch | on | |
 | 活跃时段 | 文本 | — | |
+
+**PR 守不做隔离执行**：`prepareIsolation` 要在 `entry.workdir` 的本地仓库里建 worktree，
+而 PR 在别人的仓库，建出来的树对修复毫无用处。所以 `watch_pr_start` 不暴露 `isolated` / `workdir`，
+`/state` 与 `watch_pr_status` 也不返回，面板在「对外发出的 PR」类型下不渲染这四个控件（2026-11-13 review B7）。
+issue 守的隔离能力不受影响。
 
 **UI 硬约束**（AGENTS.md 第〇节）：复用 DSH 官方结构树 + `--dsw-alias-*` token，
 改完出双主题图 + `ui-audit` 100 分 + 文案快照 `--write`。

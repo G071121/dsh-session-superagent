@@ -6079,3 +6079,45 @@ test('M1：无关 key 的 storage 事件仍然忽略', () => {
   assert.equal(liveDesk(client).opts.label, '主理鱼', '无关 key 不改页签')
   assert.equal(client.stateCalls().filter((call) => call.index === draftSlot()).length, 0, '也不动草稿')
 })
+
+test('B5：同仓库同会话的 issue 守与 PR 守并存时，点 PR 行只展开 PR 编辑器', () => {
+  const { registrations, render } = loadClient()
+  const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
+  const snapshot = {
+    loading: false, error: null,
+    body: {
+      sessionGoal: null, sessionTitle: '会话',
+      credentials: { token: 'configured', sshKeyPath: 'none' },
+      watchers: [
+        watcher('o/r', { id: 'o/r#session-o/r', kind: 'issue', enabled: true }),
+        watcher('o/r', { id: 'pr:o/r#session-o/r', kind: 'pr', audit: true, adversarialAudit: false, auditMode: 'inline', enabled: true }),
+      ],
+    },
+  }
+  // 点 PR 行（editing 是完整 kind key）：只有 PR 表单会渲染「审计 / 对抗性审计 / 执行方式」。
+  // dirty 才会渲染 SaveBar：带一个和 snapshot 不同的 draft。
+  const nodes = walk(render(desk, deskQueue(snapshot, 'pr:o/r#session-o/r', { audit: true, adversarialAudit: true })))
+  const buttons = nodes.filter((n) => n.type === 'button')
+    .map((b) => (b.props.children || []).filter((c) => typeof c === 'string').join(''))
+  assert.ok(buttons.includes('保存'), '点 PR 行必须展开 PR 编辑器（有保存按钮）：' + buttons.join('|'))
+})
+
+test('B7：PR 守的表单不出现隔离执行 / 隔离工作目录，issue 守仍然有', () => {
+  const { registrations, render } = loadClient()
+  const desk = registrations.find((r) => r.opts.id === 'session-superagent-desk')
+  const snapshot = (kind, id) => ({
+    loading: false, error: null,
+    body: {
+      sessionGoal: null, sessionTitle: '会话',
+      credentials: { token: 'configured', sshKeyPath: 'none' },
+      watchers: [watcher('o/r', { id, kind, enabled: true })],
+    },
+  })
+  // 控件的 label 是 Field 的 #text，不是 button 文案。
+  const labelsOf = (nodes) => nodes.filter((n) => n.type === '#text').map((n) => n.text)
+  const prLabels = labelsOf(walk(render(desk, deskQueue(snapshot('pr', 'pr:o/r#session-o/r'), 'pr:o/r#session-o/r'))))
+  assert.ok(!prLabels.includes('隔离执行'), 'PR 守不该有「隔离执行」：' + prLabels.join('|'))
+  assert.ok(!prLabels.includes('隔离工作目录'), 'PR 守不该有「隔离工作目录」')
+  const issueLabels = labelsOf(walk(render(desk, deskQueue(snapshot('issue', 'o/r#session-o/r'), 'o/r#session-o/r'))))
+  assert.ok(issueLabels.includes('隔离执行'), 'issue 守的隔离能力不受影响')
+})

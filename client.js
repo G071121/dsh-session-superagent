@@ -1306,14 +1306,16 @@ window.__ModuleLoader__.load({
       { key: 'onlyAssigned', label: '只看已指派', kind: 'switch', hint: '只处理已指派给人的条目' },
       { key: 'assignee', label: '只看指派给谁', kind: 'text', when: (value) => !!value.onlyAssigned, placeholder: 'GitHub 登录名，留空 = 只要有指派就行' },
       { key: 'observe', label: '仅观察', kind: 'switch', hint: '仅观察（只记录本会唤醒哪几条，不真唤醒）' },
-      { key: 'isolated', label: '隔离执行', kind: 'switch', hint: ISOLATED_HINT },
+      // PR 守不做隔离执行：worktree 要建在本地仓库里，而 PR 在别人仓库，建出来的树没用。
+      // 所以这四个控件在「对外发出的 PR」类型下整个不渲染（2026-11-13 review B7）。
+      { key: 'isolated', label: '隔离执行', kind: 'switch', when: (value) => value.watchKind !== 'pr', hint: ISOLATED_HINT },
       { key: 'batchLimit', label: '单次最多唤醒条数', kind: 'number', advanced: true, min: 1, max: 20, placeholder: (defaults) => String(defaults.batchLimit ?? 5) + '（1-20）' },
       { key: 'maxWakesPerHour', label: '每小时最多唤醒次数', kind: 'number', advanced: true, min: 1, max: 60, placeholder: (defaults) => String(defaults.maxWakesPerHour ?? 6) + '（1-60）' },
       { key: 'sessionMaxWakes', label: '这条会话每小时最多被唤醒', kind: 'number', advanced: true, min: 1, max: 60, placeholder: (defaults) => String(defaults.sessionMaxWakes ?? 12) + '（1-60）', hint: '跨所有守累计：守 5 个仓库时，光有单守上限挡不住叠加' },
       { key: 'priority', label: PRIORITY_LABEL, kind: 'priority', advanced: true, hint: '全部关掉时按 GitHub 的「最近更新」顺序处理' },
-      { key: 'workdir', label: '隔离工作目录', kind: 'text', advanced: true, when: (value) => !!value.isolated, placeholder: '绝对路径，留空 = 当前工作目录' },
-      { key: 'isolateKeepDays', label: '隔离区保留天数', kind: 'number', advanced: true, when: (value) => !!value.isolated, min: 1, max: 30, placeholder: (defaults) => String(defaults.isolateKeepDays ?? 3) + '（1-30）', hint: '每次唤醒前回收这个天数之前的一次性工作区；留空用默认天数' },
-      { key: 'maxIsolated', label: '最多保留几个隔离区', kind: 'number', advanced: true, when: (value) => !!value.isolated, min: 1, max: 50, placeholder: '5（1-50）', hint: '天数之外的第二道线：超出就回收最旧的（不影响正在用的那个）' },
+      { key: 'workdir', label: '隔离工作目录', kind: 'text', advanced: true, when: (value) => value.watchKind !== 'pr' && !!value.isolated, placeholder: '绝对路径，留空 = 当前工作目录' },
+      { key: 'isolateKeepDays', label: '隔离区保留天数', kind: 'number', advanced: true, when: (value) => value.watchKind !== 'pr' && !!value.isolated, min: 1, max: 30, placeholder: (defaults) => String(defaults.isolateKeepDays ?? 3) + '（1-30）', hint: '每次唤醒前回收这个天数之前的一次性工作区；留空用默认天数' },
+      { key: 'maxIsolated', label: '最多保留几个隔离区', kind: 'number', advanced: true, when: (value) => value.watchKind !== 'pr' && !!value.isolated, min: 1, max: 50, placeholder: '5（1-50）', hint: '天数之外的第二道线：超出就回收最旧的（不影响正在用的那个）' },
     ]
 
     /** superagent Field 的 DOM：label 与 InfoTip 是兄弟节点，控件拿同一个唯一 id。 */
@@ -3384,7 +3386,11 @@ window.__ModuleLoader__.load({
           priorityStale: Boolean(watcher.priority && watcher.priority.stale) === true,
         })
       }
-      const editingWatcher = watchers.find((watcher) => watcher.repo + '#' + watcher.sessionId === editing)
+      // 同仓库同会话的 issue 守与 PR 守 repo#sessionId 一模一样：编辑目标必须带上 kind 前缀，
+      // 否则点 PR 行会展开 issue 的表单（2026-11-13 review 实测 prClickEditingCalls=[{next:"o/r#s"}]、
+      // prEditForms:0 / issueEditForms:1）。与渲染时的行 key 保持同一套算法。
+      const watcherKeyOf = (watcher) => (watcher.kind === 'pr' ? 'pr:' : '') + (watcher.repo || '') + '#' + (watcher.sessionId || '')
+      const editingWatcher = watchers.find((watcher) => watcherKeyOf(watcher) === editing)
       const editingOpening = editSnapshotRef.current && editSnapshotRef.current.key === editing
         ? editSnapshotRef.current.values
         : editingWatcher ? watcherValuesFrom(editingWatcher, ACK_DEFAULTS) : null
@@ -3395,7 +3401,7 @@ window.__ModuleLoader__.load({
       // dirty 折叠在确认期间挂起 editing id，但原表单仍挂载；取消/确认之前绝不清它的 draft。
       const displayedEditing = editing || pendingCollapseKey
       const toggleWatcherEditor = (watcher) => {
-        const key = watcher.repo + '#' + watcher.sessionId
+        const key = watcherKeyOf(watcher)
         const nextKey = editing === key ? null : key
         if (editing && editingDirty) {
           watcherDraftConfirmedRef.current = false
