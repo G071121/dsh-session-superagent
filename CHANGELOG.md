@@ -39,6 +39,8 @@
 
 ### Fixed
 
+- **POSIX 凭证权限收紧静默失败**：`hardenSecretsFile` 现在从 `node:fs` 导入 `chmodSync`，避免 Linux 等 POSIX 平台的
+  `ReferenceError` 被捕获后仅返回 `failed`；跨平台回归覆盖 Windows 模拟 POSIX 与真实 POSIX 的 `0600` 权限位。
 - **外部改了页签名后，面板里的草稿还是旧名，再点保存会把别人的新名覆盖回去**（终审 M1）：订阅者现在收到
   `(next, previous)`，面板用既有 `useEffect` 订阅，只有**干净草稿**（仍等于变化前的名字）才跟随新生效的名字，
   用户正在编辑的脏草稿不动；`brandName` 晚到同样同步。
