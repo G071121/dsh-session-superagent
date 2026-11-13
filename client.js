@@ -1536,10 +1536,16 @@ window.__ModuleLoader__.load({
       const collapsedAdvanced = h('span', { className: 'dt-row-meta' },
         h('span', { className: 'dt-hint' }, '限额、优先级与隔离保留策略'),
         // 收起时只展示默认值摘要，不挂载高级 input；默认值仍来自 /state.defaults。
-        WATCHER_FIELD_SCHEMA.filter((spec) => spec.advanced && spec.kind === 'number').map((spec) => {
-          const placeholder = typeof spec.placeholder === 'function' ? spec.placeholder(defaults) : spec.placeholder
-          return h('span', { key: spec.key, className: 'dt-hint', placeholder }, spec.label + ' ' + placeholder)
-        }))
+        // `when` 必须和 renderField 走同一套判断：只按 advanced+number 过滤时，
+        // 真正的高级 input 已经被隐藏，摘要却仍把「隔离区保留天数 / 最多保留几个隔离区」
+        // 显示出来（2026-11-13 真实 Chromium 复验 B7 遗漏）。
+        WATCHER_FIELD_SCHEMA
+          .filter((spec) => spec.advanced && spec.kind === 'number')
+          .filter((spec) => !spec.when || spec.when(values))
+          .map((spec) => {
+            const placeholder = typeof spec.placeholder === 'function' ? spec.placeholder(defaults) : spec.placeholder
+            return h('span', { key: spec.key, className: 'dt-hint', placeholder }, spec.label + ' ' + placeholder)
+          }))
       const submitFromClick = (event) => submit(event)
       return h('form', {
         id: idPrefix, ref: formRef, className: 'dt-form dt-card', 'data-mode': mode, onSubmit: submit,

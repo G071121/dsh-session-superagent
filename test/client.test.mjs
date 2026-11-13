@@ -6115,9 +6115,19 @@ test('B7：PR 守的表单不出现隔离执行 / 隔离工作目录，issue 守
   })
   // 控件的 label 是 Field 的 #text，不是 button 文案。
   const labelsOf = (nodes) => nodes.filter((n) => n.type === '#text').map((n) => n.text)
-  const prLabels = labelsOf(walk(render(desk, deskQueue(snapshot('pr', 'pr:o/r#session-o/r'), 'pr:o/r#session-o/r'))))
+  const prNodes = walk(render(desk, deskQueue(snapshot('pr', 'pr:o/r#session-o/r'), 'pr:o/r#session-o/r')))
+  const prLabels = labelsOf(prNodes)
   assert.ok(!prLabels.includes('隔离执行'), 'PR 守不该有「隔离执行」：' + prLabels.join('|'))
   assert.ok(!prLabels.includes('隔离工作目录'), 'PR 守不该有「隔离工作目录」')
-  const issueLabels = labelsOf(walk(render(desk, deskQueue(snapshot('issue', 'o/r#session-o/r'), 'o/r#session-o/r'))))
+  // 高级设置收起时的摘要只按 advanced+number 过滤过一遍，`when` 没走 ——
+  // 隔离 input 被隐藏了，摘要却仍把这两个数字打出来（2026-11-13 真实 Chromium 复验）。
+  const prSummary = prLabels.join('\n')
+  assert.ok(!prSummary.includes('隔离区保留天数'), 'PR 守的收起摘要不该出现「隔离区保留天数」：' + prSummary)
+  assert.ok(!prSummary.includes('最多保留几个隔离区'), 'PR 守的收起摘要不该出现「最多保留几个隔离区」')
+  // issue 守必须原样保留：摘要里的隔离保留策略只在 isolated 打开时出现（四个 spec 都是这个条件）。
+  const issueLabels = labelsOf(walk(render(desk, deskQueue(
+    snapshot('issue', 'o/r#session-o/r'), 'o/r#session-o/r', { isolated: true }),
+  )))
   assert.ok(issueLabels.includes('隔离执行'), 'issue 守的隔离能力不受影响')
+  assert.ok(issueLabels.join('\n').includes('隔离区保留天数'), 'issue 守的收起摘要仍有隔离保留策略')
 })
