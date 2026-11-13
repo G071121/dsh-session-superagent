@@ -49,11 +49,16 @@ test('pickNewComments 按 id 水位过滤', () => {
 
 test('pickNewComments 兼容字符串 id', () => {
   const comments = [{ id: '10' }, { id: '2' }]
-  // 字符串 id 必须按数值比：'2' > 5 在字符串比较里是 true，会重复唤醒
+  // 一侧是 number 时 JS 会走 ToNumber，所以 '2' > 5 其实是 false —— 这条用例真正钉住的是
+  // 「id 被转成数值再比」，而不是字符串比较的陷阱。
   assert.deepEqual(pickNewComments(comments, 5).map((c) => Number(c.id)), [10])
-  // 边界：id 等于水位不算新；水位本身是字符串时也要按数值比
+  // 边界：id 等于水位不算新
   assert.deepEqual(pickNewComments(comments, 10).map((c) => Number(c.id)), [])
+  // 水位本身是字符串时也必须按数值比：实测 '10' > '5' 是 false（字符串比较），
+  // 只转 id 不转水位的实现会漏掉 id=10 这条（少唤醒 = 评论永久丢失）
   assert.deepEqual(pickNewComments(comments, '5').map((c) => Number(c.id)), [10])
+  // 两侧都是字符串：'2' > '10' 是 true（字符串比较），不转数值会重复唤醒 id=2
+  assert.deepEqual(pickNewComments([{ id: '2' }], '10').map((c) => Number(c.id)), [])
 })
 
 test('shouldWake：只有非本人评论才叫醒', () => {
@@ -111,15 +116,23 @@ test('buildPrWakeText 多条评论逐条引用', () => {
 })
 
 test('pruneSeen 移除已关闭 PR', () => {
-  assert.deepEqual(pruneSeen({ 48: 9, 41: 7 }, [48]), { 48: 9 })
+  const seen = { 48: 9, 41: 7 }
+  assert.deepEqual(pruneSeen(seen, [48]), { 48: 9 })
   // 空 open 列表 → 全部清掉；空 seen → 空对象
   assert.deepEqual(pruneSeen({ 48: 9 }, []), {})
   assert.deepEqual(pruneSeen({}, [48]), {})
+  // 不修改入参：水位是调用方的状态，纯函数只返回新对象
+  assert.deepEqual(seen, { 48: 9, 41: 7 })
 })
 
 test('advanceSeen 取较大水位', () => {
+  const seen = { 48: 9, 41: 7 }
   assert.deepEqual(advanceSeen({ 48: 5 }, [{ number: 48, latestId: 9 }, { number: 50, latestId: 3 }]), { 48: 9, 50: 3 })
   assert.deepEqual(advanceSeen({ 48: 9 }, [{ number: 48, latestId: 5 }]), { 48: 9 }) // 不回退
   // 未被更新的 PR 保留原水位
-  assert.deepEqual(advanceSeen({ 48: 9, 41: 7 }, [{ number: 48, latestId: 10 }]), { 48: 10, 41: 7 })
+  assert.deepEqual(advanceSeen(seen, [{ number: 48, latestId: 10 }]), { 48: 10, 41: 7 })
+  // 不修改入参
+  assert.deepEqual(seen, { 48: 9, 41: 7 })
+  // 非法 latestId 跳过：不能让 NaN 污染水位（NaN > prev 恒为 false，但显式断言更清楚）
+  assert.deepEqual(advanceSeen({ 48: 9 }, [{ number: 48, latestId: NaN }]), { 48: 9 })
 })
