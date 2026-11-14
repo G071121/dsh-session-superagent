@@ -2794,6 +2794,123 @@ test('watch_ack：只有 PR 守时明确报「这是 PR 守」，不去改 issue
   })
 })
 
+function issueAckEntry(over = {}) {
+  return {
+    id: 'o/r#session-a',
+    repo: 'o/r',
+    provider: 'github',
+    sessionId: 'session-a',
+    enabled: true,
+    ackLabel: 'A:done',
+    seen: {},
+    cursor: null,
+    lastAcked: null,
+    ...over,
+  }
+}
+
+async function callIssueAck(tag, { sessionId = 'session-a', watchers, args = {} }) {
+  let result
+  await withPrState(async () => {
+    const mod = await prModule(tag)
+    const tools = []
+    mod.apply({
+      tools: { register: (tool) => tools.push(tool) },
+      webServer: { register: () => () => {} },
+      agents: { currentInitiator: () => sessionId ? ({ id: sessionId }) : null, get: () => null },
+      get: () => null,
+      effect: (fn) => fn(),
+      inject: () => {},
+    })
+    const state = mod.__test.readState()
+    state.watchers = watchers
+    mod.__test.writeState(state)
+    const before = mod.__test.readState()
+    const ack = tools.find((tool) => tool.name === 'watch_ack')
+    const out = JSON.parse(await ack.execute({ number: 54, format: 'json', ...args }))
+    result = { out, before, after: mod.__test.readState() }
+  })
+  return result
+}
+
+test('issue #54：同 repo 两会话只返回并推进 currentInitiator=A 的 ackLabel 与水位', async () => {
+  const a = issueAckEntry({
+    seen: { 54: '2026-01-01T00:00:00.000Z' },
+    cursor: '2026-01-01T00:00:00.000Z',
+    lastAcked: { numbers: ['1'], label: 'A:done', at: '2026-01-01T00:00:00.000Z' },
+  })
+  // B 故意放在第一条：旧实现按 repo find 会错误选中它。
+  const b = issueAckEntry({
+    id: 'o/r#session-b', sessionId: 'session-b', ackLabel: 'B:done',
+    seen: { 54: '2026-02-01T00:00:00.000Z' },
+    cursor: '2026-02-01T00:00:00.000Z',
+    lastAcked: { numbers: ['2'], label: 'B:done', at: '2026-02-01T00:00:00.000Z' },
+  })
+  const { out, before, after } = await callIssueAck('issue-54-session-isolation', {
+    watchers: { [b.id]: b, [a.id]: a },
+    args: { repo: 'o/r' },
+  })
+  assert.equal(out.ok, true, JSON.stringify(out))
+  assert.equal(out.label, 'A:done', '返回标签必须来自 A，不得来自同 repo 的 B')
+  const afterA = after.watchers[a.id]
+  assert.equal(afterA.seen['54'], out.at, 'A 的 seen 必须前进到本次 ack 时间')
+  assert.equal(afterA.cursor, out.at, 'A 的 cursor 必须前进到本次 ack 时间')
+  assert.deepEqual(afterA.lastAcked, { numbers: ['54'], label: 'A:done', at: out.at })
+  assert.deepEqual(after.watchers[b.id], before.watchers[b.id], 'B 的 seen/cursor/lastAcked 等全部字段必须原样不变')
+})
+
+test('issue #54：无 live session 明确拒绝，不回退到第一条守', async () => {
+  const b = issueAckEntry({ id: 'o/r#session-b', sessionId: 'session-b', ackLabel: 'B:done' })
+  const { out, before, after } = await callIssueAck('issue-54-no-session', {
+    sessionId: null,
+    watchers: { [b.id]: b },
+  })
+  assert.equal(out.ok, false)
+  assert.match(String(out.error), /no live session/)
+  assert.match(String(out.error), /watch_ack/)
+  assert.deepEqual(after, before, '拒绝时任何会话的状态都不能变')
+})
+
+test('issue #54：省略 repo 且本会话有多条启用 issue 守时要求指定 repo', async () => {
+  const other = issueAckEntry({ id: 'o/other#session-b', repo: 'o/other', sessionId: 'session-b', ackLabel: 'B:done' })
+  const one = issueAckEntry({ id: 'o/one#session-a', repo: 'o/one' })
+  const two = issueAckEntry({ id: 'o/two#session-a', repo: 'o/two' })
+  const { out, before, after } = await callIssueAck('issue-54-ambiguous', {
+    watchers: { [other.id]: other, [one.id]: one, [two.id]: two },
+  })
+  assert.equal(out.ok, false)
+  assert.match(String(out.error), /repo/)
+  assert.match(String(out.error), /o\/one/)
+  assert.match(String(out.error), /o\/two/)
+  assert.doesNotMatch(String(out.error), /o\/other/, '歧义清单只列本会话的守')
+  assert.deepEqual(after, before, '歧义时不能静默推进第一条')
+})
+
+test('issue #54：其它会话的 PR 守不会触发本会话的 PR-only 提示', async () => {
+  const otherPr = prEntry({ id: 'pr:o/r#session-b', sessionId: 'session-b', seenComments: { 54: 3 } })
+  const { out, before, after } = await callIssueAck('issue-54-other-pr', {
+    watchers: { [otherPr.id]: otherPr },
+    args: { repo: 'o/r' },
+  })
+  assert.equal(out.ok, false)
+  assert.match(String(out.error), /本会话/)
+  assert.match(String(out.error), /其它会话/)
+  assert.doesNotMatch(String(out.error), /PR 守/, '其它会话有 PR 守不代表本会话是 PR-only')
+  assert.deepEqual(after, before)
+})
+
+test('issue #54：显式 repo 只有其它会话的守时明确报错且状态不动', async () => {
+  const b = issueAckEntry({ id: 'o/r#session-b', sessionId: 'session-b', ackLabel: 'B:done' })
+  const { out, before, after } = await callIssueAck('issue-54-other-repo', {
+    watchers: { [b.id]: b },
+    args: { repo: 'o/r' },
+  })
+  assert.equal(out.ok, false)
+  assert.match(String(out.error), /本会话/)
+  assert.match(String(out.error), /其它会话/)
+  assert.deepEqual(after, before, '不得给 B 打标签或推进 B 的水位')
+})
+
 test('pollPrOnce：首次同步走 REST 全量拉评论，之后走列表自带的 comments（A3）', async () => {
   await withPrState(async () => {
     const mod = await prModule('pr-a3-rest')
