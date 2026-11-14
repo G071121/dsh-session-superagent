@@ -2911,6 +2911,43 @@ test('issue #54：显式 repo 只有其它会话的守时明确报错且状态�
   assert.deepEqual(after, before, '不得给 B 打标签或推进 B 的水位')
 })
 
+test('issue #54：远端 await 期间并发删除守，明确返回本地水位未推进的失败', async () => {
+  await withPrState(async () => {
+    const mod = await prModule('issue-54-ack-delete-race')
+    const tools = []
+    mod.apply({
+      tools: { register: (tool) => tools.push(tool) },
+      webServer: { register: () => () => {} },
+      agents: { currentInitiator: () => ({ id: 'session-a' }), get: () => null },
+      get: () => null,
+      effect: (fn) => fn(),
+      inject: () => {},
+    })
+    const original = issueAckEntry({
+      seen: { 54: '2026-01-01T00:00:00.000Z' },
+      cursor: '2026-01-01T00:00:00.000Z',
+    })
+    mod.__test.writeState({ watchers: { [original.id]: original } })
+    const ack = tools.find((tool) => tool.name === 'watch_ack')
+    const stop = tools.find((tool) => tool.name === 'watch_stop')
+
+    // execute 在第一次 gh await 处让出；走真实 watch_stop 工具删除并写正式墓碑。
+    const pending = ack.execute({ repo: 'o/r', number: 54, format: 'json' })
+    const stopped = JSON.parse(await stop.execute({ repo: 'o/r', delete: true, format: 'json' }))
+    assert.equal(stopped.ok, true)
+    assert.equal(stopped.deleted, true)
+    const out = JSON.parse(await pending)
+
+    assert.equal(out.ok, false, '本地守已删除时不得把未结算的 ack 报成 ok:true')
+    assert.match(String(out.error), /远端标签可能已写入/)
+    assert.match(String(out.error), /本地水位未推进/)
+    assert.match(String(out.error), /删除或替换/)
+    const after = mod.__test.readState()
+    assert.deepEqual(after.watchers, {}, '并发删除不得被 ack 结算复活')
+    assert.equal(typeof after.deleted[original.id], 'string', '正式墓碑必须保留')
+  })
+})
+
 test('pollPrOnce：首次同步走 REST 全量拉评论，之后走列表自带的 comments（A3）', async () => {
   await withPrState(async () => {
     const mod = await prModule('pr-a3-rest')

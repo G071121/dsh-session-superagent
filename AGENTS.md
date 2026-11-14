@@ -131,7 +131,7 @@ node scripts/render-preview.mjs preview.html
 
 ## 十、当前基线
 
-0.11.0；全量 **1112/1112**、preflight **43 项**（贡献归属仅 PR CI 执行，本地 / main push 为 SKIP）、UI **11/11**。
+0.11.0；全量 **1113/1113**、preflight **43 项**（贡献归属仅 PR CI 执行，本地 / main push 为 SKIP）、UI **11/11**。
 未验：真实 Chromium 交互（本机缺 `ego-browser` 沙箱，`verify-panel-chromium.mjs` 直接 `node` 跑会 `taskSpace is not defined`）、
 真实 DSH WebView 重载后的读屏 / 触摸 / IME、真实 GitHub/Gitee 写操作。没有实测不得写成通过。
 

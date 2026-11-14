@@ -69,6 +69,7 @@
   省略 repo 且本会话有多条启用 issue 守时要求指定 repo，显式 repo 只有其它会话的守时明确报错。
   返回标签与最新状态里的 `entry.id` 始终来自同一条本会话守，其它会话状态不动；本会话 PR-only 的 B9 提示保留，
   其它会话的 PR 守不再造成误报。新增 5 条回归，覆盖双会话隔离、无 session、多守歧义、跨会话 PR-only 误报与跨会话 repo 拒绝。
+  远端 await 后若守已被删除或替换，则明确返回「远端标签可能已写入、本地水位未推进」的失败，不再报 `ok:true`（新增 1 条并发删除回归）。
 
 - **POSIX 凭证权限收紧静默失败**：`hardenSecretsFile` 现在从 `node:fs` 导入 `chmodSync`，避免 Linux 等 POSIX 平台的
   `ReferenceError` 被捕获后仅返回 `failed`；跨平台回归覆盖 Windows 模拟 POSIX 与真实 POSIX 的 `0600` 权限位。
